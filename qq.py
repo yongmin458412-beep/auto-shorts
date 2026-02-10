@@ -155,7 +155,6 @@ def _normalize_url(url: str) -> str:
     url = url.strip().strip('"').strip("'")
     if url.startswith("//"):
         url = "https:" + url
-    # Try to keep original quality for Naver images
     if "pstatic.net" in url and "?" in url:
         url = url.split("?", 1)[0]
     return url
@@ -206,7 +205,6 @@ def fetch_post_image_urls(url: str) -> List[str]:
     urls = extract_image_urls_from_html(response.text)
     if urls:
         return urls
-    # fallback: try mobile version if desktop URL provided
     if "blog.naver.com" in url and "m.blog.naver.com" not in url:
         mobile_url = url.replace("blog.naver.com", "m.blog.naver.com")
         try:
@@ -292,6 +290,7 @@ class AppConfig:
     trend_max_results: int
     approve_keywords: List[str]
     swap_keywords: List[str]
+    pixabay_api_key: str  # NEW: Pixabay Audio API
 
 
 def load_config() -> AppConfig:
@@ -342,6 +341,7 @@ def load_config() -> AppConfig:
         trend_max_results=int(_get_secret("TREND_MAX_RESULTS", "8") or 8),
         approve_keywords=_get_list("APPROVE_KEYWORDS") or ["승인", "approve", "ok", "yes"],
         swap_keywords=_get_list("SWAP_KEYWORDS") or ["교환", "swap", "change", "next"],
+        pixabay_api_key=_get_secret("PIXABAY_API_KEY", "") or "",  # NEW
     )
 
 
@@ -376,6 +376,202 @@ def normalize_hashtags(tags: List[str]) -> List[str]:
     return cleaned
 
 
+# ─────────────────────────────────────────────
+# NEW: 뿜 글 분위기 카테고리 분류
+# ─────────────────────────────────────────────
+
+# 지원 카테고리 (BGM 검색어 + 에셋 태그에 공통 사용)
+CONTENT_CATEGORIES = [
+    "humor",       # 유머/웃김
+    "touching",    # 감동/눈물
+    "shocking",    # 충격/반전
+    "heartwarming",# 훈훈/힐링
+    "cringe",      # 어이없음/공감
+    "exciting",    # 신남/에너지
+    "sad",         # 슬픔/공감
+    "anger",       # 분노/황당
+]
+
+# 카테고리 → Pixabay 검색 키워드 매핑
+BGM_CATEGORY_KEYWORDS: Dict[str, List[str]] = {
+    "humor":        ["funny", "comedic", "quirky upbeat"],
+    "touching":     ["emotional piano", "heartfelt", "touching cinematic"],
+    "shocking":     ["suspense", "dramatic tension", "thriller"],
+    "heartwarming": ["warm acoustic", "uplifting gentle", "feel good"],
+    "cringe":       ["awkward comedy", "silly funny", "quirky"],
+    "exciting":     ["energetic upbeat", "hype electronic", "motivation"],
+    "sad":          ["sad piano", "melancholy", "emotional"],
+    "anger":        ["intense dramatic", "aggressive rock", "tension"],
+}
+
+# 카테고리 → 에셋 tags 매핑 (기존 태그 시스템과 연결)
+CATEGORY_TO_ASSET_TAGS: Dict[str, List[str]] = {
+    "humor":        ["laugh", "awkward"],
+    "touching":     ["cute", "ending"],
+    "shocking":     ["shock", "wow"],
+    "heartwarming": ["cute", "plot"],
+    "cringe":       ["facepalm", "awkward"],
+    "exciting":     ["wow", "shock"],
+    "sad":          ["ending", "plot"],
+    "anger":        ["angry", "facepalm"],
+}
+
+
+def analyze_content_category(
+    config: AppConfig,
+    text: str,
+) -> str:
+    """뿜 글 텍스트를 분석해서 CONTENT_CATEGORIES 중 하나를 반환."""
+    if not config.openai_api_key or not text:
+        return "humor"
+    system_text = (
+        "You are a content mood classifier. "
+        "Given Korean text, classify its mood into exactly one category. "
+        f"Categories: {', '.join(CONTENT_CATEGORIES)}. "
+        "Return JSON only: {\"category\": \"...\"}"
+    )
+    user_text = f"Text: {text[:800]}"
+    try:
+        client = OpenAI(api_key=config.openai_api_key)
+        response = client.responses.create(
+            model=config.openai_model,
+            input=[
+                {"role": "system", "content": system_text},
+                {"role": "user", "content": user_text},
+            ],
+        )
+        output_text = getattr(response, "output_text", "") or ""
+        result = extract_json(output_text)
+        category = result.get("category", "humor")
+        if category in CONTENT_CATEGORIES:
+            return category
+    except Exception:
+        pass
+    return "humor"
+
+
+# ─────────────────────────────────────────────
+# NEW: Pixabay Audio BGM 자동 다운로드
+# ─────────────────────────────────────────────
+
+def fetch_bgm_from_pixabay(
+    api_key: str,
+    category: str,
+    output_dir: str,
+) -> Optional[str]:
+    """
+    카테고리에 맞는 BGM을 Pixabay에서 검색 후 다운로드.
+    성공하면 저장된 파일 경로 반환, 실패하면 None.
+    """
+    if not api_key:
+        return None
+    keywords = BGM_CATEGORY_KEYWORDS.get(category, ["upbeat"])
+    query = random.choice(keywords)
+    os.makedirs(output_dir, exist_ok=True)
+    try:
+        params = {
+            "key": api_key,
+            "q": query,
+            "media_type": "music",
+            "per_page": 10,
+            "safesearch": "true",
+        }
+        response = requests.get(
+            "https://pixabay.com/api/videos/",  # music endpoint
+            params=params,
+            timeout=30,
+        )
+        # Pixabay music API endpoint
+        music_params = {
+            "key": api_key,
+            "q": query,
+            "per_page": 10,
+        }
+        music_response = requests.get(
+            "https://pixabay.com/api/music/",
+            params=music_params,
+            timeout=30,
+        )
+        if music_response.status_code != 200:
+            return None
+        hits = music_response.json().get("hits", [])
+        if not hits:
+            return None
+        # 랜덤으로 하나 선택
+        hit = random.choice(hits[:5])
+        audio_url = hit.get("audio", {}).get("url") if isinstance(hit.get("audio"), dict) else hit.get("audio")
+        if not audio_url:
+            # 다른 필드 탐색
+            audio_url = hit.get("url") or hit.get("previewURL")
+        if not audio_url:
+            return None
+        audio_response = requests.get(audio_url, timeout=60, headers={"User-Agent": "Mozilla/5.0"})
+        audio_response.raise_for_status()
+        filename = f"pixabay_{category}_{random.randint(10000, 99999)}.mp3"
+        file_path = os.path.join(output_dir, filename)
+        with open(file_path, "wb") as f:
+            f.write(audio_response.content)
+        return file_path
+    except Exception:
+        return None
+
+
+def get_or_download_bgm(
+    config: AppConfig,
+    category: str,
+) -> Optional[str]:
+    """
+    1) assets/bgm/{category}/ 에 기존 파일이 있으면 랜덤 선택
+    2) 없으면 Pixabay에서 다운로드 후 반환
+    """
+    bgm_category_dir = os.path.join(config.assets_dir, "bgm", category)
+    os.makedirs(bgm_category_dir, exist_ok=True)
+    existing = _list_audio_files(bgm_category_dir)
+    if existing:
+        return random.choice(existing)
+    if config.pixabay_api_key:
+        path = fetch_bgm_from_pixabay(
+            api_key=config.pixabay_api_key,
+            category=category,
+            output_dir=bgm_category_dir,
+        )
+        if path:
+            return path
+    # fallback: 기존 bgm 디렉토리
+    return pick_bgm_path(config)
+
+
+# ─────────────────────────────────────────────
+# NEW: 한국 양산형 숏츠 대본 생성 (분위기별)
+# ─────────────────────────────────────────────
+
+KOREAN_SHORTS_STYLE_PROMPTS: Dict[str, str] = {
+    "shock_twist": (
+        "한국 숏츠 양산형 '충격/반전' 스타일로 작성하세요. "
+        "첫 3초 훅은 '이거 실화임?' '결말이...' 식으로 궁금증을 유발하고, "
+        "마지막 비트는 반전/충격 결말로 끝내세요. "
+        "전체 구조: 훅 → 상황설명 → 고조 → 반전 결말"
+    ),
+    "empathy_touching": (
+        "한국 숏츠 양산형 '공감/감동' 스타일로 작성하세요. "
+        "첫 3초 훅은 '이런 사람 주변에 있으면...' '나만 이런 거 아니지?' 식 공감 유발, "
+        "마지막 비트는 따뜻하거나 눈물나는 결말로 끝내세요. "
+        "전체 구조: 공감훅 → 상황공감 → 감정고조 → 감동결말"
+    ),
+}
+
+CATEGORY_TO_SCRIPT_STYLE: Dict[str, str] = {
+    "humor":        "shock_twist",
+    "shocking":     "shock_twist",
+    "cringe":       "shock_twist",
+    "exciting":     "shock_twist",
+    "anger":        "shock_twist",
+    "touching":     "empathy_touching",
+    "heartwarming": "empathy_touching",
+    "sad":          "empathy_touching",
+}
+
+
 def generate_script(
     config: AppConfig,
     seed_text: str,
@@ -384,6 +580,7 @@ def generate_script(
     allowed_tags: List[str] | None = None,
     trend_context: str = "",
     dialect_style: str = "",
+    content_category: str = "",  # NEW
 ) -> Dict[str, Any]:
     if not config.openai_api_key:
         raise RuntimeError("OPENAI_API_KEY가 없습니다.")
@@ -399,22 +596,33 @@ def generate_script(
         "ending",
     ]
     tag_list = ", ".join(allowed_tags)
+
+    # 카테고리에 따른 스타일 프롬프트 선택
+    script_style_key = CATEGORY_TO_SCRIPT_STYLE.get(content_category, "shock_twist")
+    korean_style_prompt = KOREAN_SHORTS_STYLE_PROMPTS[script_style_key]
+
     system_text = (
-        "You are a short-form video scriptwriter. "
+        "You are a short-form video scriptwriter specializing in Korean viral content adapted for Japanese audiences. "
         "Return ONLY valid JSON with keys: "
         "title_ja, description_ja, hashtags_ja (array), beats (array). "
         "Each beat: {text, tag}. "
-        "Keep beats punchy, 1 line each, no emojis in text."
+        "Keep beats punchy, 1 line each, no emojis in text. "
+        "All output text (title_ja, description_ja, beats text) must be in Japanese."
     )
-    style_line = "Style: Japanese, fast, comedic, meme-like. "
+    style_line = (
+        f"Korean viral style instruction: {korean_style_prompt} "
+        "Translate and adapt the Korean viral style into natural Japanese. "
+    )
     if dialect_style:
         style_line += (
             f"Use {dialect_style} dialect for ALL Japanese text. "
             "Keep it friendly and natural, avoid offensive stereotypes. "
         )
+
     user_text = (
-        f"Seed: {seed_text}\n"
-        f"Language: {language}\n"
+        f"Source content (Korean): {seed_text}\n"
+        f"Content mood category: {content_category or 'humor'}\n"
+        f"Language output: {language}\n"
         f"Beats: {beats_count}\n"
         f"Allowed tags: {tag_list}\n"
         f"Trend context: {trend_context}\n"
@@ -438,6 +646,7 @@ def generate_script(
     if not result:
         raise RuntimeError("Failed to parse JSON from model response")
     result["hashtags_ja"] = normalize_hashtags(result.get("hashtags_ja", []))
+    result["content_category"] = content_category  # 카테고리 보존
     return result
 
 
@@ -511,6 +720,63 @@ def analyze_image_tags(
             if value in allowed_tags:
                 cleaned.append(value)
     return list(dict.fromkeys(cleaned))
+
+
+# ─────────────────────────────────────────────
+# NEW: 에셋 이미지 → 콘텐츠 카테고리 분석
+# ─────────────────────────────────────────────
+
+def analyze_image_content_category(
+    config: AppConfig,
+    image_path: str,
+) -> str:
+    """
+    이미지를 분석해서 CONTENT_CATEGORIES 중 가장 잘 어울리는 카테고리 반환.
+    기존 analyze_image_tags와 별도로 카테고리 레벨 분류.
+    """
+    if not config.openai_api_key:
+        return "humor"
+    model = config.openai_vision_model or config.openai_model
+    if not os.path.exists(image_path):
+        return "humor"
+    mime, _ = mimetypes.guess_type(image_path)
+    if not mime:
+        mime = "image/jpeg"
+    with open(image_path, "rb") as file:
+        b64 = base64.b64encode(file.read()).decode("utf-8")
+    data_url = f"data:{mime};base64,{b64}"
+    system_text = (
+        "You are a visual mood classifier for short-form video content. "
+        f"Categories: {', '.join(CONTENT_CATEGORIES)}. "
+        "Return JSON only: {\"category\": \"...\", \"reason\": \"...\"}."
+    )
+    user_text = (
+        "Which single category best describes the mood/vibe of this image "
+        "for use in a short-form video (Reels/Shorts)? "
+        f"Choose from: {', '.join(CONTENT_CATEGORIES)}"
+    )
+    try:
+        client = OpenAI(api_key=config.openai_api_key)
+        response = client.responses.create(
+            model=model,
+            input=[
+                {
+                    "role": "user",
+                    "content": [
+                        {"type": "input_text", "text": user_text},
+                        {"type": "input_image", "image_url": data_url},
+                    ],
+                }
+            ],
+        )
+        output_text = getattr(response, "output_text", "") or ""
+        result = extract_json(output_text)
+        category = result.get("category", "humor")
+        if category in CONTENT_CATEGORIES:
+            return category
+    except Exception:
+        pass
+    return "humor"
 
 
 def tts_elevenlabs(
@@ -664,6 +930,19 @@ def pick_asset(items: List[AssetItem], tags: List[str]) -> Optional[AssetItem]:
     if not candidates:
         return random.choice(items) if items else None
     return random.choice(candidates)
+
+
+def pick_asset_by_category(items: List[AssetItem], category: str) -> Optional[AssetItem]:
+    """콘텐츠 카테고리에 맞는 에셋 선택 (카테고리 태그 포함 우선)."""
+    # 카테고리 자체가 태그로 저장된 에셋 우선
+    category_candidates = [item for item in items if category in item.tags]
+    if category_candidates:
+        return random.choice(category_candidates)
+    # 카테고리→에셋태그 매핑으로 fallback
+    mapped_tags = CATEGORY_TO_ASSET_TAGS.get(category, [])
+    if mapped_tags:
+        return pick_asset(items, mapped_tags)
+    return random.choice(items) if items else None
 
 
 def tags_from_text(text: str) -> List[str]:
@@ -1114,7 +1393,6 @@ def fetch_bboom_list(config: AppConfig) -> List[Dict[str, str]]:
             break
     if items:
         return items
-    # Fallback: regex extraction
     for match in re.findall(r'href=["\']([^"\']*postNo=\d+[^"\']*)', html):
         url = urljoin(config.bboom_list_url, match)
         if url in seen:
@@ -1264,6 +1542,7 @@ def _load_offset(path: str) -> int:
 def _save_offset(path: str, offset: int) -> None:
     _write_json_file(path, {"offset": offset})
 
+
 def _missing_required(config: AppConfig) -> List[str]:
     missing = []
     if not config.openai_api_key:
@@ -1300,8 +1579,10 @@ def _script_plan_text(script: Dict[str, Any]) -> str:
     hook = beats[0].get("text", "") if beats else ""
     ending = beats[-1].get("text", "") if beats else ""
     middle = beats[1].get("text", "") if len(beats) > 2 else ""
+    category = script.get("content_category", "")
     return (
         f"제목(안): {script.get('title_ja','')}\n"
+        f"분위기: {category}\n"
         f"훅: {hook}\n"
         f"전개: {middle}\n"
         f"오치: {ending}\n"
@@ -1335,25 +1616,41 @@ def _auto_bboom_flow(config: AppConfig, progress, status_box) -> None:
         url = item.get("url", "")
         if not url or _is_used_link(used_data, url):
             continue
-        _status_update(progress, status_box, 0.12, "글 내용 분석")
+        _status_update(progress, status_box, 0.10, "글 내용 분석")
         try:
             post = fetch_bboom_post_text(url)
         except Exception:
             post = {"title": item.get("title", ""), "content": ""}
         seed = f"{post.get('title','')}\n{post.get('content','')}"
 
-        _status_update(progress, status_box, 0.18, "스크립트 초안 생성")
+        # NEW: 글 분위기 카테고리 분석
+        _status_update(progress, status_box, 0.15, "글 분위기 분석 중")
+        content_category = analyze_content_category(config, seed)
+        st.info(f"감지된 분위기 카테고리: **{content_category}**")
+
+        # NEW: 카테고리 맞는 BGM 선택/다운로드
+        _status_update(progress, status_box, 0.18, f"BGM 선정 중 ({content_category})")
+        bgm_dir = os.path.join(config.assets_dir, "bgm")
+        bgm_path = get_or_download_bgm(config, content_category)
+        if bgm_path:
+            st.info(f"BGM: {os.path.basename(bgm_path)}")
+        else:
+            bgm_path = pick_bgm_path(config)
+
+        _status_update(progress, status_box, 0.22, "스크립트 초안 생성")
         script = generate_script(
             config=config,
             seed_text=seed,
             beats_count=7,
             trend_context=trend_context,
             dialect_style=config.ja_dialect_style,
+            content_category=content_category,  # NEW
         )
         plan_text = _script_plan_text(script)
         request_text = (
             f"[승인 요청]\n링크: {url}\n"
             f"제목: {post.get('title','')}\n"
+            f"분위기: {content_category}\n"
             f"{plan_text}\n\n"
             "응답: 승인 / 교환"
         )
@@ -1366,12 +1663,18 @@ def _auto_bboom_flow(config: AppConfig, progress, status_box) -> None:
 
         _status_update(progress, status_box, 0.3, "TTS 생성")
         texts = [beat.get("text", "") for beat in script.get("beats", [])]
-        tags = [beat.get("tag", "") for beat in script.get("beats", [])]
+        beat_tags = [beat.get("tag", "") for beat in script.get("beats", [])]
+
+        # NEW: 카테고리 기반 에셋 선택
         assets = []
-        for tag in tags:
+        for tag in beat_tags:
+            # 비트 태그로 1차 시도, 없으면 카테고리로 fallback
             asset = pick_asset(manifest_items, [tag])
+            if not asset:
+                asset = pick_asset_by_category(manifest_items, content_category)
             if asset:
                 assets.append(asset.path)
+
         if not assets:
             st.error("태그에 맞는 에셋이 없습니다.")
             return
@@ -1382,7 +1685,6 @@ def _auto_bboom_flow(config: AppConfig, progress, status_box) -> None:
 
         _status_update(progress, status_box, 0.6, "영상 렌더링")
         output_path = os.path.join(config.output_dir, f"shorts_{now}.mp4")
-        bgm_path = pick_bgm_path(config)
         render_video(
             config=config,
             asset_paths=assets,
@@ -1431,7 +1733,7 @@ def _auto_bboom_flow(config: AppConfig, progress, status_box) -> None:
         _status_update(progress, status_box, 1.0, "완료")
         st.video(output_path)
 
-        summary_text = f"[완료]\n제목: {script.get('title_ja','')}\n요약: {script.get('description_ja','')}\n"
+        summary_text = f"[완료]\n제목: {script.get('title_ja','')}\n분위기: {content_category}\n요약: {script.get('description_ja','')}\n"
         if video_url:
             summary_text += f"유튜브 링크: {video_url}"
         else:
@@ -1452,6 +1754,8 @@ def run_streamlit_app() -> None:
             os.path.join(config.assets_dir, "inbox"),
             os.path.join(config.assets_dir, "bgm"),
             os.path.join(config.assets_dir, "bgm", "trending"),
+            # NEW: 카테고리별 BGM 디렉토리
+            *[os.path.join(config.assets_dir, "bgm", cat) for cat in CONTENT_CATEGORIES],
             os.path.join(config.assets_dir, "sfx"),
             os.path.dirname(config.manifest_path),
             config.output_dir,
@@ -1463,6 +1767,7 @@ def run_streamlit_app() -> None:
     st.sidebar.write(f"자동 업로드: {'켜짐' if config.enable_youtube_upload else '꺼짐'}")
     st.sidebar.write(f"MoviePy 사용 가능: {'예' if MOVIEPY_AVAILABLE else '아니오'}")
     st.sidebar.write(f"BGM 모드: {config.bgm_mode or 'off'}")
+    st.sidebar.write(f"Pixabay BGM: {'연결됨' if config.pixabay_api_key else '미설정'}")
     if not MOVIEPY_AVAILABLE:
         st.sidebar.error(f"MoviePy 오류: {MOVIEPY_ERROR}")
 
@@ -1486,6 +1791,7 @@ def run_streamlit_app() -> None:
         "- `YOUTUBE_*` (자동 업로드)\n"
         "- `SERPAPI_API_KEY` (트렌드 수집)\n"
         "- `PEXELS_API_KEY` (트렌드 이미지 자동 수집)\n"
+        "- `PIXABAY_API_KEY` (BGM 자동 다운로드) ← NEW\n"
         "- `JA_DIALECT_STYLE` (일본어 사투리 스타일)\n"
         "- `OPENAI_VISION_MODEL` (이미지 태그 분석 모델)\n"
         "- `BGM_MODE`, `BGM_VOLUME` (배경음악 자동 선택)"
@@ -1515,10 +1821,23 @@ def run_streamlit_app() -> None:
         seed_text = st.text_area("아이디어/요약 입력", height=120)
         beats_count = st.slider("문장(비트) 수", 5, 9, 7)
         tag_filter = st.multiselect("허용 태그", options=all_tags, default=all_tags[:5])
+
+        # NEW: 수동 생성 시 카테고리 선택
+        manual_category = st.selectbox(
+            "콘텐츠 분위기 카테고리",
+            options=["(자동 감지)"] + CONTENT_CATEGORIES,
+            help="'자동 감지'를 선택하면 AI가 입력 텍스트를 분석해 카테고리를 결정합니다.",
+        )
         generate_button = st.button("스크립트 생성")
 
         if generate_button and seed_text:
             _status_update(progress, status_box, 0.05, "스크립트 생성 중")
+            # 카테고리 자동/수동 결정
+            if manual_category == "(자동 감지)":
+                detected_cat = analyze_content_category(config, seed_text)
+                st.info(f"감지된 카테고리: **{detected_cat}**")
+            else:
+                detected_cat = manual_category
             script = generate_script(
                 config=config,
                 seed_text=seed_text,
@@ -1526,13 +1845,16 @@ def run_streamlit_app() -> None:
                 allowed_tags=tag_filter or all_tags,
                 trend_context=get_trend_context(config),
                 dialect_style=config.ja_dialect_style,
+                content_category=detected_cat,
             )
             st.session_state["script"] = script
+            st.session_state["detected_category"] = detected_cat
             _status_update(progress, status_box, 0.2, "스크립트 생성 완료")
 
         script = st.session_state.get("script")
         if script:
             st.subheader("스크립트")
+            st.caption(f"분위기 카테고리: **{script.get('content_category', '-')}**")
             title = st.text_input("제목(일본어)", value=script.get("title_ja", ""))
             description = st.text_area("설명(일본어)", value=script.get("description_ja", ""), height=80)
             hashtags = st.text_input(
@@ -1558,12 +1880,24 @@ def run_streamlit_app() -> None:
                 else:
                     _status_update(progress, status_box, 0.1, "문장/태그 정리")
                     texts = [beat.get("text", "") for beat in beats]
-                    tags = [beat.get("tag", "") for beat in beats]
+                    beat_tags = [beat.get("tag", "") for beat in beats]
+                    detected_cat = st.session_state.get("detected_category", script.get("content_category", "humor"))
+
+                    # NEW: 카테고리 기반 BGM 선택
+                    _status_update(progress, status_box, 0.15, f"BGM 선정 중 ({detected_cat})")
+                    bgm_path = get_or_download_bgm(config, detected_cat)
+                    if not bgm_path:
+                        bgm_path = pick_bgm_path(config)
+
+                    # NEW: 카테고리 기반 에셋 선택
                     assets = []
-                    for tag in tags:
+                    for tag in beat_tags:
                         asset = pick_asset(manifest_items, [tag])
+                        if not asset:
+                            asset = pick_asset_by_category(manifest_items, detected_cat)
                         if asset:
                             assets.append(asset.path)
+
                     if not assets:
                         st.error("태그에 맞는 에셋이 없습니다.")
                     else:
@@ -1574,7 +1908,6 @@ def run_streamlit_app() -> None:
                         tts_elevenlabs(config, "。".join(texts), audio_path, voice_id=voice_id)
                         _status_update(progress, status_box, 0.6, "영상 렌더링")
                         output_path = os.path.join(config.output_dir, f"shorts_{now}.mp4")
-                        bgm_path = pick_bgm_path(config)
                         render_video(
                             config=config,
                             asset_paths=assets,
@@ -1714,17 +2047,49 @@ def run_streamlit_app() -> None:
             accept_multiple_files=True,
             key="bgm_upload",
         )
-        bgm_target = st.selectbox("저장 위치", ["일반 BGM", "트렌드 BGM"])
+        bgm_target = st.selectbox(
+            "저장 위치",
+            ["일반 BGM", "트렌드 BGM"] + [f"카테고리: {cat}" for cat in CONTENT_CATEGORIES],
+        )
         if st.button("BGM 저장") and bgm_files:
-            target_dir = os.path.join(config.assets_dir, "bgm")
             if bgm_target == "트렌드 BGM":
-                target_dir = os.path.join(target_dir, "trending")
+                target_dir = os.path.join(config.assets_dir, "bgm", "trending")
+            elif bgm_target.startswith("카테고리: "):
+                cat_name = bgm_target.replace("카테고리: ", "")
+                target_dir = os.path.join(config.assets_dir, "bgm", cat_name)
+            else:
+                target_dir = os.path.join(config.assets_dir, "bgm")
             os.makedirs(target_dir, exist_ok=True)
             for file in bgm_files:
                 save_path = os.path.join(target_dir, file.name)
                 with open(save_path, "wb") as out_file:
                     out_file.write(file.getbuffer())
             st.success("BGM이 저장되었습니다.")
+
+        # NEW: Pixabay BGM 수동 다운로드
+        st.subheader("Pixabay BGM 수동 다운로드")
+        if not config.pixabay_api_key:
+            st.warning("PIXABAY_API_KEY가 설정되지 않았습니다. `.streamlit/secrets.toml`에 추가하세요.")
+        else:
+            pixabay_cat = st.selectbox("BGM 카테고리", CONTENT_CATEGORIES, key="pixabay_cat")
+            pixabay_count = st.slider("다운로드 개수", 1, 5, 3, key="pixabay_count")
+            if st.button("Pixabay에서 BGM 다운로드"):
+                bgm_out_dir = os.path.join(config.assets_dir, "bgm", pixabay_cat)
+                downloaded_bgms = []
+                for _ in range(pixabay_count):
+                    path = fetch_bgm_from_pixabay(
+                        api_key=config.pixabay_api_key,
+                        category=pixabay_cat,
+                        output_dir=bgm_out_dir,
+                    )
+                    if path:
+                        downloaded_bgms.append(path)
+                if downloaded_bgms:
+                    st.success(f"{len(downloaded_bgms)}개 BGM을 `bgm/{pixabay_cat}/`에 저장했습니다.")
+                    for p in downloaded_bgms:
+                        st.audio(p)
+                else:
+                    st.error("BGM 다운로드에 실패했습니다. API 키나 네트워크를 확인하세요.")
 
         st.subheader("AI 이미지 수집(SerpAPI)")
         collect_query = st.text_input("검색어")
@@ -1833,6 +2198,10 @@ def run_streamlit_app() -> None:
             add_pepe_tag = st.checkbox("페페 기본 태그 추가", value=False)
             select_all = st.checkbox("전체 선택", value=False)
             ai_apply = st.checkbox("AI 태그 자동 적용", value=False)
+
+            # NEW: 콘텐츠 카테고리 AI 자동 적용 옵션
+            ai_category_apply = st.checkbox("AI 콘텐츠 카테고리 자동 적용 (태그로 저장)", value=False)
+
             selected_files: List[str] = []
             for file_path in inbox_files:
                 st.image(file_path, width=200)
@@ -1841,6 +2210,10 @@ def run_streamlit_app() -> None:
                 ai_tag_map = st.session_state.get("ai_tag_map", {})
                 if file_path in ai_tag_map:
                     st.caption(f"AI 태그: {', '.join(ai_tag_map[file_path])}")
+                # NEW: 카테고리 표시
+                ai_cat_map = st.session_state.get("ai_category_map", {})
+                if file_path in ai_cat_map:
+                    st.caption(f"AI 카테고리: {ai_cat_map[file_path]}")
 
             if st.button("선택한 짤 AI 태그 분석"):
                 if not config.openai_api_key:
@@ -1848,21 +2221,28 @@ def run_streamlit_app() -> None:
                 else:
                     targets = selected_files or inbox_files
                     tag_map = st.session_state.get("ai_tag_map", {})
-                    progress = st.progress(0.0)
+                    cat_map = st.session_state.get("ai_category_map", {})
+                    progress_bar = st.progress(0.0)
                     for index, path in enumerate(targets):
                         try:
                             tags = analyze_image_tags(config, path)
                             tag_map[path] = tags
+                            # NEW: 카테고리도 함께 분석
+                            cat = analyze_image_content_category(config, path)
+                            cat_map[path] = cat
                         except Exception:
                             continue
-                        progress.progress((index + 1) / max(len(targets), 1))
+                        progress_bar.progress((index + 1) / max(len(targets), 1))
                     st.session_state["ai_tag_map"] = tag_map
-                    st.success("AI 태그 분석 완료")
+                    st.session_state["ai_category_map"] = cat_map
+                    st.success("AI 태그 + 카테고리 분석 완료")
+
             if st.button("선택한 짤 저장"):
                 base_tags = tags_from_text(inbox_tags)
                 for preset in selected_presets:
                     base_tags.extend(preset_map.get(preset, []))
                 base_tags = list(set(base_tags))
+                ai_cat_map = st.session_state.get("ai_category_map", {})
                 for file_path in selected_files:
                     tags = list(base_tags)
                     if add_pepe_tag:
@@ -1870,6 +2250,9 @@ def run_streamlit_app() -> None:
                     if ai_apply:
                         ai_tag_map = st.session_state.get("ai_tag_map", {})
                         tags.extend(ai_tag_map.get(file_path, []))
+                    # NEW: 카테고리를 태그로 저장
+                    if ai_category_apply and file_path in ai_cat_map:
+                        tags.append(ai_cat_map[file_path])
                     tags = list(set(tags))
                     add_asset(config.manifest_path, file_path, tags)
                 st.success("선택한 짤이 라이브러리에 추가되었습니다.")
@@ -1889,6 +2272,10 @@ def run_streamlit_app() -> None:
                 lib_ai_map = st.session_state.get("library_ai_tag_map", {})
                 if item.asset_id in lib_ai_map:
                     st.caption(f"AI 태그: {', '.join(lib_ai_map[item.asset_id])}")
+                # NEW: 라이브러리 카테고리 표시
+                lib_cat_map = st.session_state.get("library_ai_cat_map", {})
+                if item.asset_id in lib_cat_map:
+                    st.caption(f"AI 카테고리: {lib_cat_map[item.asset_id]}")
 
             if st.button("선택한 에셋 AI 태그 분석"):
                 if not config.openai_api_key:
@@ -1896,26 +2283,38 @@ def run_streamlit_app() -> None:
                 else:
                     targets = selected_assets or filtered
                     tag_map = st.session_state.get("library_ai_tag_map", {})
-                    progress = st.progress(0.0)
+                    cat_map = st.session_state.get("library_ai_cat_map", {})
+                    progress_bar = st.progress(0.0)
                     for index, item in enumerate(targets):
                         try:
                             tags = analyze_image_tags(config, item.path)
                             tag_map[item.asset_id] = tags
+                            # NEW: 카테고리도 함께 분석
+                            cat = analyze_image_content_category(config, item.path)
+                            cat_map[item.asset_id] = cat
                         except Exception:
                             continue
-                        progress.progress((index + 1) / max(len(targets), 1))
+                        progress_bar.progress((index + 1) / max(len(targets), 1))
                     st.session_state["library_ai_tag_map"] = tag_map
-                    st.success("AI 태그 분석 완료")
+                    st.session_state["library_ai_cat_map"] = cat_map
+                    st.success("AI 태그 + 카테고리 분석 완료")
 
             if st.button("AI 태그로 분류 저장"):
                 tag_map = st.session_state.get("library_ai_tag_map", {})
-                if not tag_map:
+                cat_map = st.session_state.get("library_ai_cat_map", {})
+                if not tag_map and not cat_map:
                     st.error("AI 태그가 없습니다. 먼저 분석하세요.")
                 else:
                     ids = [item.asset_id for item in (selected_assets or filtered)]
-                    apply_map = {asset_id: tag_map.get(asset_id, []) for asset_id in ids}
+                    # 태그 + 카테고리 합쳐서 저장
+                    apply_map: Dict[str, List[str]] = {}
+                    for asset_id in ids:
+                        combined = list(tag_map.get(asset_id, []))
+                        if asset_id in cat_map:
+                            combined.append(cat_map[asset_id])
+                        apply_map[asset_id] = combined
                     updated = update_asset_tags(config.manifest_path, apply_map, keep_existing=keep_tags)
-                    st.success(f"{updated}개 에셋 태그가 업데이트되었습니다.")
+                    st.success(f"{updated}개 에셋 태그+카테고리가 업데이트되었습니다.")
                     st.rerun()
 
             if st.button("선택한 에셋 삭제"):
@@ -1947,19 +2346,23 @@ def run_batch(count: int, seed: str, beats: int) -> None:
     if not manifest_items:
         raise RuntimeError("에셋이 없습니다. 먼저 이미지를 추가하세요.")
     for index in range(count):
+        content_category = analyze_content_category(config, seed)
         script = generate_script(
             config,
             seed,
             beats_count=beats,
             trend_context=get_trend_context(config),
             dialect_style=config.ja_dialect_style,
+            content_category=content_category,
         )
         beats_list = script.get("beats", [])
         texts = [beat.get("text", "") for beat in beats_list]
-        tags = [beat.get("tag", "") for beat in beats_list]
+        beat_tags = [beat.get("tag", "") for beat in beats_list]
         assets = []
-        for tag in tags:
+        for tag in beat_tags:
             asset = pick_asset(manifest_items, [tag])
+            if not asset:
+                asset = pick_asset_by_category(manifest_items, content_category)
             if asset:
                 assets.append(asset.path)
         now = datetime.utcnow().strftime("%Y%m%d_%H%M%S")
@@ -1967,7 +2370,9 @@ def run_batch(count: int, seed: str, beats: int) -> None:
         voice_id = pick_voice_id(config.elevenlabs_voice_ids)
         tts_elevenlabs(config, "。".join(texts), audio_path, voice_id=voice_id)
         output_path = os.path.join(config.output_dir, f"shorts_{now}_{index}.mp4")
-        bgm_path = pick_bgm_path(config)
+        bgm_path = get_or_download_bgm(config, content_category)
+        if not bgm_path:
+            bgm_path = pick_bgm_path(config)
         render_video(
             config=config,
             asset_paths=assets,
