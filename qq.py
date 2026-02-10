@@ -168,7 +168,7 @@ def generate_script(
     allowed_tags: List[str] | None = None,
 ) -> Dict[str, Any]:
     if not config.openai_api_key:
-        raise RuntimeError("OPENAI_API_KEY is missing")
+        raise RuntimeError("OPENAI_API_KEY가 없습니다.")
     allowed_tags = allowed_tags or [
         "shock",
         "laugh",
@@ -226,9 +226,9 @@ def tts_elevenlabs(
     voice_id: str,
 ) -> str:
     if not config.elevenlabs_api_key:
-        raise RuntimeError("ELEVENLABS_API_KEY is missing")
+        raise RuntimeError("ELEVENLABS_API_KEY가 없습니다.")
     if not voice_id:
-        raise RuntimeError("ELEVENLABS_VOICE_ID(S) is missing")
+        raise RuntimeError("ELEVENLABS_VOICE_ID가 없습니다.")
     url = f"https://api.elevenlabs.io/v1/text-to-speech/{voice_id}"
     headers = {
         "xi-api-key": config.elevenlabs_api_key,
@@ -446,9 +446,9 @@ def render_video(
 
 def append_publish_log(config: AppConfig, row: Dict[str, str]) -> None:
     if not config.sheet_id:
-        raise RuntimeError("SHEET_ID is missing")
+        raise RuntimeError("SHEET_ID가 없습니다.")
     if not config.google_service_account_json:
-        raise RuntimeError("GOOGLE_SERVICE_ACCOUNT_JSON is missing")
+        raise RuntimeError("GOOGLE_SERVICE_ACCOUNT_JSON이 없습니다.")
     client = gspread.service_account_from_dict(config.google_service_account_json)
     sheet = client.open_by_key(config.sheet_id)
     try:
@@ -483,7 +483,7 @@ def upload_video(
     tags: Optional[list] = None,
 ) -> Dict[str, str]:
     if not config.youtube_client_id or not config.youtube_client_secret or not config.youtube_refresh_token:
-        raise RuntimeError("YouTube OAuth credentials are missing")
+        raise RuntimeError("YouTube OAuth 설정이 누락되었습니다.")
     credentials = Credentials(
         token=None,
         refresh_token=config.youtube_refresh_token,
@@ -516,7 +516,7 @@ def collect_images_serpapi(
     limit: int = 12,
 ) -> List[str]:
     if not api_key:
-        raise RuntimeError("SERPAPI_API_KEY is missing")
+        raise RuntimeError("SERPAPI_API_KEY가 없습니다.")
     os.makedirs(output_dir, exist_ok=True)
     params = {
         "engine": "google_images",
@@ -811,7 +811,7 @@ def run_batch(count: int, seed: str, beats: int) -> None:
     config = load_config()
     manifest_items = load_manifest(config.manifest_path)
     if not manifest_items:
-        raise RuntimeError("No assets in manifest")
+        raise RuntimeError("에셋이 없습니다. 먼저 이미지를 추가하세요.")
     for index in range(count):
         script = generate_script(config, seed, beats_count=beats)
         beats_list = script.get("beats", [])
@@ -869,7 +869,7 @@ def run_batch(count: int, seed: str, beats: int) -> None:
 if os.getenv("RUN_BATCH") == "1":
     run_batch(
         count=int(os.getenv("BATCH_COUNT", "2")),
-        seed=os.getenv("BATCH_SEED", "Japanese meme short"),
+        seed=os.getenv("BATCH_SEED", "일본어 밈 숏츠"),
         beats=int(os.getenv("BATCH_BEATS", "7")),
     )
 else:
