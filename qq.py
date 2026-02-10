@@ -147,6 +147,8 @@ class AppConfig:
     serpapi_api_key: str
     pexels_api_key: str
     ja_dialect_style: str
+    bgm_mode: str
+    bgm_volume: float
     telegram_bot_token: str
     telegram_admin_chat_id: str
     telegram_timeout_sec: int
@@ -191,6 +193,8 @@ def load_config() -> AppConfig:
         serpapi_api_key=_get_secret("SERPAPI_API_KEY", "") or "",
         pexels_api_key=_get_secret("PEXELS_API_KEY", "") or "",
         ja_dialect_style=_get_secret("JA_DIALECT_STYLE", "") or "",
+        bgm_mode=_get_secret("BGM_MODE", "off") or "off",
+        bgm_volume=float(_get_secret("BGM_VOLUME", "0.08") or 0.08),
         telegram_bot_token=_get_secret("TELEGRAM_BOT_TOKEN", "") or "",
         telegram_admin_chat_id=_get_secret("TELEGRAM_ADMIN_CHAT_ID", "") or "",
         telegram_timeout_sec=int(_get_secret("TELEGRAM_TIMEOUT_SEC", "600") or 600),
@@ -533,6 +537,35 @@ def render_video(
     audio_clip.close()
     video.close()
     return output_path
+
+
+def _list_audio_files(path: str) -> List[str]:
+    if not os.path.exists(path):
+        return []
+    items = []
+    for name in os.listdir(path):
+        if name.lower().endswith((".mp3", ".wav", ".m4a", ".aac", ".ogg")):
+            items.append(os.path.join(path, name))
+    return items
+
+
+def pick_bgm_path(config: AppConfig) -> Optional[str]:
+    mode = (config.bgm_mode or "off").lower().strip()
+    if mode in {"", "off", "none"}:
+        return None
+    bgm_dir = os.path.join(config.assets_dir, "bgm")
+    trending_dir = os.path.join(bgm_dir, "trending")
+    trending = _list_audio_files(trending_dir)
+    normal = _list_audio_files(bgm_dir)
+    if mode in {"trend", "trending"}:
+        pool = trending or normal
+    elif mode in {"random", "auto"}:
+        pool = trending + normal if trending else normal
+    else:
+        pool = normal
+    if not pool:
+        return None
+    return random.choice(pool)
 
 
 def append_publish_log(config: AppConfig, row: Dict[str, str]) -> None:
@@ -1098,12 +1131,15 @@ def _auto_bboom_flow(config: AppConfig, progress, status_box) -> None:
 
         _status_update(progress, status_box, 0.6, "영상 렌더링")
         output_path = os.path.join(config.output_dir, f"shorts_{now}.mp4")
+        bgm_path = pick_bgm_path(config)
         render_video(
             config=config,
             asset_paths=assets,
             texts=texts,
             tts_audio_path=audio_path,
             output_path=output_path,
+            bgm_path=bgm_path,
+            bgm_volume=config.bgm_volume,
         )
 
         video_id = ""
@@ -1164,6 +1200,7 @@ def run_streamlit_app() -> None:
             os.path.join(config.assets_dir, "images"),
             os.path.join(config.assets_dir, "inbox"),
             os.path.join(config.assets_dir, "bgm"),
+            os.path.join(config.assets_dir, "bgm", "trending"),
             os.path.join(config.assets_dir, "sfx"),
             os.path.dirname(config.manifest_path),
             config.output_dir,
@@ -1174,6 +1211,7 @@ def run_streamlit_app() -> None:
     st.sidebar.subheader("상태")
     st.sidebar.write(f"자동 업로드: {'켜짐' if config.enable_youtube_upload else '꺼짐'}")
     st.sidebar.write(f"MoviePy 사용 가능: {'예' if MOVIEPY_AVAILABLE else '아니오'}")
+    st.sidebar.write(f"BGM 모드: {config.bgm_mode or 'off'}")
     if not MOVIEPY_AVAILABLE:
         st.sidebar.error(f"MoviePy 오류: {MOVIEPY_ERROR}")
 
@@ -1197,7 +1235,8 @@ def run_streamlit_app() -> None:
         "- `YOUTUBE_*` (자동 업로드)\n"
         "- `SERPAPI_API_KEY` (트렌드 수집)\n"
         "- `PEXELS_API_KEY` (트렌드 이미지 자동 수집)\n"
-        "- `JA_DIALECT_STYLE` (일본어 사투리 스타일)"
+        "- `JA_DIALECT_STYLE` (일본어 사투리 스타일)\n"
+        "- `BGM_MODE`, `BGM_VOLUME` (배경음악 자동 선택)"
     )
     missing = _missing_required(config)
     if missing:
@@ -1283,12 +1322,15 @@ def run_streamlit_app() -> None:
                         tts_elevenlabs(config, "。".join(texts), audio_path, voice_id=voice_id)
                         _status_update(progress, status_box, 0.6, "영상 렌더링")
                         output_path = os.path.join(config.output_dir, f"shorts_{now}.mp4")
+                        bgm_path = pick_bgm_path(config)
                         render_video(
                             config=config,
                             asset_paths=assets,
                             texts=texts,
                             tts_audio_path=audio_path,
                             output_path=output_path,
+                            bgm_path=bgm_path,
+                            bgm_volume=config.bgm_volume,
                         )
                         video_id = ""
                         video_url = ""
@@ -1413,6 +1455,25 @@ def run_streamlit_app() -> None:
                 add_asset(config.manifest_path, save_path, tags_from_text(tag_input))
             st.success("에셋이 저장되었습니다.")
 
+        st.subheader("BGM 업로드")
+        bgm_files = st.file_uploader(
+            "오디오 업로드",
+            type=["mp3", "wav", "m4a", "aac", "ogg"],
+            accept_multiple_files=True,
+            key="bgm_upload",
+        )
+        bgm_target = st.selectbox("저장 위치", ["일반 BGM", "트렌드 BGM"])
+        if st.button("BGM 저장") and bgm_files:
+            target_dir = os.path.join(config.assets_dir, "bgm")
+            if bgm_target == "트렌드 BGM":
+                target_dir = os.path.join(target_dir, "trending")
+            os.makedirs(target_dir, exist_ok=True)
+            for file in bgm_files:
+                save_path = os.path.join(target_dir, file.name)
+                with open(save_path, "wb") as out_file:
+                    out_file.write(file.getbuffer())
+            st.success("BGM이 저장되었습니다.")
+
         st.subheader("AI 이미지 수집(SerpAPI)")
         collect_query = st.text_input("검색어")
         collect_count = st.slider("수집 개수", 4, 20, 8)
@@ -1513,12 +1574,15 @@ def run_batch(count: int, seed: str, beats: int) -> None:
         voice_id = pick_voice_id(config.elevenlabs_voice_ids)
         tts_elevenlabs(config, "。".join(texts), audio_path, voice_id=voice_id)
         output_path = os.path.join(config.output_dir, f"shorts_{now}_{index}.mp4")
+        bgm_path = pick_bgm_path(config)
         render_video(
             config=config,
             asset_paths=assets,
             texts=texts,
             tts_audio_path=audio_path,
             output_path=output_path,
+            bgm_path=bgm_path,
+            bgm_volume=config.bgm_volume,
         )
         video_id = ""
         video_url = ""

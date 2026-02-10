@@ -40,6 +40,7 @@ Streamlit Cloud에서 파이썬 버전 문제로 `moviepy`가 설치 실패하�
 - `USED_LINKS_PATH`
 - `TREND_QUERY`, `TREND_MAX_RESULTS`
 - `JA_DIALECT_STYLE` (예: 関西弁, 博多弁)
+- `BGM_MODE`, `BGM_VOLUME` (배경음악 자동 선택)
 - `APPROVE_KEYWORDS`, `SWAP_KEYWORDS`
 - `GOOGLE_SERVICE_ACCOUNT_JSON_B64` (대체 옵션)
 
@@ -64,6 +65,8 @@ RUN_BATCH=1 BATCH_COUNT=2 BATCH_SEED="일본어 숏츠 주제" python qq.py
 - `AI 이미지 수집(SerpAPI)` 기능은 SerpAPI 키가 있을 때만 작동합니다.
 - `일본 트렌드 자동 수집(Pexels)`은 Pexels 키가 필요합니다.
 - 인박스에서 체크 후 **`선택한 짤 저장`** 버튼으로 라이브러리에 넣습니다.
+- `BGM 업로드`에서 오디오를 올리면 자동 선택에 사용됩니다.
+- `BGM_MODE=trending`이면 `bgm/trending` 폴더의 음악을 우선 사용합니다.
 
 ## 6) 유튜브 업로드
 
