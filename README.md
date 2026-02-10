@@ -21,7 +21,7 @@ Streamlit Cloud에서 파이썬 버전 문제로 `moviepy`가 설치 실패하�
 필수:
 - `OPENAI_API_KEY`
 - `ELEVENLABS_API_KEY`
-- `ELEVENLABS_VOICE_ID`
+- `ELEVENLABS_VOICE_ID` 또는 `ELEVENLABS_VOICE_IDS`
 - `SHEET_ID`
 - `GOOGLE_SERVICE_ACCOUNT_JSON`
 - `FONT_PATH` (일본어 폰트 경로)

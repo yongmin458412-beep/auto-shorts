@@ -783,7 +783,7 @@ def _missing_required(config: AppConfig) -> List[str]:
     if not config.elevenlabs_api_key:
         missing.append("ELEVENLABS_API_KEY")
     if not config.elevenlabs_voice_ids:
-        missing.append("ELEVENLABS_VOICE_ID")
+        missing.append("ELEVENLABS_VOICE_ID 또는 ELEVENLABS_VOICE_IDS")
     if not config.sheet_id:
         missing.append("SHEET_ID")
     if not config.google_service_account_json:
@@ -976,7 +976,7 @@ def run_streamlit_app() -> None:
     st.sidebar.markdown(
         "- `OPENAI_API_KEY`\n"
         "- `ELEVENLABS_API_KEY`\n"
-        "- `ELEVENLABS_VOICE_ID`\n"
+        "- `ELEVENLABS_VOICE_ID` 또는 `ELEVENLABS_VOICE_IDS`\n"
         "- `SHEET_ID`\n"
         "- `GOOGLE_SERVICE_ACCOUNT_JSON`\n"
         "- `FONT_PATH`"
