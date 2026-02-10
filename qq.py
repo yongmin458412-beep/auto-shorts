@@ -148,6 +148,90 @@ def download_images_from_urls(urls: List[str], output_dir: str, limit: int = 30)
     return downloaded
 
 
+def _normalize_url(url: str) -> str:
+    if not url:
+        return ""
+    url = url.strip()
+    if url.startswith("//"):
+        return "https:" + url
+    return url
+
+
+def extract_image_urls_from_html(html: str) -> List[str]:
+    if not html:
+        return []
+    soup = BeautifulSoup(html, "html.parser")
+    urls: set[str] = set()
+    for img in soup.find_all("img"):
+        for attr in ("src", "data-src", "data-lazy-src", "data-original", "data-actualsrc"):
+            value = img.get(attr)
+            if value:
+                urls.add(_normalize_url(value))
+    for tag in soup.find_all(style=True):
+        style = tag.get("style", "") or ""
+        for match in re.findall(r"url\(([^)]+)\)", style, flags=re.I):
+            value = match.strip().strip("'").strip('"')
+            if value:
+                urls.add(_normalize_url(value))
+    for match in re.findall(
+        r"https?://[^\"'\\s]+\\.(?:jpg|jpeg|png|gif|webp)(?:\\?[^\"'\\s]*)?",
+        html,
+        flags=re.I,
+    ):
+        urls.add(_normalize_url(match))
+    for match in re.findall(
+        r"https?://(?:blogfiles|postfiles|phinf)\\.pstatic\\.net/[^\"'\\s]+",
+        html,
+        flags=re.I,
+    ):
+        urls.add(_normalize_url(match))
+    cleaned = []
+    for url in urls:
+        if not url or url.startswith("data:"):
+            continue
+        cleaned.append(url)
+    return cleaned
+
+
+def fetch_post_image_urls(url: str) -> List[str]:
+    if not url:
+        return []
+    headers = {"User-Agent": "Mozilla/5.0"}
+    response = requests.get(url, headers=headers, timeout=30)
+    response.raise_for_status()
+    urls = extract_image_urls_from_html(response.text)
+    if urls:
+        return urls
+    # fallback: try mobile version if desktop URL provided
+    if "blog.naver.com" in url and "m.blog.naver.com" not in url:
+        mobile_url = url.replace("blog.naver.com", "m.blog.naver.com")
+        try:
+            response = requests.get(mobile_url, headers=headers, timeout=30)
+            response.raise_for_status()
+            return extract_image_urls_from_html(response.text)
+        except Exception:
+            return []
+    return []
+
+
+def collect_images_from_post_urls(
+    post_urls: List[str],
+    output_dir: str,
+    limit: int = 50,
+) -> Tuple[int, int]:
+    all_urls: List[str] = []
+    for post_url in post_urls:
+        try:
+            urls = fetch_post_image_urls(post_url)
+            all_urls.extend(urls)
+        except Exception:
+            continue
+    if not all_urls:
+        return 0, 0
+    downloaded = download_images_from_urls(all_urls, output_dir, limit=limit)
+    return len(all_urls), len(downloaded)
+
+
 def _get_query_param(key: str) -> str:
     try:
         params = st.query_params
@@ -1557,6 +1641,33 @@ def run_streamlit_app() -> None:
                         st.success(f"{len(collected)}개 이미지를 인박스에 저장했습니다.")
                     except Exception as exc:
                         st.error(f"URL 수집 실패: {exc}")
+
+        st.subheader("네이버 블로그 포스트 이미지 수집(권한 보유 필수)")
+        st.caption("퍼가기가 허용된 포스트 URL만 넣어주세요.")
+        post_text = st.text_area("포스트 URL 목록 (줄바꿈)", height=120, key="naver_post_import")
+        post_limit = st.slider("포스트 이미지 최대 수집 개수", 1, 100, 40, key="naver_post_limit")
+        post_confirm = st.checkbox("해당 포스트 이미지 사용 권한을 보유했습니다.")
+        if st.button("포스트에서 인박스 저장"):
+            if not post_confirm:
+                st.error("권한 확인에 동의해야 합니다.")
+            else:
+                post_urls = [line.strip() for line in post_text.splitlines() if line.strip()]
+                if not post_urls:
+                    st.error("포스트 URL을 입력하세요.")
+                else:
+                    try:
+                        inbox_dir = os.path.join(config.assets_dir, "inbox")
+                        total_urls, downloaded = collect_images_from_post_urls(
+                            post_urls=post_urls,
+                            output_dir=inbox_dir,
+                            limit=post_limit,
+                        )
+                        if total_urls == 0:
+                            st.warning("이미지 URL을 찾지 못했습니다.")
+                        else:
+                            st.success(f"발견 {total_urls}개 / 저장 {downloaded}개")
+                    except Exception as exc:
+                        st.error(f"포스트 수집 실패: {exc}")
 
         st.subheader("일본 트렌드 자동 수집(Pexels)")
         st.caption("SerpAPI로 일본 트렌드 키워드를 만들고, Pexels에서 이미지를 자동 수집합니다.")

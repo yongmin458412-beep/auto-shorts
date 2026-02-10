@@ -70,6 +70,7 @@ RUN_BATCH=1 BATCH_COUNT=2 BATCH_SEED="일본어 숏츠 주제" python qq.py
 - `BGM 업로드`에서 오디오를 올리면 자동 선택에 사용됩니다.
 - `BGM_MODE=trending`이면 `bgm/trending` 폴더의 음악을 우선 사용합니다.
 - `URL 목록으로 이미지 수집`은 사용 권한이 있는 이미지 URL만 넣어야 합니다.
+- `네이버 블로그 포스트 이미지 수집`은 퍼가기가 허용된 포스트만 사용하세요.
 
 ## 6) 유튜브 업로드
 
