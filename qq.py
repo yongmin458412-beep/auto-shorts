@@ -676,6 +676,8 @@ def collect_images_serpapi(
     output_dir: str,
     limit: int = 12,
 ) -> List[str]:
+    if not query or not query.strip():
+        raise RuntimeError("검색어가 비어 있습니다.")
     if not api_key:
         raise RuntimeError("SERPAPI_API_KEY가 없습니다.")
     os.makedirs(output_dir, exist_ok=True)
@@ -1479,6 +1481,9 @@ def run_streamlit_app() -> None:
         collect_count = st.slider("수집 개수", 4, 20, 8)
         if st.button("인박스로 수집"):
             try:
+                if not collect_query.strip():
+                    st.error("검색어를 입력하세요.")
+                    return
                 inbox_dir = os.path.join(config.assets_dir, "inbox")
                 collected = collect_images_serpapi(
                     query=collect_query,
