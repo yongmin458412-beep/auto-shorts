@@ -8,24 +8,34 @@ from dataclasses import dataclass
 from datetime import datetime
 from typing import Any, Dict, List, Optional, Tuple
 
-import numpy as np
 import pandas as pd
 import requests
 import streamlit as st
-from moviepy.editor import (
-    AudioFileClip,
-    CompositeAudioClip,
-    ImageClip,
-    concatenate_videoclips,
-    vfx,
-)
 from openai import OpenAI
-from PIL import Image, ImageDraw, ImageFilter, ImageFont
 
 import gspread
 from google.oauth2.credentials import Credentials
 from googleapiclient.discovery import build
 from googleapiclient.http import MediaFileUpload
+
+MOVIEPY_AVAILABLE = True
+MOVIEPY_ERROR = ""
+try:
+    import numpy as np
+    from moviepy.editor import (
+        AudioFileClip,
+        CompositeAudioClip,
+        ImageClip,
+        concatenate_videoclips,
+        vfx,
+    )
+    from PIL import Image, ImageDraw, ImageFilter, ImageFont
+except Exception as exc:
+    MOVIEPY_AVAILABLE = False
+    MOVIEPY_ERROR = str(exc)
+    np = None
+    AudioFileClip = CompositeAudioClip = ImageClip = concatenate_videoclips = vfx = None
+    Image = ImageDraw = ImageFilter = ImageFont = None
 
 
 def _get_secret(key: str, default: Optional[str] = None) -> Optional[str]:
@@ -318,12 +328,16 @@ def tags_from_text(text: str) -> List[str]:
 
 
 def _load_font(font_path: str, size: int) -> ImageFont.FreeTypeFont:
+    if not MOVIEPY_AVAILABLE:
+        raise RuntimeError(f"MoviePy/PIL not available: {MOVIEPY_ERROR}")
     if font_path and os.path.exists(font_path):
         return ImageFont.truetype(font_path, size=size)
     return ImageFont.load_default()
 
 
 def _fit_image_to_canvas(image: Image.Image, size: Tuple[int, int]) -> Image.Image:
+    if not MOVIEPY_AVAILABLE:
+        raise RuntimeError(f"MoviePy/PIL not available: {MOVIEPY_ERROR}")
     target_width, target_height = size
     original_width, original_height = image.size
     scale = max(target_width / original_width, target_height / original_height)
@@ -336,6 +350,8 @@ def _fit_image_to_canvas(image: Image.Image, size: Tuple[int, int]) -> Image.Ima
 
 
 def _make_background(image: Image.Image, size: Tuple[int, int]) -> Image.Image:
+    if not MOVIEPY_AVAILABLE:
+        raise RuntimeError(f"MoviePy/PIL not available: {MOVIEPY_ERROR}")
     background = image.resize(size, Image.LANCZOS)
     return background.filter(ImageFilter.GaussianBlur(radius=18))
 
@@ -348,6 +364,8 @@ def _draw_text_block(
     box: Tuple[int, int, int, int],
     fill: Tuple[int, int, int],
 ) -> Image.Image:
+    if not MOVIEPY_AVAILABLE:
+        raise RuntimeError(f"MoviePy/PIL not available: {MOVIEPY_ERROR}")
     draw = ImageDraw.Draw(image)
     font = _load_font(font_path, font_size)
     max_width = box[2] - box[0]
@@ -370,6 +388,8 @@ def _compose_frame(
     size: Tuple[int, int],
     font_path: str,
 ) -> Image.Image:
+    if not MOVIEPY_AVAILABLE:
+        raise RuntimeError(f"MoviePy/PIL not available: {MOVIEPY_ERROR}")
     base = Image.open(asset_path).convert("RGB")
     background = _make_background(base, size)
     foreground = _fit_image_to_canvas(base, size)
@@ -398,6 +418,8 @@ def render_video(
     bgm_path: str | None = None,
     bgm_volume: float = 0.08,
 ) -> str:
+    if not MOVIEPY_AVAILABLE:
+        raise RuntimeError(f"MoviePy/PIL not available: {MOVIEPY_ERROR}")
     audio_clip = AudioFileClip(tts_audio_path)
     durations = _estimate_durations(texts, audio_clip.duration)
     clips: List[ImageClip] = []
