@@ -1585,6 +1585,17 @@ def run_streamlit_app() -> None:
         if inbox_files:
             st.subheader("인박스")
             inbox_tags = st.text_input("인박스 태그(쉼표 구분)")
+            preset_map = {
+                "충격/반전": ["shock", "wow"],
+                "웃김/비꼼": ["laugh"],
+                "어이없음/당황": ["awkward", "facepalm"],
+                "짜증/분노": ["angry"],
+                "귀여움/힐링": ["cute"],
+                "전개/스토리": ["plot"],
+                "엔딩/마무리": ["ending"],
+            }
+            preset_choices = list(preset_map.keys())
+            selected_presets = st.multiselect("상황 프리셋", options=preset_choices)
             add_pepe_tag = st.checkbox("페페 기본 태그 추가", value=False)
             selected_files: List[str] = []
             for file_path in inbox_files:
@@ -1593,8 +1604,12 @@ def run_streamlit_app() -> None:
                     selected_files.append(file_path)
             if st.button("선택한 짤 저장"):
                 base_tags = tags_from_text(inbox_tags)
+                for preset in selected_presets:
+                    base_tags.extend(preset_map.get(preset, []))
                 if add_pepe_tag:
                     base_tags = list({*base_tags, "pepe"})
+                else:
+                    base_tags = list(set(base_tags))
                 for file_path in selected_files:
                     add_asset(config.manifest_path, file_path, base_tags)
                 st.success("선택한 짤이 라이브러리에 추가되었습니다.")
