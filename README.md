@@ -39,6 +39,7 @@ Streamlit Cloud에서 파이썬 버전 문제로 `moviepy`가 설치 실패하�
 - `BBOOM_MAX_FETCH`
 - `USED_LINKS_PATH`
 - `TREND_QUERY`, `TREND_MAX_RESULTS`
+- `JA_DIALECT_STYLE` (예: 関西弁, 博多弁)
 - `APPROVE_KEYWORDS`, `SWAP_KEYWORDS`
 - `GOOGLE_SERVICE_ACCOUNT_JSON_B64` (대체 옵션)
 

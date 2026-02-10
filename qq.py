@@ -146,6 +146,7 @@ class AppConfig:
     youtube_privacy_status: str
     serpapi_api_key: str
     pexels_api_key: str
+    ja_dialect_style: str
     telegram_bot_token: str
     telegram_admin_chat_id: str
     telegram_timeout_sec: int
@@ -189,6 +190,7 @@ def load_config() -> AppConfig:
         youtube_privacy_status=_get_secret("YOUTUBE_PRIVACY_STATUS", "public") or "public",
         serpapi_api_key=_get_secret("SERPAPI_API_KEY", "") or "",
         pexels_api_key=_get_secret("PEXELS_API_KEY", "") or "",
+        ja_dialect_style=_get_secret("JA_DIALECT_STYLE", "") or "",
         telegram_bot_token=_get_secret("TELEGRAM_BOT_TOKEN", "") or "",
         telegram_admin_chat_id=_get_secret("TELEGRAM_ADMIN_CHAT_ID", "") or "",
         telegram_timeout_sec=int(_get_secret("TELEGRAM_TIMEOUT_SEC", "600") or 600),
@@ -244,6 +246,7 @@ def generate_script(
     beats_count: int = 7,
     allowed_tags: List[str] | None = None,
     trend_context: str = "",
+    dialect_style: str = "",
 ) -> Dict[str, Any]:
     if not config.openai_api_key:
         raise RuntimeError("OPENAI_API_KEY가 없습니다.")
@@ -266,14 +269,22 @@ def generate_script(
         "Each beat: {text, tag}. "
         "Keep beats punchy, 1 line each, no emojis in text."
     )
+    style_line = "Style: Japanese, fast, comedic, meme-like. "
+    if dialect_style:
+        style_line += (
+            f"Use {dialect_style} dialect for ALL Japanese text. "
+            "Keep it friendly and natural, avoid offensive stereotypes. "
+        )
     user_text = (
         f"Seed: {seed_text}\n"
         f"Language: {language}\n"
         f"Beats: {beats_count}\n"
         f"Allowed tags: {tag_list}\n"
         f"Trend context: {trend_context}\n"
-        "Style: Japanese, fast, comedic, meme-like. "
-        "Hashtags: 6-10 items, reflect recent JP trends if context provided. "
+        f"{style_line}"
+        "Hook hard in the first 3 seconds and aim for a loop ending. "
+        "Hashtags: 3-6 items, reflect recent JP trends if context provided. "
+        "Keep title short and punchy. "
         "Length: 20-55 seconds total. "
         "Output JSON only."
     )
@@ -1053,6 +1064,7 @@ def _auto_bboom_flow(config: AppConfig, progress, status_box) -> None:
             seed_text=seed,
             beats_count=7,
             trend_context=trend_context,
+            dialect_style=config.ja_dialect_style,
         )
         plan_text = _script_plan_text(script)
         request_text = (
@@ -1184,7 +1196,8 @@ def run_streamlit_app() -> None:
     st.sidebar.markdown(
         "- `YOUTUBE_*` (자동 업로드)\n"
         "- `SERPAPI_API_KEY` (트렌드 수집)\n"
-        "- `PEXELS_API_KEY` (트렌드 이미지 자동 수집)"
+        "- `PEXELS_API_KEY` (트렌드 이미지 자동 수집)\n"
+        "- `JA_DIALECT_STYLE` (일본어 사투리 스타일)"
     )
     missing = _missing_required(config)
     if missing:
@@ -1221,6 +1234,7 @@ def run_streamlit_app() -> None:
                 beats_count=beats_count,
                 allowed_tags=tag_filter or all_tags,
                 trend_context=get_trend_context(config),
+                dialect_style=config.ja_dialect_style,
             )
             st.session_state["script"] = script
             _status_update(progress, status_box, 0.2, "스크립트 생성 완료")
@@ -1479,7 +1493,13 @@ def run_batch(count: int, seed: str, beats: int) -> None:
     if not manifest_items:
         raise RuntimeError("에셋이 없습니다. 먼저 이미지를 추가하세요.")
     for index in range(count):
-        script = generate_script(config, seed, beats_count=beats, trend_context=get_trend_context(config))
+        script = generate_script(
+            config,
+            seed,
+            beats_count=beats,
+            trend_context=get_trend_context(config),
+            dialect_style=config.ja_dialect_style,
+        )
         beats_list = script.get("beats", [])
         texts = [beat.get("text", "") for beat in beats_list]
         tags = [beat.get("tag", "") for beat in beats_list]
