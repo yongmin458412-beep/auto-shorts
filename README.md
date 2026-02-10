@@ -26,9 +26,19 @@ Streamlit Cloud에서 파이썬 버전 문제로 `moviepy`가 설치 실패하�
 - `GOOGLE_SERVICE_ACCOUNT_JSON`
 - `FONT_PATH` (일본어 폰트 경로)
 
+자동 승인(텔레그램):
+- `TELEGRAM_BOT_TOKEN`
+- `TELEGRAM_ADMIN_CHAT_ID`
+- `TELEGRAM_TIMEOUT_SEC`
+
 선택:
 - `YOUTUBE_*` (업로드 활성화)
-- `SERPAPI_API_KEY` (이미지 자동 수집)
+- `SERPAPI_API_KEY` (이미지/트렌드 자동 수집)
+- `BBOOM_LIST_URL` (네이버 뿜 인기글 목록 URL)
+- `BBOOM_MAX_FETCH`
+- `USED_LINKS_PATH`
+- `TREND_QUERY`, `TREND_MAX_RESULTS`
+- `APPROVE_KEYWORDS`, `SWAP_KEYWORDS`
 
 ## 3) 실행
 
@@ -49,6 +59,7 @@ RUN_BATCH=1 BATCH_COUNT=2 BATCH_SEED="일본어 숏츠 주제" python qq.py
 - `에셋` 탭에서 이미지 업로드 후 태그를 붙입니다.
 - 태그는 `shock, laugh, awkward, wow` 같은 감정 키워드로 정리하면 자동 매칭이 잘 됩니다.
 - `AI 이미지 수집(SerpAPI)` 기능은 SerpAPI 키가 있을 때만 작동합니다.
+- 인박스에서 체크 후 **`선택한 짤 저장`** 버튼으로 라이브러리에 넣습니다.
 
 ## 6) 유튜브 업로드
 
@@ -59,3 +70,10 @@ RUN_BATCH=1 BATCH_COUNT=2 BATCH_SEED="일본어 숏츠 주제" python qq.py
 
 - `생성` 탭에서 스크립트 생성 → TTS → 렌더 → 업로드 순서가 진행되며,
   상단 진행바와 상태 메시지로 진행상황을 확인할 수 있습니다.
+
+## 8) 네이버 뿜 자동 생성(승인 포함)
+
+- `생성` 탭의 **“뿜 인기글로 자동 생성 시작”** 버튼을 누르면,
+  뿜 인기글을 수집 → 텔레그램 승인 요청 → 승인 시 제작/업로드까지 자동 진행합니다.
+- 10분 내 응답이 없으면 자동 승인됩니다.
+- 완료 후 텔레그램으로 요약과 유튜브 링크가 전송됩니다.

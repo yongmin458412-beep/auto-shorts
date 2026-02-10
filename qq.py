@@ -3,7 +3,11 @@ from __future__ import annotations
 import json
 import os
 import random
+import re
 import textwrap
+import time
+from html import unescape
+from urllib.parse import urljoin
 from dataclasses import dataclass
 from datetime import datetime
 from typing import Any, Dict, List, Optional, Tuple
@@ -12,6 +16,7 @@ import pandas as pd
 import requests
 import streamlit as st
 from openai import OpenAI
+from bs4 import BeautifulSoup
 
 import gspread
 from google.oauth2.credentials import Credentials
@@ -95,6 +100,17 @@ class AppConfig:
     youtube_refresh_token: str
     youtube_privacy_status: str
     serpapi_api_key: str
+    telegram_bot_token: str
+    telegram_admin_chat_id: str
+    telegram_timeout_sec: int
+    telegram_offset_path: str
+    bboom_list_url: str
+    bboom_max_fetch: int
+    used_links_path: str
+    trend_query: str
+    trend_max_results: int
+    approve_keywords: List[str]
+    swap_keywords: List[str]
 
 
 def load_config() -> AppConfig:
@@ -126,6 +142,20 @@ def load_config() -> AppConfig:
         youtube_refresh_token=_get_secret("YOUTUBE_REFRESH_TOKEN", "") or "",
         youtube_privacy_status=_get_secret("YOUTUBE_PRIVACY_STATUS", "public") or "public",
         serpapi_api_key=_get_secret("SERPAPI_API_KEY", "") or "",
+        telegram_bot_token=_get_secret("TELEGRAM_BOT_TOKEN", "") or "",
+        telegram_admin_chat_id=_get_secret("TELEGRAM_ADMIN_CHAT_ID", "") or "",
+        telegram_timeout_sec=int(_get_secret("TELEGRAM_TIMEOUT_SEC", "600") or 600),
+        telegram_offset_path=_get_secret("TELEGRAM_OFFSET_PATH", "data/state/telegram_offset.json")
+        or "data/state/telegram_offset.json",
+        bboom_list_url=_get_secret("BBOOM_LIST_URL", "https://m.bboom.naver.com/best")
+        or "https://m.bboom.naver.com/best",
+        bboom_max_fetch=int(_get_secret("BBOOM_MAX_FETCH", "30") or 30),
+        used_links_path=_get_secret("USED_LINKS_PATH", "data/state/used_links.json")
+        or "data/state/used_links.json",
+        trend_query=_get_secret("TREND_QUERY", "日本 トレンド ハッシュタグ") or "日本 トレンド ハッシュタグ",
+        trend_max_results=int(_get_secret("TREND_MAX_RESULTS", "8") or 8),
+        approve_keywords=_get_list("APPROVE_KEYWORDS") or ["승인", "approve", "ok", "yes"],
+        swap_keywords=_get_list("SWAP_KEYWORDS") or ["교환", "swap", "change", "next"],
     )
 
 
@@ -166,6 +196,7 @@ def generate_script(
     language: str = "ja",
     beats_count: int = 7,
     allowed_tags: List[str] | None = None,
+    trend_context: str = "",
 ) -> Dict[str, Any]:
     if not config.openai_api_key:
         raise RuntimeError("OPENAI_API_KEY가 없습니다.")
@@ -193,7 +224,9 @@ def generate_script(
         f"Language: {language}\n"
         f"Beats: {beats_count}\n"
         f"Allowed tags: {tag_list}\n"
+        f"Trend context: {trend_context}\n"
         "Style: Japanese, fast, comedic, meme-like. "
+        "Hashtags: 6-10 items, reflect recent JP trends if context provided. "
         "Length: 20-55 seconds total. "
         "Output JSON only."
     )
@@ -546,6 +579,141 @@ def collect_images_serpapi(
     return downloaded
 
 
+def get_trend_context(config: AppConfig) -> str:
+    if not config.serpapi_api_key:
+        return ""
+    try:
+        params = {
+            "engine": "google_news",
+            "q": config.trend_query,
+            "api_key": config.serpapi_api_key,
+            "hl": "ja",
+            "gl": "jp",
+        }
+        response = requests.get("https://serpapi.com/search.json", params=params, timeout=60)
+        response.raise_for_status()
+        news = response.json().get("news_results", [])[: config.trend_max_results]
+        titles = [item.get("title", "") for item in news if item.get("title")]
+        if not titles:
+            return ""
+        return " / ".join(titles)
+    except Exception:
+        return ""
+
+
+def fetch_bboom_list(config: AppConfig) -> List[Dict[str, str]]:
+    headers = {"User-Agent": "Mozilla/5.0"}
+    response = requests.get(config.bboom_list_url, headers=headers, timeout=30)
+    response.raise_for_status()
+    html = response.text
+    soup = BeautifulSoup(html, "html.parser")
+    items: List[Dict[str, str]] = []
+    seen = set()
+    for anchor in soup.find_all("a", href=True):
+        href = anchor.get("href", "")
+        if "postNo=" not in href and "postno=" not in href:
+            continue
+        url = urljoin(config.bboom_list_url, href)
+        if url in seen:
+            continue
+        title = anchor.get_text(" ", strip=True)
+        title = unescape(title)
+        if not title:
+            continue
+        seen.add(url)
+        items.append({"url": url, "title": title})
+        if len(items) >= config.bboom_max_fetch:
+            break
+    if items:
+        return items
+    # Fallback: regex extraction
+    for match in re.findall(r'href=["\']([^"\']*postNo=\d+[^"\']*)', html):
+        url = urljoin(config.bboom_list_url, match)
+        if url in seen:
+            continue
+        seen.add(url)
+        items.append({"url": url, "title": url})
+        if len(items) >= config.bboom_max_fetch:
+            break
+    return items
+
+
+def fetch_bboom_post_text(url: str) -> Dict[str, str]:
+    headers = {"User-Agent": "Mozilla/5.0"}
+    response = requests.get(url, headers=headers, timeout=30)
+    response.raise_for_status()
+    html = response.text
+    soup = BeautifulSoup(html, "html.parser")
+    title = ""
+    meta_title = soup.find("meta", property="og:title")
+    if meta_title and meta_title.get("content"):
+        title = meta_title["content"].strip()
+    if not title and soup.title:
+        title = soup.title.get_text(strip=True)
+    meta_desc = soup.find("meta", property="og:description")
+    desc = meta_desc["content"].strip() if meta_desc and meta_desc.get("content") else ""
+    text_blocks = []
+    for tag in soup.find_all(["p", "span"]):
+        text = tag.get_text(" ", strip=True)
+        if text and len(text) > 5:
+            text_blocks.append(text)
+        if len(text_blocks) >= 6:
+            break
+    content = " ".join(text_blocks)
+    if not content:
+        content = desc
+    return {"title": title, "content": content}
+
+
+def send_telegram_message(token: str, chat_id: str, text: str) -> None:
+    if not token or not chat_id:
+        return
+    url = f"https://api.telegram.org/bot{token}/sendMessage"
+    payload = {"chat_id": chat_id, "text": text}
+    requests.post(url, json=payload, timeout=30)
+
+
+def get_telegram_updates(token: str, offset: int) -> List[Dict[str, Any]]:
+    if not token:
+        return []
+    url = f"https://api.telegram.org/bot{token}/getUpdates"
+    params = {"offset": offset, "timeout": 10}
+    response = requests.get(url, params=params, timeout=30)
+    response.raise_for_status()
+    return response.json().get("result", [])
+
+
+def wait_for_approval(config: AppConfig, progress, status_box) -> str:
+    start_time = time.time()
+    offset = _load_offset(config.telegram_offset_path)
+    approve_set = {kw.lower() for kw in config.approve_keywords}
+    swap_set = {kw.lower() for kw in config.swap_keywords}
+    while time.time() - start_time < config.telegram_timeout_sec:
+        _status_update(progress, status_box, 0.25, "텔레그램 승인 대기")
+        try:
+            updates = get_telegram_updates(config.telegram_bot_token, offset)
+        except Exception:
+            updates = []
+        for update in updates:
+            update_id = update.get("update_id", 0)
+            offset = max(offset, update_id + 1)
+            message = update.get("message", {})
+            chat = message.get("chat", {})
+            chat_id = str(chat.get("id", ""))
+            if config.telegram_admin_chat_id and chat_id != str(config.telegram_admin_chat_id):
+                continue
+            text = (message.get("text") or "").strip().lower()
+            if any(word in text for word in approve_set):
+                _save_offset(config.telegram_offset_path, offset)
+                return "approve"
+            if any(word in text for word in swap_set):
+                _save_offset(config.telegram_offset_path, offset)
+                return "swap"
+        _save_offset(config.telegram_offset_path, offset)
+        time.sleep(5)
+    return "approve"
+
+
 def _write_local_log(path: str, record: dict) -> None:
     os.makedirs(os.path.dirname(path), exist_ok=True)
     with open(path, "a", encoding="utf-8") as file:
@@ -555,6 +723,58 @@ def _write_local_log(path: str, record: dict) -> None:
 def _format_hashtags(tags: List[str]) -> str:
     return " ".join(tags)
 
+
+def _read_json_file(path: str, default: Any) -> Any:
+    if not path:
+        return default
+    if not os.path.exists(path):
+        return default
+    try:
+        with open(path, "r", encoding="utf-8") as file:
+            return json.load(file)
+    except Exception:
+        return default
+
+
+def _write_json_file(path: str, data: Any) -> None:
+    if not path:
+        return
+    os.makedirs(os.path.dirname(path), exist_ok=True)
+    with open(path, "w", encoding="utf-8") as file:
+        json.dump(data, file, ensure_ascii=False, indent=2)
+
+
+def _load_used_links(path: str) -> Dict[str, Any]:
+    return _read_json_file(path, {"used": []})
+
+
+def _is_used_link(used_data: Dict[str, Any], url: str) -> bool:
+    used_list = used_data.get("used", [])
+    return any(item.get("url") == url for item in used_list)
+
+
+def _mark_used_link(path: str, url: str, status: str, title: str = "") -> None:
+    used_data = _load_used_links(path)
+    used_list = used_data.get("used", [])
+    used_list.append(
+        {
+            "url": url,
+            "status": status,
+            "title": title,
+            "ts": datetime.utcnow().strftime("%Y-%m-%d %H:%M:%S"),
+        }
+    )
+    used_data["used"] = used_list
+    _write_json_file(path, used_data)
+
+
+def _load_offset(path: str) -> int:
+    data = _read_json_file(path, {"offset": 0})
+    return int(data.get("offset", 0))
+
+
+def _save_offset(path: str, offset: int) -> None:
+    _write_json_file(path, {"offset": offset})
 
 def _missing_required(config: AppConfig) -> List[str]:
     missing = []
@@ -585,6 +805,149 @@ def _status_update(progress, status_box, pct: float, message: str) -> None:
         progress.progress(min(max(pct, 0.0), 1.0))
     if status_box:
         status_box.info(f"진행 상태: {message}")
+
+
+def _script_plan_text(script: Dict[str, Any]) -> str:
+    beats = script.get("beats", [])
+    hook = beats[0].get("text", "") if beats else ""
+    ending = beats[-1].get("text", "") if beats else ""
+    middle = beats[1].get("text", "") if len(beats) > 2 else ""
+    return (
+        f"제목(안): {script.get('title_ja','')}\n"
+        f"훅: {hook}\n"
+        f"전개: {middle}\n"
+        f"오치: {ending}\n"
+        f"해시태그: {' '.join(script.get('hashtags_ja', []))}"
+    )
+
+
+def _auto_bboom_flow(config: AppConfig, progress, status_box) -> None:
+    if not config.telegram_bot_token or not config.telegram_admin_chat_id:
+        st.error("텔레그램 봇 설정이 필요합니다. TELEGRAM_BOT_TOKEN, TELEGRAM_ADMIN_CHAT_ID를 확인하세요.")
+        return
+    manifest_items = load_manifest(config.manifest_path)
+    if not manifest_items:
+        st.error("에셋이 없습니다. 먼저 이미지를 추가하세요.")
+        return
+
+    _status_update(progress, status_box, 0.05, "네이버 뿜 인기글 수집")
+    try:
+        items = fetch_bboom_list(config)
+    except Exception as exc:
+        st.error(f"뿜 수집 실패: {exc}")
+        return
+    if not items:
+        st.error("가져올 인기글이 없습니다.")
+        return
+
+    used_data = _load_used_links(config.used_links_path)
+    trend_context = get_trend_context(config)
+
+    for item in items:
+        url = item.get("url", "")
+        if not url or _is_used_link(used_data, url):
+            continue
+        _status_update(progress, status_box, 0.12, "글 내용 분석")
+        try:
+            post = fetch_bboom_post_text(url)
+        except Exception:
+            post = {"title": item.get("title", ""), "content": ""}
+        seed = f"{post.get('title','')}\n{post.get('content','')}"
+
+        _status_update(progress, status_box, 0.18, "스크립트 초안 생성")
+        script = generate_script(
+            config=config,
+            seed_text=seed,
+            beats_count=7,
+            trend_context=trend_context,
+        )
+        plan_text = _script_plan_text(script)
+        request_text = (
+            f"[승인 요청]\n링크: {url}\n"
+            f"제목: {post.get('title','')}\n"
+            f"{plan_text}\n\n"
+            "응답: 승인 / 교환"
+        )
+        send_telegram_message(config.telegram_bot_token, config.telegram_admin_chat_id, request_text)
+        decision = wait_for_approval(config, progress, status_box)
+        if decision == "swap":
+            _mark_used_link(config.used_links_path, url, "swap", post.get("title", ""))
+            send_telegram_message(config.telegram_bot_token, config.telegram_admin_chat_id, "교환 처리됨. 다음 인기글로 진행합니다.")
+            continue
+
+        _status_update(progress, status_box, 0.3, "TTS 생성")
+        texts = [beat.get("text", "") for beat in script.get("beats", [])]
+        tags = [beat.get("tag", "") for beat in script.get("beats", [])]
+        assets = []
+        for tag in tags:
+            asset = pick_asset(manifest_items, [tag])
+            if asset:
+                assets.append(asset.path)
+        if not assets:
+            st.error("태그에 맞는 에셋이 없습니다.")
+            return
+        now = datetime.utcnow().strftime("%Y%m%d_%H%M%S")
+        audio_path = os.path.join(config.output_dir, f"tts_{now}.mp3")
+        voice_id = pick_voice_id(config.elevenlabs_voice_ids)
+        tts_elevenlabs(config, "。".join(texts), audio_path, voice_id=voice_id)
+
+        _status_update(progress, status_box, 0.6, "영상 렌더링")
+        output_path = os.path.join(config.output_dir, f"shorts_{now}.mp4")
+        render_video(
+            config=config,
+            asset_paths=assets,
+            texts=texts,
+            tts_audio_path=audio_path,
+            output_path=output_path,
+        )
+
+        video_id = ""
+        video_url = ""
+        if config.enable_youtube_upload:
+            _status_update(progress, status_box, 0.85, "유튜브 업로드")
+            result = upload_video(
+                config=config,
+                file_path=output_path,
+                title=script.get("title_ja", ""),
+                description=script.get("description_ja", "") + "\n\n" + " ".join(script.get("hashtags_ja", [])),
+                tags=script.get("hashtags_ja", []),
+            )
+            video_id = result.get("video_id", "")
+            video_url = result.get("video_url", "")
+        else:
+            _status_update(progress, status_box, 0.85, "유튜브 업로드(스킵)")
+
+        log_row = {
+            "date_jst": datetime.utcnow().strftime("%Y-%m-%d %H:%M:%S"),
+            "title_ja": script.get("title_ja", ""),
+            "hashtags_ja": " ".join(script.get("hashtags_ja", [])),
+            "template_id": "default",
+            "asset_ids": ",".join([a for a in assets]),
+            "voice_id": voice_id,
+            "video_path": output_path,
+            "youtube_video_id": video_id,
+            "youtube_url": video_url,
+            "status": "ok",
+            "error": "",
+        }
+        try:
+            append_publish_log(config, log_row)
+        except Exception:
+            pass
+        _write_local_log(os.path.join(config.output_dir, "runs.jsonl"), log_row)
+        _mark_used_link(config.used_links_path, url, "approved", post.get("title", ""))
+        _status_update(progress, status_box, 1.0, "완료")
+        st.video(output_path)
+
+        summary_text = f"[완료]\n제목: {script.get('title_ja','')}\n요약: {script.get('description_ja','')}\n"
+        if video_url:
+            summary_text += f"유튜브 링크: {video_url}"
+        else:
+            summary_text += f"로컬 파일: {output_path}"
+        send_telegram_message(config.telegram_bot_token, config.telegram_admin_chat_id, summary_text)
+        return
+
+    st.warning("사용 가능한 인기글이 더 이상 없습니다.")
 
 
 def run_streamlit_app() -> None:
@@ -618,10 +981,16 @@ def run_streamlit_app() -> None:
         "- `GOOGLE_SERVICE_ACCOUNT_JSON`\n"
         "- `FONT_PATH`"
     )
+    st.sidebar.subheader("자동 승인(텔레그램)")
+    st.sidebar.markdown(
+        "- `TELEGRAM_BOT_TOKEN`\n"
+        "- `TELEGRAM_ADMIN_CHAT_ID`\n"
+        "- `TELEGRAM_TIMEOUT_SEC`"
+    )
     st.sidebar.subheader("선택")
     st.sidebar.markdown(
         "- `YOUTUBE_*` (자동 업로드)\n"
-        "- `SERPAPI_API_KEY` (이미지 자동 수집)"
+        "- `SERPAPI_API_KEY` (이미지/트렌드 자동 수집)"
     )
     missing = _missing_required(config)
     if missing:
@@ -636,12 +1005,19 @@ def run_streamlit_app() -> None:
         st.header("생성")
         if missing:
             st.error("필수 API/설정이 누락되어 있습니다. 좌측 사이드바를 확인하세요.")
+        progress = st.progress(0.0)
+        status_box = st.empty()
+
+        st.subheader("네이버 뿜 자동 생성(승인 포함)")
+        auto_button = st.button("뿜 인기글로 자동 생성 시작")
+        if auto_button:
+            _auto_bboom_flow(config, progress, status_box)
+
+        st.divider()
         seed_text = st.text_area("아이디어/요약 입력", height=120)
         beats_count = st.slider("문장(비트) 수", 5, 9, 7)
         tag_filter = st.multiselect("허용 태그", options=all_tags, default=all_tags[:5])
         generate_button = st.button("스크립트 생성")
-        progress = st.progress(0.0)
-        status_box = st.empty()
 
         if generate_button and seed_text:
             _status_update(progress, status_box, 0.05, "스크립트 생성 중")
@@ -650,6 +1026,7 @@ def run_streamlit_app() -> None:
                 seed_text=seed_text,
                 beats_count=beats_count,
                 allowed_tags=tag_filter or all_tags,
+                trend_context=get_trend_context(config),
             )
             st.session_state["script"] = script
             _status_update(progress, status_box, 0.2, "스크립트 생성 완료")
@@ -780,11 +1157,15 @@ def run_streamlit_app() -> None:
         if inbox_files:
             st.subheader("인박스")
             inbox_tags = st.text_input("인박스 태그(쉼표 구분)")
+            selected_files: List[str] = []
             for file_path in inbox_files:
                 st.image(file_path, width=200)
-                if st.button(f"라이브러리에 추가: {os.path.basename(file_path)}", key=file_path):
+                if st.checkbox(f"선택: {os.path.basename(file_path)}", key=f"select_{file_path}"):
+                    selected_files.append(file_path)
+            if st.button("선택한 짤 저장"):
+                for file_path in selected_files:
                     add_asset(config.manifest_path, file_path, tags_from_text(inbox_tags))
-                    st.success("라이브러리에 추가되었습니다.")
+                st.success("선택한 짤이 라이브러리에 추가되었습니다.")
 
         st.subheader("라이브러리")
         if manifest_items:
@@ -813,7 +1194,7 @@ def run_batch(count: int, seed: str, beats: int) -> None:
     if not manifest_items:
         raise RuntimeError("에셋이 없습니다. 먼저 이미지를 추가하세요.")
     for index in range(count):
-        script = generate_script(config, seed, beats_count=beats)
+        script = generate_script(config, seed, beats_count=beats, trend_context=get_trend_context(config))
         beats_list = script.get("beats", [])
         texts = [beat.get("text", "") for beat in beats_list]
         tags = [beat.get("tag", "") for beat in beats_list]
