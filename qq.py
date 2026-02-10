@@ -152,9 +152,12 @@ def download_images_from_urls(urls: List[str], output_dir: str, limit: int = 30)
 def _normalize_url(url: str) -> str:
     if not url:
         return ""
-    url = url.strip()
+    url = url.strip().strip('"').strip("'")
     if url.startswith("//"):
-        return "https:" + url
+        url = "https:" + url
+    # Try to keep original quality for Naver images
+    if "pstatic.net" in url and "?" in url:
+        url = url.split("?", 1)[0]
     return url
 
 
@@ -588,6 +591,56 @@ def add_asset(
     items.append(new_item)
     save_manifest(manifest_path, items)
     return new_item
+
+
+def update_asset_tags(
+    manifest_path: str,
+    tag_map: Dict[str, List[str]],
+    keep_existing: bool = True,
+) -> int:
+    if not tag_map:
+        return 0
+    items = load_manifest(manifest_path)
+    updated = 0
+    for item in items:
+        if item.asset_id not in tag_map:
+            continue
+        new_tags = tag_map[item.asset_id]
+        if keep_existing:
+            merged = list(dict.fromkeys(item.tags + new_tags))
+            item.tags = merged
+        else:
+            item.tags = list(dict.fromkeys(new_tags))
+        updated += 1
+    if updated:
+        save_manifest(manifest_path, items)
+    return updated
+
+
+def remove_assets(
+    manifest_path: str,
+    asset_ids: List[str],
+    delete_files: bool = False,
+) -> int:
+    if not asset_ids:
+        return 0
+    items = load_manifest(manifest_path)
+    remaining: List[AssetItem] = []
+    removed = 0
+    remove_set = set(asset_ids)
+    for item in items:
+        if item.asset_id in remove_set:
+            removed += 1
+            if delete_files and os.path.exists(item.path):
+                try:
+                    os.remove(item.path)
+                except Exception:
+                    pass
+        else:
+            remaining.append(item)
+    if removed:
+        save_manifest(manifest_path, remaining)
+    return removed
 
 
 def list_tags(items: List[AssetItem]) -> List[str]:
@@ -1825,8 +1878,54 @@ def run_streamlit_app() -> None:
         if manifest_items:
             selected_tag = st.selectbox("태그 필터", options=["(전체)"] + all_tags)
             filtered = manifest_items if selected_tag == "(전체)" else filter_assets_by_tags(manifest_items, [selected_tag])
+            lib_select_all = st.checkbox("라이브러리 전체 선택", value=False, key="lib_select_all")
+            delete_files = st.checkbox("선택 항목 파일도 삭제", value=False, key="lib_delete_files")
+            keep_tags = st.checkbox("AI 태그 적용 시 기존 태그 유지", value=True, key="lib_ai_keep")
+            selected_assets: List[AssetItem] = []
             for item in filtered:
                 st.image(item.path, width=200, caption=",".join(item.tags))
+                if lib_select_all or st.checkbox(f"선택: {item.asset_id}", key=f"lib_select_{item.asset_id}"):
+                    selected_assets.append(item)
+                lib_ai_map = st.session_state.get("library_ai_tag_map", {})
+                if item.asset_id in lib_ai_map:
+                    st.caption(f"AI 태그: {', '.join(lib_ai_map[item.asset_id])}")
+
+            if st.button("선택한 에셋 AI 태그 분석"):
+                if not config.openai_api_key:
+                    st.error("OPENAI_API_KEY가 필요합니다.")
+                else:
+                    targets = selected_assets or filtered
+                    tag_map = st.session_state.get("library_ai_tag_map", {})
+                    progress = st.progress(0.0)
+                    for index, item in enumerate(targets):
+                        try:
+                            tags = analyze_image_tags(config, item.path)
+                            tag_map[item.asset_id] = tags
+                        except Exception:
+                            continue
+                        progress.progress((index + 1) / max(len(targets), 1))
+                    st.session_state["library_ai_tag_map"] = tag_map
+                    st.success("AI 태그 분석 완료")
+
+            if st.button("AI 태그로 분류 저장"):
+                tag_map = st.session_state.get("library_ai_tag_map", {})
+                if not tag_map:
+                    st.error("AI 태그가 없습니다. 먼저 분석하세요.")
+                else:
+                    ids = [item.asset_id for item in (selected_assets or filtered)]
+                    apply_map = {asset_id: tag_map.get(asset_id, []) for asset_id in ids}
+                    updated = update_asset_tags(config.manifest_path, apply_map, keep_existing=keep_tags)
+                    st.success(f"{updated}개 에셋 태그가 업데이트되었습니다.")
+                    st.rerun()
+
+            if st.button("선택한 에셋 삭제"):
+                ids = [item.asset_id for item in selected_assets]
+                if not ids:
+                    st.error("선택된 에셋이 없습니다.")
+                else:
+                    removed = remove_assets(config.manifest_path, ids, delete_files=delete_files)
+                    st.success(f"{removed}개 에셋이 삭제되었습니다.")
+                    st.rerun()
         else:
             st.info("아직 에셋이 없습니다.")
 
