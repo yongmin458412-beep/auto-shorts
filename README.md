@@ -23,7 +23,7 @@ Streamlit Cloud에서 파이썬 버전 문제로 `moviepy`가 설치 실패하�
 - `ELEVENLABS_API_KEY`
 - `ELEVENLABS_VOICE_ID` 또는 `ELEVENLABS_VOICE_IDS`
 - `SHEET_ID`
-- `GOOGLE_SERVICE_ACCOUNT_JSON`
+- `GOOGLE_SERVICE_ACCOUNT_JSON` (JSON은 TOML에서 `'''`로 감싸서 붙여넣기)
 - `FONT_PATH` (일본어 폰트 경로)
 
 자동 승인(텔레그램):
@@ -39,6 +39,7 @@ Streamlit Cloud에서 파이썬 버전 문제로 `moviepy`가 설치 실패하�
 - `USED_LINKS_PATH`
 - `TREND_QUERY`, `TREND_MAX_RESULTS`
 - `APPROVE_KEYWORDS`, `SWAP_KEYWORDS`
+- `GOOGLE_SERVICE_ACCOUNT_JSON_B64` (대체 옵션)
 
 ## 3) 실행
 

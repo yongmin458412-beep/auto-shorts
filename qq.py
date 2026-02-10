@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import json
+import base64
 import os
 import random
 import re
@@ -69,11 +70,39 @@ def _get_list(key: str) -> List[str]:
 def _get_json(key: str) -> Optional[Dict[str, Any]]:
     value = _get_secret(key)
     if not value:
+        b64_value = _get_secret(f"{key}_B64", "")
+        if b64_value:
+            try:
+                decoded = base64.b64decode(b64_value).decode("utf-8")
+                return json.loads(decoded)
+            except Exception:
+                return None
         return None
     try:
         return json.loads(value)
     except Exception:
+        fixed = _fix_private_key_json(value)
+        if fixed != value:
+            try:
+                return json.loads(fixed)
+            except Exception:
+                return None
         return None
+
+
+def _fix_private_key_json(value: str) -> str:
+    if "private_key" not in value:
+        return value
+    pattern = r'("private_key"\s*:\s*")(?P<key>-----BEGIN PRIVATE KEY-----.*?-----END PRIVATE KEY-----\s*)(?P<suffix>")'
+
+    def repl(match: re.Match) -> str:
+        key = match.group("key")
+        if "\\n" in key:
+            return match.group(0)
+        key_fixed = key.replace("\r\n", "\n").replace("\n", "\\n")
+        return f'{match.group(1)}{key_fixed}{match.group("suffix")}'
+
+    return re.sub(pattern, repl, value, flags=re.S)
 
 
 def _get_query_param(key: str) -> str:
