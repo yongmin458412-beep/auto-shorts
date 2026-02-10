@@ -145,6 +145,7 @@ class AppConfig:
     youtube_refresh_token: str
     youtube_privacy_status: str
     serpapi_api_key: str
+    pexels_api_key: str
     telegram_bot_token: str
     telegram_admin_chat_id: str
     telegram_timeout_sec: int
@@ -187,6 +188,7 @@ def load_config() -> AppConfig:
         youtube_refresh_token=_get_secret("YOUTUBE_REFRESH_TOKEN", "") or "",
         youtube_privacy_status=_get_secret("YOUTUBE_PRIVACY_STATUS", "public") or "public",
         serpapi_api_key=_get_secret("SERPAPI_API_KEY", "") or "",
+        pexels_api_key=_get_secret("PEXELS_API_KEY", "") or "",
         telegram_bot_token=_get_secret("TELEGRAM_BOT_TOKEN", "") or "",
         telegram_admin_chat_id=_get_secret("TELEGRAM_ADMIN_CHAT_ID", "") or "",
         telegram_timeout_sec=int(_get_secret("TELEGRAM_TIMEOUT_SEC", "600") or 600),
@@ -683,6 +685,115 @@ def get_trend_context(config: AppConfig) -> str:
         return ""
 
 
+def generate_trend_queries(config: AppConfig, trend_context: str, count: int = 4) -> List[str]:
+    if not trend_context or not config.openai_api_key:
+        return []
+    system_text = (
+        "You generate short Japanese search queries for image search. "
+        "Return JSON only. Format: {\"queries\": [\"...\"]}."
+    )
+    user_text = (
+        f"Trend context (Japan): {trend_context}\n"
+        f"Create {count} short Japanese image-search queries suitable for short-form content visuals. "
+        "Avoid brand names if possible. Keep each query under 6 words."
+    )
+    try:
+        client = OpenAI(api_key=config.openai_api_key)
+        response = client.responses.create(
+            model=config.openai_model,
+            input=[
+                {"role": "system", "content": system_text},
+                {"role": "user", "content": user_text},
+            ],
+        )
+        output_text = getattr(response, "output_text", "") or ""
+        result = extract_json(output_text)
+        queries = result.get("queries", []) if isinstance(result, dict) else []
+        cleaned: List[str] = []
+        for query in queries:
+            if isinstance(query, str):
+                value = query.strip()
+                if value:
+                    cleaned.append(value)
+        if cleaned:
+            return cleaned[:count]
+    except Exception:
+        return []
+    return []
+
+
+def collect_images_pexels(
+    query: str,
+    api_key: str,
+    output_dir: str,
+    limit: int = 12,
+    locale: str = "ja-JP",
+) -> List[str]:
+    if not api_key:
+        raise RuntimeError("PEXELS_API_KEY가 없습니다.")
+    os.makedirs(output_dir, exist_ok=True)
+    headers = {"Authorization": api_key}
+    params = {
+        "query": query,
+        "per_page": min(limit, 80),
+        "orientation": "portrait",
+        "locale": locale,
+    }
+    response = requests.get("https://api.pexels.com/v1/search", params=params, headers=headers, timeout=60)
+    response.raise_for_status()
+    photos = response.json().get("photos", [])
+    downloaded: List[str] = []
+    for photo in photos:
+        src = photo.get("src", {}) if isinstance(photo, dict) else {}
+        image_url = src.get("large") or src.get("original")
+        if not image_url:
+            continue
+        try:
+            image_response = requests.get(image_url, timeout=30)
+            image_response.raise_for_status()
+            filename = f"{random.randint(100000, 999999)}.jpg"
+            file_path = os.path.join(output_dir, filename)
+            with open(file_path, "wb") as file:
+                file.write(image_response.content)
+            downloaded.append(file_path)
+            if len(downloaded) >= limit:
+                break
+        except Exception:
+            continue
+    return downloaded
+
+
+def collect_images_auto_trend(
+    config: AppConfig,
+    output_dir: str,
+    total_count: int = 12,
+    max_queries: int = 4,
+) -> Tuple[List[str], List[str]]:
+    trend_context = get_trend_context(config)
+    queries = generate_trend_queries(config, trend_context, count=max_queries)
+    if not queries:
+        raise RuntimeError("트렌드 검색어 생성에 실패했습니다. SERPAPI_API_KEY를 확인하세요.")
+    if not config.pexels_api_key:
+        raise RuntimeError("PEXELS_API_KEY가 없습니다.")
+    os.makedirs(output_dir, exist_ok=True)
+    collected: List[str] = []
+    remaining = total_count
+    for query in queries:
+        if remaining <= 0:
+            break
+        per_query = max(1, min(remaining, total_count // max(1, len(queries))))
+        items = collect_images_pexels(
+            query=query,
+            api_key=config.pexels_api_key,
+            output_dir=output_dir,
+            limit=per_query,
+            locale="ja-JP",
+        )
+        collected.extend(items)
+        remaining = total_count - len(collected)
+    return collected[:total_count], queries
+
+
 def fetch_bboom_list(config: AppConfig) -> List[Dict[str, str]]:
     headers = {"User-Agent": "Mozilla/5.0"}
     response = requests.get(config.bboom_list_url, headers=headers, timeout=30)
@@ -1072,7 +1183,8 @@ def run_streamlit_app() -> None:
     st.sidebar.subheader("선택")
     st.sidebar.markdown(
         "- `YOUTUBE_*` (자동 업로드)\n"
-        "- `SERPAPI_API_KEY` (이미지/트렌드 자동 수집)"
+        "- `SERPAPI_API_KEY` (트렌드 수집)\n"
+        "- `PEXELS_API_KEY` (트렌드 이미지 자동 수집)"
     )
     missing = _missing_required(config)
     if missing:
@@ -1302,6 +1414,24 @@ def run_streamlit_app() -> None:
                 st.success(f"{len(collected)}개 이미지를 인박스에 저장했습니다.")
             except Exception as exc:
                 st.error(f"수집 실패: {exc}")
+
+        st.subheader("일본 트렌드 자동 수집(Pexels)")
+        st.caption("SerpAPI로 일본 트렌드 키워드를 만들고, Pexels에서 이미지를 자동 수집합니다.")
+        auto_count = st.slider("자동 수집 개수", 4, 30, 12, key="auto_collect_count")
+        auto_queries = st.slider("검색어 개수", 2, 6, 4, key="auto_collect_queries")
+        if st.button("일본 트렌드 자동 수집"):
+            try:
+                inbox_dir = os.path.join(config.assets_dir, "inbox")
+                collected, queries = collect_images_auto_trend(
+                    config=config,
+                    output_dir=inbox_dir,
+                    total_count=auto_count,
+                    max_queries=auto_queries,
+                )
+                st.write("사용 검색어:", ", ".join(queries))
+                st.success(f"{len(collected)}개 이미지를 인박스에 저장했습니다.")
+            except Exception as exc:
+                st.error(f"자동 수집 실패: {exc}")
 
         inbox_dir = os.path.join(config.assets_dir, "inbox")
         inbox_files = [
