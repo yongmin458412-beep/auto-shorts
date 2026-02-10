@@ -1708,10 +1708,11 @@ def run_streamlit_app() -> None:
             preset_choices = list(preset_map.keys())
             selected_presets = st.multiselect("상황 프리셋", options=preset_choices)
             add_pepe_tag = st.checkbox("페페 기본 태그 추가", value=False)
+            select_all = st.checkbox("전체 선택", value=False)
             selected_files: List[str] = []
             for file_path in inbox_files:
                 st.image(file_path, width=200)
-                if st.checkbox(f"선택: {os.path.basename(file_path)}", key=f"select_{file_path}"):
+                if select_all or st.checkbox(f"선택: {os.path.basename(file_path)}", key=f"select_{file_path}"):
                     selected_files.append(file_path)
             if st.button("선택한 짤 저장"):
                 base_tags = tags_from_text(inbox_tags)
