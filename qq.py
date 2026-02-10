@@ -1585,14 +1585,18 @@ def run_streamlit_app() -> None:
         if inbox_files:
             st.subheader("인박스")
             inbox_tags = st.text_input("인박스 태그(쉼표 구분)")
+            add_pepe_tag = st.checkbox("페페 기본 태그 추가", value=False)
             selected_files: List[str] = []
             for file_path in inbox_files:
                 st.image(file_path, width=200)
                 if st.checkbox(f"선택: {os.path.basename(file_path)}", key=f"select_{file_path}"):
                     selected_files.append(file_path)
             if st.button("선택한 짤 저장"):
+                base_tags = tags_from_text(inbox_tags)
+                if add_pepe_tag:
+                    base_tags = list({*base_tags, "pepe"})
                 for file_path in selected_files:
-                    add_asset(config.manifest_path, file_path, tags_from_text(inbox_tags))
+                    add_asset(config.manifest_path, file_path, base_tags)
                 st.success("선택한 짤이 라이브러리에 추가되었습니다.")
 
         st.subheader("라이브러리")
