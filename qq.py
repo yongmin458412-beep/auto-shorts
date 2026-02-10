@@ -8,7 +8,7 @@ import re
 import textwrap
 import time
 from html import unescape
-from urllib.parse import urljoin, urlencode
+from urllib.parse import urljoin, urlencode, urlparse
 from dataclasses import dataclass
 from datetime import datetime
 from typing import Any, Dict, List, Optional, Tuple
@@ -103,6 +103,49 @@ def _fix_private_key_json(value: str) -> str:
         return f'{match.group(1)}{key_fixed}{match.group("suffix")}'
 
     return re.sub(pattern, repl, value, flags=re.S)
+
+
+def _guess_ext_from_type(content_type: str) -> str:
+    if not content_type:
+        return ""
+    content_type = content_type.lower()
+    if "jpeg" in content_type or "jpg" in content_type:
+        return ".jpg"
+    if "png" in content_type:
+        return ".png"
+    if "webp" in content_type:
+        return ".webp"
+    if "gif" in content_type:
+        return ".gif"
+    return ""
+
+
+def download_images_from_urls(urls: List[str], output_dir: str, limit: int = 30) -> List[str]:
+    os.makedirs(output_dir, exist_ok=True)
+    downloaded: List[str] = []
+    for raw_url in urls:
+        if len(downloaded) >= limit:
+            break
+        url = raw_url.strip()
+        if not url:
+            continue
+        try:
+            response = requests.get(url, timeout=30, headers={"User-Agent": "Mozilla/5.0"})
+            response.raise_for_status()
+            content_type = response.headers.get("Content-Type", "")
+            if "image" not in content_type.lower():
+                continue
+            ext = os.path.splitext(urlparse(url).path)[1].lower()
+            if ext not in {".jpg", ".jpeg", ".png", ".webp", ".gif"}:
+                ext = _guess_ext_from_type(content_type) or ".jpg"
+            filename = f"{random.randint(100000, 999999)}{ext}"
+            file_path = os.path.join(output_dir, filename)
+            with open(file_path, "wb") as file:
+                file.write(response.content)
+            downloaded.append(file_path)
+        except Exception:
+            continue
+    return downloaded
 
 
 def _get_query_param(key: str) -> str:
@@ -1494,6 +1537,26 @@ def run_streamlit_app() -> None:
                 st.success(f"{len(collected)}개 이미지를 인박스에 저장했습니다.")
             except Exception as exc:
                 st.error(f"수집 실패: {exc}")
+
+        st.subheader("URL 목록으로 이미지 수집(권한 보유 필수)")
+        st.caption("저작권이 있는 이미지/밈은 권한이 있을 때만 사용하세요.")
+        url_text = st.text_area("이미지 URL 목록 (줄바꿈)", height=120, key="url_import")
+        url_limit = st.slider("URL 최대 수집 개수", 1, 50, 20, key="url_import_limit")
+        url_confirm = st.checkbox("이 URL의 이미지 사용 권한을 보유했습니다.")
+        if st.button("URL로 인박스 저장"):
+            if not url_confirm:
+                st.error("권한 확인에 동의해야 합니다.")
+            else:
+                urls = [line.strip() for line in url_text.splitlines() if line.strip()]
+                if not urls:
+                    st.error("URL을 입력하세요.")
+                else:
+                    try:
+                        inbox_dir = os.path.join(config.assets_dir, "inbox")
+                        collected = download_images_from_urls(urls, inbox_dir, limit=url_limit)
+                        st.success(f"{len(collected)}개 이미지를 인박스에 저장했습니다.")
+                    except Exception as exc:
+                        st.error(f"URL 수집 실패: {exc}")
 
         st.subheader("일본 트렌드 자동 수집(Pexels)")
         st.caption("SerpAPI로 일본 트렌드 키워드를 만들고, Pexels에서 이미지를 자동 수집합니다.")

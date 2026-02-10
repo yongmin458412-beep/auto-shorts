@@ -67,6 +67,7 @@ RUN_BATCH=1 BATCH_COUNT=2 BATCH_SEED="일본어 숏츠 주제" python qq.py
 - 인박스에서 체크 후 **`선택한 짤 저장`** 버튼으로 라이브러리에 넣습니다.
 - `BGM 업로드`에서 오디오를 올리면 자동 선택에 사용됩니다.
 - `BGM_MODE=trending`이면 `bgm/trending` 폴더의 음악을 우선 사용합니다.
+- `URL 목록으로 이미지 수집`은 사용 권한이 있는 이미지 URL만 넣어야 합니다.
 
 ## 6) 유튜브 업로드
 
