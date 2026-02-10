@@ -20,6 +20,7 @@ Streamlit Cloud에서 파이썬 버전 문제로 `moviepy`가 설치 실패하�
 
 필수:
 - `OPENAI_API_KEY`
+- `OPENAI_VISION_MODEL` (이미지 태그 분석용, 비워두면 `OPENAI_MODEL` 사용)
 - `ELEVENLABS_API_KEY`
 - `ELEVENLABS_VOICE_ID` 또는 `ELEVENLABS_VOICE_IDS`
 - `SHEET_ID`
@@ -67,6 +68,7 @@ RUN_BATCH=1 BATCH_COUNT=2 BATCH_SEED="일본어 숏츠 주제" python qq.py
 - 인박스에서 체크 후 **`선택한 짤 저장`** 버튼으로 라이브러리에 넣습니다.
 - 인박스에서 `페페 기본 태그 추가`를 켜면 자동으로 `pepe` 태그가 붙습니다.
 - 인박스에서 `상황 프리셋`을 고르면 자동으로 태그가 추가됩니다. (충격/반전, 웃김/비꼼 등)
+- 인박스에서 `AI 태그 자동 적용`을 켜면 이미지 분석 태그가 자동 추가됩니다.
 - `BGM 업로드`에서 오디오를 올리면 자동 선택에 사용됩니다.
 - `BGM_MODE=trending`이면 `bgm/trending` 폴더의 음악을 우선 사용합니다.
 - `URL 목록으로 이미지 수집`은 사용 권한이 있는 이미지 URL만 넣어야 합니다.

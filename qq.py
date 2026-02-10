@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import json
 import base64
+import mimetypes
 import os
 import random
 import re
@@ -252,6 +253,7 @@ def _get_query_param(key: str) -> str:
 class AppConfig:
     openai_api_key: str
     openai_model: str
+    openai_vision_model: str
     elevenlabs_api_key: str
     elevenlabs_voice_ids: List[str]
     elevenlabs_model: str
@@ -296,6 +298,7 @@ def load_config() -> AppConfig:
     return AppConfig(
         openai_api_key=_get_secret("OPENAI_API_KEY", "") or "",
         openai_model=_get_secret("OPENAI_MODEL", "gpt-4.1-mini") or "gpt-4.1-mini",
+        openai_vision_model=_get_secret("OPENAI_VISION_MODEL", "") or "",
         elevenlabs_api_key=_get_secret("ELEVENLABS_API_KEY", "") or "",
         elevenlabs_voice_ids=_get_list("ELEVENLABS_VOICE_IDS")
         or ([voice for voice in [_get_secret("ELEVENLABS_VOICE_ID", "")] if voice]),
@@ -439,6 +442,72 @@ def pick_voice_id(voice_ids: List[str]) -> str:
     if not voice_ids:
         return ""
     return random.choice(voice_ids)
+
+
+ALLOWED_REACTION_TAGS = [
+    "shock",
+    "wow",
+    "laugh",
+    "awkward",
+    "facepalm",
+    "angry",
+    "cute",
+    "plot",
+    "ending",
+]
+
+
+def analyze_image_tags(
+    config: AppConfig,
+    image_path: str,
+    allowed_tags: Optional[List[str]] = None,
+) -> List[str]:
+    if not config.openai_api_key:
+        raise RuntimeError("OPENAI_API_KEY가 없습니다.")
+    allowed_tags = allowed_tags or ALLOWED_REACTION_TAGS
+    model = config.openai_vision_model or config.openai_model
+    if not model:
+        raise RuntimeError("OPENAI_VISION_MODEL 또는 OPENAI_MODEL이 없습니다.")
+    if not os.path.exists(image_path):
+        return []
+    mime, _ = mimetypes.guess_type(image_path)
+    if not mime:
+        mime = "image/jpeg"
+    with open(image_path, "rb") as file:
+        b64 = base64.b64encode(file.read()).decode("utf-8")
+    data_url = f"data:{mime};base64,{b64}"
+    system_text = (
+        "You are a visual classifier. "
+        "Given an image, choose 1-3 tags from the allowed list. "
+        "Return JSON only: {\"tags\": [\"...\"]}."
+    )
+    user_text = (
+        f"Allowed tags: {', '.join(allowed_tags)}\n"
+        "Choose the best tags for how this image would be used as a reaction meme."
+    )
+    client = OpenAI(api_key=config.openai_api_key)
+    response = client.responses.create(
+        model=model,
+        input=[
+            {
+                "role": "user",
+                "content": [
+                    {"type": "input_text", "text": user_text},
+                    {"type": "input_image", "image_url": data_url},
+                ],
+            }
+        ],
+    )
+    output_text = getattr(response, "output_text", "") or ""
+    result = extract_json(output_text)
+    tags = result.get("tags", []) if isinstance(result, dict) else []
+    cleaned = []
+    for tag in tags:
+        if isinstance(tag, str):
+            value = tag.strip().lower()
+            if value in allowed_tags:
+                cleaned.append(value)
+    return list(dict.fromkeys(cleaned))
 
 
 def tts_elevenlabs(
@@ -1365,6 +1434,7 @@ def run_streamlit_app() -> None:
         "- `SERPAPI_API_KEY` (트렌드 수집)\n"
         "- `PEXELS_API_KEY` (트렌드 이미지 자동 수집)\n"
         "- `JA_DIALECT_STYLE` (일본어 사투리 스타일)\n"
+        "- `OPENAI_VISION_MODEL` (이미지 태그 분석 모델)\n"
         "- `BGM_MODE`, `BGM_VOLUME` (배경음악 자동 선택)"
     )
     missing = _missing_required(config)
@@ -1709,21 +1779,46 @@ def run_streamlit_app() -> None:
             selected_presets = st.multiselect("상황 프리셋", options=preset_choices)
             add_pepe_tag = st.checkbox("페페 기본 태그 추가", value=False)
             select_all = st.checkbox("전체 선택", value=False)
+            ai_apply = st.checkbox("AI 태그 자동 적용", value=False)
             selected_files: List[str] = []
             for file_path in inbox_files:
                 st.image(file_path, width=200)
                 if select_all or st.checkbox(f"선택: {os.path.basename(file_path)}", key=f"select_{file_path}"):
                     selected_files.append(file_path)
+                ai_tag_map = st.session_state.get("ai_tag_map", {})
+                if file_path in ai_tag_map:
+                    st.caption(f"AI 태그: {', '.join(ai_tag_map[file_path])}")
+
+            if st.button("선택한 짤 AI 태그 분석"):
+                if not config.openai_api_key:
+                    st.error("OPENAI_API_KEY가 필요합니다.")
+                else:
+                    targets = selected_files or inbox_files
+                    tag_map = st.session_state.get("ai_tag_map", {})
+                    progress = st.progress(0.0)
+                    for index, path in enumerate(targets):
+                        try:
+                            tags = analyze_image_tags(config, path)
+                            tag_map[path] = tags
+                        except Exception:
+                            continue
+                        progress.progress((index + 1) / max(len(targets), 1))
+                    st.session_state["ai_tag_map"] = tag_map
+                    st.success("AI 태그 분석 완료")
             if st.button("선택한 짤 저장"):
                 base_tags = tags_from_text(inbox_tags)
                 for preset in selected_presets:
                     base_tags.extend(preset_map.get(preset, []))
-                if add_pepe_tag:
-                    base_tags = list({*base_tags, "pepe"})
-                else:
-                    base_tags = list(set(base_tags))
+                base_tags = list(set(base_tags))
                 for file_path in selected_files:
-                    add_asset(config.manifest_path, file_path, base_tags)
+                    tags = list(base_tags)
+                    if add_pepe_tag:
+                        tags.append("pepe")
+                    if ai_apply:
+                        ai_tag_map = st.session_state.get("ai_tag_map", {})
+                        tags.extend(ai_tag_map.get(file_path, []))
+                    tags = list(set(tags))
+                    add_asset(config.manifest_path, file_path, tags)
                 st.success("선택한 짤이 라이브러리에 추가되었습니다.")
 
         st.subheader("라이브러리")
