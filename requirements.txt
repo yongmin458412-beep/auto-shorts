@@ -2,10 +2,10 @@ streamlit
 openai
 requests
 moviepy
+imageio-ffmpeg
 Pillow
 numpy
 gspread
 google-auth
 google-api-python-client
 google-auth-oauthlib
-ffmpeg
