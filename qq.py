@@ -556,8 +556,39 @@ def _format_hashtags(tags: List[str]) -> str:
     return " ".join(tags)
 
 
+def _missing_required(config: AppConfig) -> List[str]:
+    missing = []
+    if not config.openai_api_key:
+        missing.append("OPENAI_API_KEY")
+    if not config.elevenlabs_api_key:
+        missing.append("ELEVENLABS_API_KEY")
+    if not config.elevenlabs_voice_ids:
+        missing.append("ELEVENLABS_VOICE_ID")
+    if not config.sheet_id:
+        missing.append("SHEET_ID")
+    if not config.google_service_account_json:
+        missing.append("GOOGLE_SERVICE_ACCOUNT_JSON")
+    if not config.font_path:
+        missing.append("FONT_PATH")
+    if config.enable_youtube_upload:
+        if not config.youtube_client_id:
+            missing.append("YOUTUBE_CLIENT_ID")
+        if not config.youtube_client_secret:
+            missing.append("YOUTUBE_CLIENT_SECRET")
+        if not config.youtube_refresh_token:
+            missing.append("YOUTUBE_REFRESH_TOKEN")
+    return missing
+
+
+def _status_update(progress, status_box, pct: float, message: str) -> None:
+    if progress:
+        progress.progress(min(max(pct, 0.0), 1.0))
+    if status_box:
+        status_box.info(f"진행 상태: {message}")
+
+
 def run_streamlit_app() -> None:
-    st.set_page_config(page_title="Shorts Auto Studio", layout="wide")
+    st.set_page_config(page_title="숏츠 자동화 스튜디오", layout="wide")
     config = load_config()
     ensure_dirs(
         [
@@ -571,20 +602,49 @@ def run_streamlit_app() -> None:
         ]
     )
 
-    st.sidebar.title("Shorts Auto Studio")
-    page = st.sidebar.radio("Menu", ["Generate", "Assets", "Logs"])
+    st.sidebar.title("숏츠 자동화 스튜디오")
+    st.sidebar.subheader("상태")
+    st.sidebar.write(f"자동 업로드: {'켜짐' if config.enable_youtube_upload else '꺼짐'}")
+    st.sidebar.write(f"MoviePy 사용 가능: {'예' if MOVIEPY_AVAILABLE else '아니오'}")
+    if not MOVIEPY_AVAILABLE:
+        st.sidebar.error(f"MoviePy 오류: {MOVIEPY_ERROR}")
+
+    st.sidebar.subheader("필수 API/설정")
+    st.sidebar.markdown(
+        "- `OPENAI_API_KEY`\n"
+        "- `ELEVENLABS_API_KEY`\n"
+        "- `ELEVENLABS_VOICE_ID`\n"
+        "- `SHEET_ID`\n"
+        "- `GOOGLE_SERVICE_ACCOUNT_JSON`\n"
+        "- `FONT_PATH`"
+    )
+    st.sidebar.subheader("선택")
+    st.sidebar.markdown(
+        "- `YOUTUBE_*` (자동 업로드)\n"
+        "- `SERPAPI_API_KEY` (이미지 자동 수집)"
+    )
+    missing = _missing_required(config)
+    if missing:
+        st.sidebar.warning("누락된 설정: " + ", ".join(missing))
+
+    page = st.sidebar.radio("메뉴", ["생성", "에셋", "로그"])
 
     manifest_items = load_manifest(config.manifest_path)
     all_tags = list_tags(manifest_items)
 
-    if page == "Generate":
-        st.header("Generate")
-        seed_text = st.text_area("Seed idea or summary", height=120)
-        beats_count = st.slider("Beats count", 5, 9, 7)
-        tag_filter = st.multiselect("Allowed tags", options=all_tags, default=all_tags[:5])
-        generate_button = st.button("Generate Script")
+    if page == "생성":
+        st.header("생성")
+        if missing:
+            st.error("필수 API/설정이 누락되어 있습니다. 좌측 사이드바를 확인하세요.")
+        seed_text = st.text_area("아이디어/요약 입력", height=120)
+        beats_count = st.slider("문장(비트) 수", 5, 9, 7)
+        tag_filter = st.multiselect("허용 태그", options=all_tags, default=all_tags[:5])
+        generate_button = st.button("스크립트 생성")
+        progress = st.progress(0.0)
+        status_box = st.empty()
 
         if generate_button and seed_text:
+            _status_update(progress, status_box, 0.05, "스크립트 생성 중")
             script = generate_script(
                 config=config,
                 seed_text=seed_text,
@@ -592,27 +652,35 @@ def run_streamlit_app() -> None:
                 allowed_tags=tag_filter or all_tags,
             )
             st.session_state["script"] = script
+            _status_update(progress, status_box, 0.2, "스크립트 생성 완료")
 
         script = st.session_state.get("script")
         if script:
-            st.subheader("Script")
-            title = st.text_input("Title (JA)", value=script.get("title_ja", ""))
-            description = st.text_area("Description (JA)", value=script.get("description_ja", ""), height=80)
+            st.subheader("스크립트")
+            title = st.text_input("제목(일본어)", value=script.get("title_ja", ""))
+            description = st.text_area("설명(일본어)", value=script.get("description_ja", ""), height=80)
             hashtags = st.text_input(
-                "Hashtags (space separated)",
+                "해시태그(공백 구분)",
                 value=_format_hashtags(script.get("hashtags_ja", [])),
             )
             beats_df = pd.DataFrame(script.get("beats", []))
             edited_beats = st.data_editor(beats_df, num_rows="fixed")
 
-            render_button = st.button("Render Video")
+            render_button = st.button("영상 만들기")
             if render_button:
+                if missing:
+                    st.error("필수 API/설정이 누락되어 있어 진행할 수 없습니다.")
+                    return
+                if not MOVIEPY_AVAILABLE:
+                    st.error(f"MoviePy가 설치되지 않았습니다: {MOVIEPY_ERROR}")
+                    return
                 beats = edited_beats.to_dict(orient="records")
                 if not beats:
-                    st.error("No beats to render")
+                    st.error("렌더링할 문장이 없습니다.")
                 elif not manifest_items:
-                    st.error("No assets in manifest. Add images first.")
+                    st.error("에셋이 없습니다. 먼저 이미지를 추가하세요.")
                 else:
+                    _status_update(progress, status_box, 0.1, "문장/태그 정리")
                     texts = [beat.get("text", "") for beat in beats]
                     tags = [beat.get("tag", "") for beat in beats]
                     assets = []
@@ -621,12 +689,14 @@ def run_streamlit_app() -> None:
                         if asset:
                             assets.append(asset.path)
                     if not assets:
-                        st.error("No assets matched tags")
+                        st.error("태그에 맞는 에셋이 없습니다.")
                     else:
+                        _status_update(progress, status_box, 0.3, "TTS 생성")
                         now = datetime.utcnow().strftime("%Y%m%d_%H%M%S")
                         audio_path = os.path.join(config.output_dir, f"tts_{now}.mp3")
                         voice_id = pick_voice_id(config.elevenlabs_voice_ids)
                         tts_elevenlabs(config, "。".join(texts), audio_path, voice_id=voice_id)
+                        _status_update(progress, status_box, 0.6, "영상 렌더링")
                         output_path = os.path.join(config.output_dir, f"shorts_{now}.mp4")
                         render_video(
                             config=config,
@@ -638,6 +708,7 @@ def run_streamlit_app() -> None:
                         video_id = ""
                         video_url = ""
                         if config.enable_youtube_upload:
+                            _status_update(progress, status_box, 0.85, "유튜브 업로드")
                             result = upload_video(
                                 config=config,
                                 file_path=output_path,
@@ -647,6 +718,8 @@ def run_streamlit_app() -> None:
                             )
                             video_id = result.get("video_id", "")
                             video_url = result.get("video_url", "")
+                        else:
+                            _status_update(progress, status_box, 0.85, "유튜브 업로드(스킵)")
                         log_row = {
                             "date_jst": datetime.utcnow().strftime("%Y-%m-%d %H:%M:%S"),
                             "title_ja": title,
@@ -665,26 +738,27 @@ def run_streamlit_app() -> None:
                         except Exception:
                             pass
                         _write_local_log(os.path.join(config.output_dir, "runs.jsonl"), log_row)
+                        _status_update(progress, status_box, 1.0, "완료")
                         st.video(output_path)
                         if video_url:
                             st.success(video_url)
 
-    if page == "Assets":
-        st.header("Assets")
-        upload_files = st.file_uploader("Upload images", type=["jpg", "jpeg", "png"], accept_multiple_files=True)
-        tag_input = st.text_input("Tags for uploaded images (comma separated)")
-        if st.button("Save uploaded assets") and upload_files:
+    if page == "에셋":
+        st.header("에셋")
+        upload_files = st.file_uploader("이미지 업로드", type=["jpg", "jpeg", "png"], accept_multiple_files=True)
+        tag_input = st.text_input("태그(쉼표 구분)")
+        if st.button("업로드 저장") and upload_files:
             for file in upload_files:
                 save_path = os.path.join(config.assets_dir, "images", file.name)
                 with open(save_path, "wb") as out_file:
                     out_file.write(file.getbuffer())
                 add_asset(config.manifest_path, save_path, tags_from_text(tag_input))
-            st.success("Uploaded assets saved")
+            st.success("에셋이 저장되었습니다.")
 
-        st.subheader("AI Collect (SerpAPI)")
-        collect_query = st.text_input("Search query")
-        collect_count = st.slider("Number of images", 4, 20, 8)
-        if st.button("Collect to Inbox"):
+        st.subheader("AI 이미지 수집(SerpAPI)")
+        collect_query = st.text_input("검색어")
+        collect_count = st.slider("수집 개수", 4, 20, 8)
+        if st.button("인박스로 수집"):
             try:
                 inbox_dir = os.path.join(config.assets_dir, "inbox")
                 collected = collect_images_serpapi(
@@ -693,9 +767,9 @@ def run_streamlit_app() -> None:
                     output_dir=inbox_dir,
                     limit=collect_count,
                 )
-                st.success(f"Collected {len(collected)} images to inbox")
+                st.success(f"{len(collected)}개 이미지를 인박스에 저장했습니다.")
             except Exception as exc:
-                st.error(str(exc))
+                st.error(f"수집 실패: {exc}")
 
         inbox_dir = os.path.join(config.assets_dir, "inbox")
         inbox_files = [
@@ -704,25 +778,25 @@ def run_streamlit_app() -> None:
             if f.lower().endswith((".jpg", ".jpeg", ".png"))
         ]
         if inbox_files:
-            st.subheader("Inbox")
-            inbox_tags = st.text_input("Tags for selected inbox files (comma separated)")
+            st.subheader("인박스")
+            inbox_tags = st.text_input("인박스 태그(쉼표 구분)")
             for file_path in inbox_files:
                 st.image(file_path, width=200)
-                if st.button(f"Add to library: {os.path.basename(file_path)}", key=file_path):
+                if st.button(f"라이브러리에 추가: {os.path.basename(file_path)}", key=file_path):
                     add_asset(config.manifest_path, file_path, tags_from_text(inbox_tags))
-                    st.success("Added to manifest")
+                    st.success("라이브러리에 추가되었습니다.")
 
-        st.subheader("Library")
+        st.subheader("라이브러리")
         if manifest_items:
-            selected_tag = st.selectbox("Filter by tag", options=["(all)"] + all_tags)
-            filtered = manifest_items if selected_tag == "(all)" else filter_assets_by_tags(manifest_items, [selected_tag])
+            selected_tag = st.selectbox("태그 필터", options=["(전체)"] + all_tags)
+            filtered = manifest_items if selected_tag == "(전체)" else filter_assets_by_tags(manifest_items, [selected_tag])
             for item in filtered:
                 st.image(item.path, width=200, caption=",".join(item.tags))
         else:
-            st.info("No assets yet")
+            st.info("아직 에셋이 없습니다.")
 
-    if page == "Logs":
-        st.header("Logs")
+    if page == "로그":
+        st.header("로그")
         local_log_path = os.path.join(config.output_dir, "runs.jsonl")
         if os.path.exists(local_log_path):
             with open(local_log_path, "r", encoding="utf-8") as file:
@@ -730,7 +804,7 @@ def run_streamlit_app() -> None:
             records = [json.loads(line) for line in lines]
             st.dataframe(pd.DataFrame(records))
         else:
-            st.info("No local logs yet")
+            st.info("아직 로그가 없습니다.")
 
 
 def run_batch(count: int, seed: str, beats: int) -> None:

@@ -46,11 +46,16 @@ RUN_BATCH=1 BATCH_COUNT=2 BATCH_SEED="일본어 숏츠 주제" python qq.py
 
 ## 5) 에셋 준비
 
-- `Assets` 탭에서 이미지 업로드 후 태그를 붙입니다.
+- `에셋` 탭에서 이미지 업로드 후 태그를 붙입니다.
 - 태그는 `shock, laugh, awkward, wow` 같은 감정 키워드로 정리하면 자동 매칭이 잘 됩니다.
-- `AI Collect` 기능은 SerpAPI 키가 있을 때만 작동합니다.
+- `AI 이미지 수집(SerpAPI)` 기능은 SerpAPI 키가 있을 때만 작동합니다.
 
 ## 6) 유튜브 업로드
 
 `YOUTUBE_UPLOAD_ENABLED=true`로 설정하면 자동 업로드합니다.
 설정이 없으면 로컬 MP4만 생성합니다.
+
+## 7) 진행상황 확인
+
+- `생성` 탭에서 스크립트 생성 → TTS → 렌더 → 업로드 순서가 진행되며,
+  상단 진행바와 상태 메시지로 진행상황을 확인할 수 있습니다.
