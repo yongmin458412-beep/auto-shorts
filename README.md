@@ -12,7 +12,7 @@ pip install -r requirements.txt
 
 영상 렌더링은 `ffmpeg`가 필요합니다. macOS에서는 `brew install ffmpeg`로 설치할 수 있습니다.
 Streamlit Cloud에서는 `packages.txt`에 `ffmpeg` 한 줄을 넣어 설치됩니다.
-Streamlit Cloud에서 파이썬 버전 문제로 `moviepy`가 설치 실패하면 `runtime.txt`에 `python-3.11.9`를 지정하세요.
+Streamlit Cloud에서 파이썬 버전 문제로 `moviepy`가 설치 실패하면 `runtime.txt`에 `python-3.11`를 지정하세요.
 
 ## 2) 시크릿 설정
 
