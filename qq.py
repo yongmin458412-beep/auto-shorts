@@ -7,7 +7,7 @@ import re
 import textwrap
 import time
 from html import unescape
-from urllib.parse import urljoin
+from urllib.parse import urljoin, urlencode
 from dataclasses import dataclass
 from datetime import datetime
 from typing import Any, Dict, List, Optional, Tuple
@@ -74,6 +74,22 @@ def _get_json(key: str) -> Optional[Dict[str, Any]]:
         return json.loads(value)
     except Exception:
         return None
+
+
+def _get_query_param(key: str) -> str:
+    try:
+        params = st.query_params
+        value = params.get(key)
+        if isinstance(value, list):
+            return value[0] if value else ""
+        return value or ""
+    except Exception:
+        try:
+            params = st.experimental_get_query_params()
+            value = params.get(key, [""])[0]
+            return value or ""
+        except Exception:
+            return ""
 
 
 @dataclass
@@ -542,6 +558,43 @@ def upload_video(
     return {"video_id": video_id, "video_url": f"https://www.youtube.com/watch?v={video_id}"}
 
 
+def build_google_oauth_url(
+    client_id: str,
+    redirect_uri: str,
+    scope: str,
+    prompt_consent: bool = True,
+) -> str:
+    params = {
+        "client_id": client_id,
+        "redirect_uri": redirect_uri,
+        "response_type": "code",
+        "scope": scope,
+        "access_type": "offline",
+        "include_granted_scopes": "true",
+    }
+    if prompt_consent:
+        params["prompt"] = "consent"
+    return "https://accounts.google.com/o/oauth2/v2/auth?" + urlencode(params)
+
+
+def exchange_oauth_code_for_token(
+    client_id: str,
+    client_secret: str,
+    code: str,
+    redirect_uri: str,
+) -> Dict[str, Any]:
+    data = {
+        "code": code,
+        "client_id": client_id,
+        "client_secret": client_secret,
+        "redirect_uri": redirect_uri,
+        "grant_type": "authorization_code",
+    }
+    response = requests.post("https://oauth2.googleapis.com/token", data=data, timeout=30)
+    response.raise_for_status()
+    return response.json()
+
+
 def collect_images_serpapi(
     query: str,
     api_key: str,
@@ -996,7 +1049,7 @@ def run_streamlit_app() -> None:
     if missing:
         st.sidebar.warning("누락된 설정: " + ", ".join(missing))
 
-    page = st.sidebar.radio("메뉴", ["생성", "에셋", "로그"])
+    page = st.sidebar.radio("메뉴", ["생성", "토큰", "에셋", "로그"])
 
     manifest_items = load_manifest(config.manifest_path)
     all_tags = list_tags(manifest_items)
@@ -1119,6 +1172,79 @@ def run_streamlit_app() -> None:
                         st.video(output_path)
                         if video_url:
                             st.success(video_url)
+
+    if page == "토큰":
+        st.header("유튜브 리프레시 토큰 발급")
+        st.markdown(
+            "1) OAuth 클라이언트 ID/Secret 입력\n"
+            "2) Redirect URI 설정\n"
+            "3) 승인 URL 열기 → 로그인/동의\n"
+            "4) code를 붙여넣고 토큰 교환"
+        )
+        st.caption(
+            "Redirect URI는 Google Cloud Credentials에 등록되어 있어야 합니다. "
+            "로컬이라면 보통 http://localhost:8501 를 사용합니다."
+        )
+
+        client_id = st.text_input("OAuth 클라이언트 ID", value=config.youtube_client_id or "")
+        client_secret = st.text_input(
+            "OAuth 클라이언트 Secret", value=config.youtube_client_secret or "", type="password"
+        )
+        redirect_uri = st.text_input(
+            "Redirect URI",
+            value=_get_secret("OAUTH_REDIRECT_URI", "") or "",
+            placeholder="http://localhost:8501",
+        )
+        scope = st.text_input(
+            "Scope",
+            value="https://www.googleapis.com/auth/youtube.upload",
+        )
+        prompt_consent = st.checkbox("재동의 강제(prompt=consent)", value=True)
+
+        if st.button("승인 URL 생성"):
+            if not client_id or not redirect_uri:
+                st.error("클라이언트 ID와 Redirect URI를 입력하세요.")
+            else:
+                st.session_state["auth_url"] = build_google_oauth_url(
+                    client_id=client_id,
+                    redirect_uri=redirect_uri,
+                    scope=scope.strip(),
+                    prompt_consent=prompt_consent,
+                )
+
+        auth_url = st.session_state.get("auth_url", "")
+        if auth_url:
+            st.markdown(f"[승인 페이지 열기]({auth_url})")
+            st.code(auth_url)
+
+        default_code = _get_query_param("code")
+        auth_code = st.text_input("승인 코드(code)", value=default_code or "")
+
+        if st.button("토큰 교환"):
+            if not client_id or not client_secret or not redirect_uri or not auth_code:
+                st.error("모든 값을 입력한 후 진행하세요.")
+            else:
+                try:
+                    result = exchange_oauth_code_for_token(
+                        client_id=client_id,
+                        client_secret=client_secret,
+                        code=auth_code.strip(),
+                        redirect_uri=redirect_uri,
+                    )
+                    refresh_token = result.get("refresh_token", "")
+                    if refresh_token:
+                        st.success("리프레시 토큰 발급 성공")
+                        st.code(refresh_token)
+                        st.info("이 값을 `.streamlit/secrets.toml`의 `YOUTUBE_REFRESH_TOKEN`에 넣으세요.")
+                    else:
+                        st.warning(
+                            "refresh_token이 응답에 없습니다. "
+                            "처음 승인일 때만 내려오는 경우가 많습니다. "
+                            "prompt=consent를 켜고 다시 승인하세요."
+                        )
+                        st.json(result)
+                except Exception as exc:
+                    st.error(f"토큰 교환 실패: {exc}")
 
     if page == "에셋":
         st.header("에셋")
