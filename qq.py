@@ -601,7 +601,8 @@ def fetch_bgm_from_pixabay(
     """
     if not api_key:
         return None
-    if custom_query:
+    custom_query = custom_query or ""  # None 방어
+    if custom_query.strip():
         query = custom_query.strip()
     else:
         keywords = BGM_CATEGORY_KEYWORDS.get(category, ["upbeat"])
@@ -664,6 +665,7 @@ def get_or_download_bgm(
     1) assets/bgm/{category}/ 에 기존 파일이 있으면 랜덤 선택
     2) 없으면 Pixabay에서 다운로드 후 반환 (custom_query 우선)
     """
+    custom_query = custom_query or ""  # None 방어
     bgm_category_dir = os.path.join(config.assets_dir, "bgm", category)
     os.makedirs(bgm_category_dir, exist_ok=True)
     existing = _list_audio_files(bgm_category_dir)
@@ -2102,7 +2104,7 @@ def _auto_bboom_flow(config: AppConfig, progress, status_box) -> None:
         )
 
         # AI가 제안한 BGM 쿼리로 BGM 다운로드 (스크립트 생성 후 처리)
-        ai_bgm_query = script.get("bgm_query", "")
+        ai_bgm_query = script.get("bgm_query") or ""  # None 방어
         _status_update(progress, status_box, 0.30, f"BGM 선정 중 (키워드: {ai_bgm_query or content_category})")
         bgm_path = get_or_download_bgm(config, content_category, custom_query=ai_bgm_query)
         if bgm_path:
