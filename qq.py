@@ -1644,12 +1644,29 @@ def fetch_bboom_post_text(url: str) -> Dict[str, str]:
     return {"title": title, "content": content}
 
 
-def send_telegram_message(token: str, chat_id: str, text: str) -> None:
+def send_telegram_message(token: str, chat_id: str, text: str) -> bool:
+    """
+    텔레그램 메시지 전송. 성공하면 True, 실패하면 False 반환.
+    - 4096자 초과 시 자동 분할 전송
+    - parse_mode 미사용 (해시태그/특수문자 오류 방지)
+    """
     if not token or not chat_id:
-        return
+        return False
     url = f"https://api.telegram.org/bot{token}/sendMessage"
-    payload = {"chat_id": chat_id, "text": text}
-    requests.post(url, json=payload, timeout=30)
+    max_len = 4000
+    chunks = [text[i : i + max_len] for i in range(0, max(len(text), 1), max_len)]
+    success = True
+    for chunk in chunks:
+        payload = {"chat_id": chat_id, "text": chunk}
+        try:
+            resp = requests.post(url, json=payload, timeout=30)
+            if not resp.ok:
+                print(f"[Telegram 전송 실패] status={resp.status_code} body={resp.text[:300]}")
+                success = False
+        except Exception as exc:
+            print(f"[Telegram 전송 오류] {exc}")
+            success = False
+    return success
 
 
 def get_telegram_updates(token: str, offset: int) -> List[Dict[str, Any]]:
@@ -2628,6 +2645,74 @@ def run_streamlit_app() -> None:
 
     if page == "로그":
         st.header("로그")
+
+        # ── 텔레그램 연결 진단 ──────────────────────────────────────
+        st.subheader("텔레그램 연결 테스트")
+        col1, col2 = st.columns(2)
+        with col1:
+            st.write(f"BOT TOKEN: `{'설정됨' if config.telegram_bot_token else '❌ 없음'}`")
+            st.write(f"ADMIN CHAT ID: `{config.telegram_admin_chat_id or '❌ 없음'}`")
+        with col2:
+            if st.button("🔔 테스트 메시지 전송"):
+                if not config.telegram_bot_token:
+                    st.error("TELEGRAM_BOT_TOKEN이 없습니다.")
+                elif not config.telegram_admin_chat_id:
+                    st.error("TELEGRAM_ADMIN_CHAT_ID가 없습니다.")
+                else:
+                    ok = send_telegram_message(
+                        config.telegram_bot_token,
+                        config.telegram_admin_chat_id,
+                        "✅ 숏츠 자동화 스튜디오 텔레그램 연결 테스트 메시지입니다.\n승인: 승인\n교환: 교환",
+                    )
+                    if ok:
+                        st.success("전송 성공! 텔레그램에서 메시지를 확인하세요.")
+                    else:
+                        st.error("전송 실패! 아래 BOT 상태를 확인하세요.")
+
+            if st.button("🤖 BOT 상태 확인"):
+                if not config.telegram_bot_token:
+                    st.error("TELEGRAM_BOT_TOKEN이 없습니다.")
+                else:
+                    try:
+                        resp = requests.get(
+                            f"https://api.telegram.org/bot{config.telegram_bot_token}/getMe",
+                            timeout=10,
+                        )
+                        data = resp.json()
+                        if data.get("ok"):
+                            bot = data["result"]
+                            st.success(f"BOT 정상: @{bot.get('username')} ({bot.get('first_name')})")
+                        else:
+                            st.error(f"BOT 오류: {data.get('description', '알 수 없는 오류')}")
+                    except Exception as exc:
+                        st.error(f"BOT 확인 실패: {exc}")
+
+            if st.button("💬 내 CHAT ID 확인"):
+                if not config.telegram_bot_token:
+                    st.error("TELEGRAM_BOT_TOKEN이 없습니다.")
+                else:
+                    try:
+                        resp = requests.get(
+                            f"https://api.telegram.org/bot{config.telegram_bot_token}/getUpdates",
+                            params={"limit": 5},
+                            timeout=10,
+                        )
+                        data = resp.json()
+                        updates = data.get("result", [])
+                        if not updates:
+                            st.warning("수신된 메시지가 없습니다.\n먼저 봇에게 아무 메시지나 보내고 다시 확인하세요.")
+                        else:
+                            for upd in updates:
+                                chat = upd.get("message", {}).get("chat", {})
+                                cid = chat.get("id")
+                                cname = chat.get("first_name") or chat.get("title") or ""
+                                st.info(f"CHAT ID: `{cid}`  이름: {cname}")
+                    except Exception as exc:
+                        st.error(f"CHAT ID 확인 실패: {exc}")
+
+        st.divider()
+
+        # ── 실행 로그 ────────────────────────────────────────────────
         local_log_path = os.path.join(config.output_dir, "runs.jsonl")
         if os.path.exists(local_log_path):
             with open(local_log_path, "r", encoding="utf-8") as file:
