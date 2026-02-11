@@ -725,7 +725,8 @@ def generate_script(
     allowed_tags: List[str] | None = None,
     trend_context: str = "",
     dialect_style: str = "",
-    content_category: str = "",  # NEW
+    content_category: str = "",
+    source_type: str = "",  # "news" | "" 뉴스 소스일 때 프롬프트 강화
 ) -> Dict[str, Any]:
     if not config.openai_api_key:
         raise RuntimeError("OPENAI_API_KEY가 없습니다.")
@@ -746,12 +747,26 @@ def generate_script(
     script_style_key = CATEGORY_TO_SCRIPT_STYLE.get(content_category, "shock_twist")
     korean_style_prompt = KOREAN_SHORTS_STYLE_PROMPTS[script_style_key]
 
+    # 뉴스 전용 추가 지시
+    news_extra = ""
+    if source_type == "news":
+        news_extra = (
+            "SPECIAL INSTRUCTION - This is a Korean NEWS article:\n"
+            "- Format title as: '韓国で話題！○○' or '韓国人が衝撃！○○' or '【韓国】○○が大炎上' style\n"
+            "- Beat 1 (hook): Start with '韓国で今...' or '韓国人が...' to establish Korean context\n"
+            "- Focus on the SURPRISING or EMOTIONAL core of the news\n"
+            "- Include reactions/responses if mentioned in source (e.g. netizen reactions, expert opinions)\n"
+            "- Last beat: Japanese viewer's perspective or call-to-action ('あなたはどう思う？' style)\n"
+            "- hashtags_ja MUST include #韓国 #韓国ニュース #韓国情報 and topic-specific tags\n"
+        )
+
     system_text = (
         "You are a short-form video scriptwriter specializing in Korean viral content adapted for Japanese audiences.\n"
         "Your job: read the Korean source content carefully and create a script that FAITHFULLY captures its actual story, joke, or reaction — do NOT invent unrelated content.\n\n"
-        "Return ONLY valid JSON with these keys:\n"
+        + (news_extra + "\n" if news_extra else "")
+        + "Return ONLY valid JSON with these keys:\n"
         "  title_ko        : Korean title (punchy, short-form style)\n"
-        "  title_ja        : Japanese title\n"
+        "  title_ja        : Japanese title — for news use '韓国で話題！○○' style\n"
         "  description_ja  : Japanese description (1-2 sentences)\n"
         "  hashtags_ja     : array of 3-6 Japanese hashtags (# included)\n"
         "  bgm_query       : 1-3 English keywords for royalty-free BGM that fits the mood (e.g. 'funny quirky ukulele')\n"
@@ -1940,7 +1955,148 @@ def fetch_bobaedream_post(url: str) -> Dict[str, str]:
 
 
 # 소스별 크롤러 매핑
+# ── 네이트뉴스 실시간 랭킹 ──────────────────────────────────────
+
+# 뉴스 필터: 제목에 이 키워드가 포함되면 스킵 (정치/날씨/증시 등 재미없는 것들)
+NEWS_SKIP_KEYWORDS = [
+    # 정치
+    "대통령", "국회", "여당", "야당", "민주당", "국민의힘", "대선", "총선", "탄핵",
+    "내각", "장관", "의원", "정치", "헌재", "헌법재판", "법원", "검찰", "수사",
+    "선거", "투표", "의석", "국정", "외교", "정부", "청와대", "용산",
+    # 경제/날씨/주식
+    "코스피", "코스닥", "주가", "환율", "금리", "증시", "주식", "경제지표",
+    "날씨", "미세먼지", "태풍", "폭설", "황사", "기온", "강수",
+    # 기타 딱딱한 것들
+    "GDP", "CPI", "무역수지", "수출입", "통계청",
+]
+
+# 뉴스 통과: 제목에 이 키워드가 있으면 우선순위 상승 (핫한 이슈들)
+NEWS_HOT_KEYWORDS = [
+    "올림픽", "금메달", "충격", "논란", "폭로", "사망", "체포", "구속",
+    "연예", "아이돌", "배우", "가수", "드라마", "예능", "결혼", "이혼",
+    "사건", "사고", "화재", "폭행", "갑질", "탈세", "불륜",
+    "유튜브", "틱톡", "SNS", "화제", "난리", "역대급", "최초", "최고",
+    "한국인", "외국인", "일본", "중국", "미국", "세계", "글로벌",
+    "가격", "음식", "맛집", "여행", "쇼핑", "패션", "뷰티",
+    "AI", "기술", "신기", "놀라운", "반전", "반박",
+]
+
+
+def fetch_natenews_list(max_fetch: int = 30) -> List[Dict[str, str]]:
+    """네이트뉴스 실시간 인기 뉴스 수집 (정치/날씨 필터링 포함)."""
+    list_urls = [
+        "https://news.nate.com/rank/interest",          # 전체 인기
+        "https://news.nate.com/rank/interest?sc=en",    # 연예
+        "https://news.nate.com/rank/interest?sc=sp",    # 스포츠
+        "https://news.nate.com/rank/interest?sc=so",    # 사회
+        "https://news.nate.com/rank/interest?sc=it",    # IT/과학
+    ]
+    headers = {
+        "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 Chrome/124.0.0.0 Safari/537.36",
+        "Referer": "https://news.nate.com/",
+        "Accept-Language": "ko-KR,ko;q=0.9",
+    }
+    items: List[Dict[str, str]] = []
+    seen: set = set()
+
+    for list_url in list_urls:
+        try:
+            r = requests.get(list_url, headers=headers, timeout=15)
+            r.encoding = r.apparent_encoding
+            soup = BeautifulSoup(r.text, "html.parser")
+            for a in soup.find_all("a", href=True):
+                href = a.get("href", "")
+                title = a.get_text(strip=True)
+                # /view/ 패턴 링크만
+                if "/view/" not in href:
+                    continue
+                # URL 정규화 (중복 슬래시 제거)
+                full_url = re.sub(r"https?://[^/]+//", "https://news.nate.com/", href)
+                if not full_url.startswith("http"):
+                    full_url = "https://news.nate.com" + href
+                full_url = full_url.split("?")[0]
+                if full_url in seen or not title or len(title) < 10:
+                    continue
+                # 정치/날씨 등 필터링
+                if any(kw in title for kw in NEWS_SKIP_KEYWORDS):
+                    continue
+                seen.add(full_url)
+                # 핫 키워드 포함 여부로 점수 매기기
+                hot_score = sum(1 for kw in NEWS_HOT_KEYWORDS if kw in title)
+                items.append({"url": full_url, "title": title, "source": "네이트뉴스", "hot_score": str(hot_score)})
+        except Exception as e:
+            print(f"[네이트뉴스] 수집 오류 ({list_url}): {e}")
+
+    # 핫 점수 높은 순으로 정렬
+    items.sort(key=lambda x: int(x.get("hot_score", "0")), reverse=True)
+    return items[:max_fetch]
+
+
+def fetch_natenews_post(url: str) -> Dict[str, str]:
+    """네이트뉴스 기사 본문 수집."""
+    headers = {
+        "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 Chrome/124.0.0.0 Safari/537.36",
+        "Referer": "https://news.nate.com/",
+        "Accept-Language": "ko-KR,ko;q=0.9",
+    }
+    try:
+        r = requests.get(url, headers=headers, timeout=15)
+        r.encoding = r.apparent_encoding
+        soup = BeautifulSoup(r.text, "html.parser")
+
+        # 제목
+        title = ""
+        og_title = soup.find("meta", property="og:title")
+        if og_title and og_title.get("content"):
+            title = og_title["content"].replace(" : 네이트", "").replace(" - 네이트뉴스", "").strip()
+        if not title and soup.title:
+            title = soup.title.get_text(strip=True)
+
+        # og:description (AI 요약 or 첫 문장)
+        og_desc = soup.find("meta", property="og:description")
+        desc = og_desc["content"].strip() if og_desc and og_desc.get("content") else ""
+
+        # 본문 영역
+        SKIP_UI = {"NATE", "스포츠", "뉴스", "연예", "판", "날씨", "검색", "최신뉴스",
+                   "공유하기", "원문", "기사전송", "AI 챗", "AI 요약", "작게", "보통", "크게"}
+        content_area = soup.find("div", class_=lambda c: c and any(
+            k in c for k in ("news_text", "artText", "article_body", "news-article", "article-body", "view_text")
+        ))
+        if not content_area:
+            # id 기반 fallback
+            content_area = soup.find("div", id=lambda i: i and any(
+                k in i for k in ("articleBodyContents", "articeBody", "newsEndContents")
+            ))
+        if not content_area:
+            content_area = soup
+
+        blocks, seen_t = [], set()
+        for tag in content_area.find_all(["p", "span", "div", "li"]):
+            if tag.name == "div" and len(tag.find_all(["p", "span", "li"])) > 3:
+                continue
+            t = tag.get_text(" ", strip=True)
+            if not t or len(t) < 10 or len(t) > 500:
+                continue
+            if t in SKIP_UI or any(ui in t for ui in SKIP_UI):
+                continue
+            if t in seen_t:
+                continue
+            seen_t.add(t)
+            blocks.append(t)
+            if len(blocks) >= 25:
+                break
+
+        content = "\n".join(blocks)
+        if not content.strip():
+            content = desc
+
+        return {"title": title, "content": content, "desc": desc, "source": "네이트뉴스"}
+    except Exception as e:
+        return {"title": "", "content": "", "source": "네이트뉴스", "error": str(e)}
+
+
 SOURCE_CRAWLERS = {
+    "네이트뉴스 🔥": (fetch_natenews_list, fetch_natenews_post),  # 핫 이슈 뉴스
     "네이버 뿜": None,   # fetch_bboom_list / fetch_bboom_post_text (기존)
     "네이트판":  (fetch_natepann_list,   fetch_natepann_post),
     "에펨코리아": (fetch_fmkorea_list,   fetch_fmkorea_post),
@@ -2744,7 +2900,8 @@ def _auto_content_flow(config: AppConfig, progress, status_box, selected_sources
         content_category = analyze_content_category(config, seed)
         st.info(f"[{source}] {item.get('title','')[:40]}... → 분위기: **{content_category}**")
 
-        # 스크립트 생성
+        # 스크립트 생성 (뉴스 소스면 news 프롬프트 강화)
+        is_news = "뉴스" in source
         _status_update(progress, status_box, 0.22, "AI 스크립트 생성 중...")
         script = generate_script(
             config=config,
@@ -2752,6 +2909,7 @@ def _auto_content_flow(config: AppConfig, progress, status_box, selected_sources
             trend_context=trend_context,
             dialect_style=config.ja_dialect_style,
             content_category=content_category,
+            source_type="news" if is_news else "",
         )
 
         # BGM 선정
@@ -2992,13 +3150,15 @@ def run_streamlit_app() -> None:
         progress = st.progress(0.0)
         status_box = st.empty()
 
-        st.subheader("한국 커뮤니티 자동 생성 (승인 포함)")
+        st.subheader("한국 핫이슈 자동 생성 (승인 포함)")
         all_sources = list(SOURCE_CRAWLERS.keys())
+        # 기본값: 네이트뉴스만 선택
+        default_sources = ["네이트뉴스 🔥"]
         selected_sources = st.multiselect(
             "수집할 소스 선택 (복수 선택 가능)",
             options=all_sources,
-            default=all_sources,
-            help="선택한 소스에서 인기글을 수집해 숏츠를 자동 생성합니다.",
+            default=default_sources,
+            help="네이트뉴스: 정치/날씨 제외 핫한 이슈 자동 필터링\n커뮤니티: 네이트판/에펨코리아/DC/보배드림 유머글",
         )
         auto_button = st.button("자동 생성 시작", type="primary")
         if auto_button:
