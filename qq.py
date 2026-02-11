@@ -1870,16 +1870,20 @@ def wait_for_approval(
                 # chat_id: message > chat > id (개인/그룹 모두 커버)
                 cb_msg = callback.get("message", {})
                 cb_chat_id = str(cb_msg.get("chat", {}).get("id", ""))
+                # from.id: 버튼을 누른 사람의 개인 ID
+                cb_from_id = str(callback.get("from", {}).get("id", ""))
                 # fallback: from.id (개인 채팅일 경우)
                 if not cb_chat_id:
-                    cb_chat_id = str(callback.get("from", {}).get("id", ""))
+                    cb_chat_id = cb_from_id
 
-                print(f"[callback] data={cb_data} chat_id={cb_chat_id} admin={config.telegram_admin_chat_id}")
+                print(f"[callback] data={cb_data} chat_id={cb_chat_id} from_id={cb_from_id} admin={config.telegram_admin_chat_id}")
 
-                # 관리자 체크 (admin_chat_id 설정된 경우만)
-                if config.telegram_admin_chat_id and cb_chat_id != str(config.telegram_admin_chat_id):
-                    print(f"[callback] 관리자 아님 - 무시")
-                    continue
+                # 관리자 체크: 그룹 ID 또는 개인 ID 중 하나라도 일치하면 통과
+                if config.telegram_admin_chat_id:
+                    admin_id = str(config.telegram_admin_chat_id)
+                    if cb_chat_id != admin_id and cb_from_id != admin_id:
+                        print(f"[callback] 관리자 아님 - 무시 (chat={cb_chat_id}, from={cb_from_id})")
+                        continue
 
                 if cb_data in ("approve", "approved"):
                     _answer_callback_query(config.telegram_bot_token, cb_id, "✅ 승인되었습니다!")
