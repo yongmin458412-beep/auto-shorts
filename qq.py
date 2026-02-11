@@ -738,10 +738,15 @@ def generate_script(
     system_text = (
         "You are a short-form video scriptwriter specializing in Korean viral content adapted for Japanese audiences. "
         "Return ONLY valid JSON with keys: "
-        "title_ja, description_ja, hashtags_ja (array), beats (array). "
-        "Each beat: {text, tag}. "
+        "title_ko, title_ja, description_ja, hashtags_ja (array), beats (array). "
+        "Each beat: {text_ko, text, tag}. "
+        "  - text_ko: Korean version of the beat (natural Korean short-form style) "
+        "  - text: Japanese translation of text_ko "
+        "  - tag: reaction tag "
         "Keep beats punchy, 1 line each, no emojis in text. "
-        "All output text (title_ja, description_ja, beats text) must be in Japanese."
+        "title_ko: Korean title (punchy, short-form style). "
+        "All 'text' and title_ja/description_ja must be in Japanese. "
+        "All 'text_ko' and title_ko must be in Korean."
     )
     style_line = (
         f"Korean viral style instruction: {korean_style_prompt} "
@@ -1738,10 +1743,20 @@ def get_telegram_updates(token: str, offset: int) -> List[Dict[str, Any]]:
     if not token:
         return []
     url = f"https://api.telegram.org/bot{token}/getUpdates"
-    params = {"offset": offset, "timeout": 10}
-    response = requests.get(url, params=params, timeout=30)
-    response.raise_for_status()
-    return response.json().get("result", [])
+    # timeout=0 으로 즉시 응답 (Streamlit Cloud long-polling 문제 방지)
+    # allowed_updates 에 callback_query 포함해서 버튼 클릭 확실히 수신
+    params = {
+        "offset": offset,
+        "timeout": 0,
+        "allowed_updates": ["message", "callback_query"],
+    }
+    try:
+        response = requests.get(url, params=params, timeout=15)
+        response.raise_for_status()
+        return response.json().get("result", [])
+    except Exception as e:
+        print(f"[getUpdates 오류] {e}")
+        return []
 
 
 def wait_for_approval(
@@ -1774,15 +1789,23 @@ def wait_for_approval(
             # ── 버튼 클릭 (callback_query) 처리 ──────────────────
             callback = update.get("callback_query")
             if callback:
-                cb_chat_id = str(callback.get("from", {}).get("id", ""))
                 cb_data = (callback.get("data") or "").strip().lower()
                 cb_id = callback.get("id", "")
+                # chat_id: message > chat > id (개인/그룹 모두 커버)
+                cb_msg = callback.get("message", {})
+                cb_chat_id = str(cb_msg.get("chat", {}).get("id", ""))
+                # fallback: from.id (개인 채팅일 경우)
+                if not cb_chat_id:
+                    cb_chat_id = str(callback.get("from", {}).get("id", ""))
 
-                # 관리자 체크
+                print(f"[callback] data={cb_data} chat_id={cb_chat_id} admin={config.telegram_admin_chat_id}")
+
+                # 관리자 체크 (admin_chat_id 설정된 경우만)
                 if config.telegram_admin_chat_id and cb_chat_id != str(config.telegram_admin_chat_id):
+                    print(f"[callback] 관리자 아님 - 무시")
                     continue
 
-                if cb_data == "approve":
+                if cb_data in ("approve", "approved"):
                     _answer_callback_query(config.telegram_bot_token, cb_id, "✅ 승인되었습니다!")
                     if approval_message_id:
                         _disable_approval_buttons(
@@ -1794,7 +1817,7 @@ def wait_for_approval(
                     _save_offset(config.telegram_offset_path, offset)
                     return "approve"
 
-                if cb_data == "swap":
+                if cb_data in ("swap", "exchange"):
                     _answer_callback_query(config.telegram_bot_token, cb_id, "🔄 교환 처리합니다.")
                     if approval_message_id:
                         _disable_approval_buttons(
@@ -1808,6 +1831,8 @@ def wait_for_approval(
 
             # ── 텍스트 메시지 fallback ────────────────────────────
             message = update.get("message", {})
+            if not message:
+                continue
             chat = message.get("chat", {})
             chat_id = str(chat.get("id", ""))
             if config.telegram_admin_chat_id and chat_id != str(config.telegram_admin_chat_id):
@@ -1821,7 +1846,7 @@ def wait_for_approval(
                 return "swap"
 
         _save_offset(config.telegram_offset_path, offset)
-        time.sleep(5)
+        time.sleep(3)  # 5초→3초로 단축해 응답성 향상
 
     return "approve"
 
@@ -2016,14 +2041,18 @@ def _auto_bboom_flow(config: AppConfig, progress, status_box) -> None:
         texts = [beat.get("text", "") for beat in script.get("beats", [])]
         beat_tags = [beat.get("tag", "") for beat in script.get("beats", [])]
 
-        # 에셋 미리 선택 (미리보기에 포함)
-        assets = []
+        # 에셋 미리 선택 (미리보기에 포함) - (asset_path, category_tags) 쌍으로 저장
+        assets = []          # str: 파일 경로
+        asset_cats = []      # str: 해당 에셋의 카테고리/태그 요약
         for tag in beat_tags:
             asset = pick_asset(manifest_items, [tag])
             if not asset:
                 asset = pick_asset_by_category(manifest_items, content_category)
             if asset:
                 assets.append(asset.path)
+                # 태그 정보 요약 (없으면 content_category)
+                tag_summary = ", ".join(asset.tags) if asset.tags else content_category
+                asset_cats.append(tag_summary)
 
         if not assets:
             st.error("태그에 맞는 에셋이 없습니다.")
@@ -2034,9 +2063,15 @@ def _auto_bboom_flow(config: AppConfig, progress, status_box) -> None:
         beats_preview = ""
         for i, beat in enumerate(beats, 1):
             tag = beat.get("tag", "")
-            txt = beat.get("text", "")
-            asset_name = os.path.basename(assets[min(i - 1, len(assets) - 1)]) if assets else "-"
-            beats_preview += f"  {i}. [{tag}] {txt}\n     사진: {asset_name}\n"
+            txt_ko = beat.get("text_ko", "")   # 한글 원문
+            txt_ja = beat.get("text", "")       # 일본어 번역
+            cat_label = asset_cats[min(i - 1, len(asset_cats) - 1)] if asset_cats else content_category
+            beats_preview += (
+                f"  {i}. [{tag}]\n"
+                f"     KO: {txt_ko}\n"
+                f"     JA: {txt_ja}\n"
+                f"     사진 카테고리: {cat_label}\n"
+            )
 
         request_text = (
             f"[ 승인 요청 ]\n"
@@ -2045,10 +2080,11 @@ def _auto_bboom_flow(config: AppConfig, progress, status_box) -> None:
             f"링크: {url}\n"
             f"분위기: {content_category}  |  BGM: {os.path.basename(bgm_path) if bgm_path else '없음'}\n"
             f"━━━━━━━━━━━━━━━━━━━━\n"
-            f"제목(안): {script.get('title_ja', '')}\n"
+            f"제목 KO: {script.get('title_ko', '')}\n"
+            f"제목 JA: {script.get('title_ja', '')}\n"
             f"해시태그: {' '.join(script.get('hashtags_ja', []))}\n"
             f"━━━━━━━━━━━━━━━━━━━━\n"
-            f"대본 + 사진 미리보기\n"
+            f"대본 미리보기\n"
             f"{beats_preview}"
             f"━━━━━━━━━━━━━━━━━━━━\n"
             f"아래 버튼으로 응답해주세요."
@@ -2079,7 +2115,14 @@ def _auto_bboom_flow(config: AppConfig, progress, status_box) -> None:
         now = datetime.utcnow().strftime("%Y%m%d_%H%M%S")
         audio_path = os.path.join(config.output_dir, f"tts_{now}.mp3")
         voice_id = pick_voice_id(config.elevenlabs_voice_ids)
-        tts_elevenlabs(config, "。".join(texts), audio_path, voice_id=voice_id)
+        try:
+            tts_elevenlabs(config, "。".join(texts), audio_path, voice_id=voice_id)
+        except Exception as tts_err:
+            err_msg = f"❌ TTS 생성 실패: {tts_err}\n\nElevenLabs API 크레딧이 부족하거나 Voice ID가 잘못되었을 수 있습니다."
+            st.error(err_msg)
+            send_telegram_message(config.telegram_bot_token, config.telegram_admin_chat_id, err_msg)
+            _mark_used_link(config.used_links_path, url, "error", post.get("title", ""))
+            continue
 
         _status_update(progress, status_box, 0.6, "영상 렌더링")
         output_path = os.path.join(config.output_dir, f"shorts_{now}.mp4")
