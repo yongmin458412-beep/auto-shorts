@@ -592,15 +592,20 @@ def fetch_bgm_from_pixabay(
     api_key: str,
     category: str,
     output_dir: str,
+    custom_query: str = "",  # AI가 생성한 BGM 검색 쿼리 (우선 사용)
 ) -> Optional[str]:
     """
     카테고리에 맞는 BGM을 Pixabay에서 검색 후 다운로드.
+    custom_query가 있으면 우선 사용, 없으면 카테고리 키워드 사용.
     성공하면 저장된 파일 경로 반환, 실패하면 None.
     """
     if not api_key:
         return None
-    keywords = BGM_CATEGORY_KEYWORDS.get(category, ["upbeat"])
-    query = random.choice(keywords)
+    if custom_query:
+        query = custom_query.strip()
+    else:
+        keywords = BGM_CATEGORY_KEYWORDS.get(category, ["upbeat"])
+        query = random.choice(keywords)
     os.makedirs(output_dir, exist_ok=True)
     try:
         params = {
@@ -653,10 +658,11 @@ def fetch_bgm_from_pixabay(
 def get_or_download_bgm(
     config: AppConfig,
     category: str,
+    custom_query: str = "",  # AI 생성 BGM 키워드 (우선 사용)
 ) -> Optional[str]:
     """
     1) assets/bgm/{category}/ 에 기존 파일이 있으면 랜덤 선택
-    2) 없으면 Pixabay에서 다운로드 후 반환
+    2) 없으면 Pixabay에서 다운로드 후 반환 (custom_query 우선)
     """
     bgm_category_dir = os.path.join(config.assets_dir, "bgm", category)
     os.makedirs(bgm_category_dir, exist_ok=True)
@@ -668,6 +674,7 @@ def get_or_download_bgm(
             api_key=config.pixabay_api_key,
             category=category,
             output_dir=bgm_category_dir,
+            custom_query=custom_query,
         )
         if path:
             return path
@@ -736,17 +743,30 @@ def generate_script(
     korean_style_prompt = KOREAN_SHORTS_STYLE_PROMPTS[script_style_key]
 
     system_text = (
-        "You are a short-form video scriptwriter specializing in Korean viral content adapted for Japanese audiences. "
-        "Return ONLY valid JSON with keys: "
-        "title_ko, title_ja, description_ja, hashtags_ja (array), beats (array). "
-        "Each beat: {text_ko, text, tag}. "
-        "  - text_ko: Korean version of the beat (natural Korean short-form style) "
-        "  - text: Japanese translation of text_ko "
-        "  - tag: reaction tag "
-        "Keep beats punchy, 1 line each, no emojis in text. "
-        "title_ko: Korean title (punchy, short-form style). "
-        "All 'text' and title_ja/description_ja must be in Japanese. "
-        "All 'text_ko' and title_ko must be in Korean."
+        "You are a short-form video scriptwriter specializing in Korean viral content adapted for Japanese audiences.\n"
+        "Your job: read the Korean source content carefully and create a script that FAITHFULLY captures its actual story, joke, or reaction — do NOT invent unrelated content.\n\n"
+        "Return ONLY valid JSON with these keys:\n"
+        "  title_ko        : Korean title (punchy, short-form style)\n"
+        "  title_ja        : Japanese title\n"
+        "  description_ja  : Japanese description (1-2 sentences)\n"
+        "  hashtags_ja     : array of 3-6 Japanese hashtags (# included)\n"
+        "  bgm_query       : 1-3 English keywords for royalty-free BGM that fits the mood (e.g. 'funny quirky ukulele')\n"
+        "  beats           : array of beat objects\n\n"
+        "Each beat object:\n"
+        "  text_ko : Korean version of the line (natural Korean short-form style, 1 punchy line)\n"
+        "  text    : Japanese translation of text_ko\n"
+        "  tag     : one reaction tag from the allowed list\n\n"
+        "Rules:\n"
+        "- beats count: decide naturally based on the content — typically 5~9 beats. "
+        "  Short jokes → 5 beats. Complex stories → up to 9 beats. Never force a fixed number.\n"
+        "- First beat: hook (grab attention in 3 seconds)\n"
+        "- Last beat: loop-friendly ending or satisfying punchline\n"
+        "- CRITICAL: Every beat must be directly based on the actual source content. "
+        "  Do NOT add unrelated details or hallucinate story elements not present in the source.\n"
+        "- Keep each beat short (1 line, 10-20 words in Korean)\n"
+        "- No emojis in text or text_ko\n"
+        "- title_ko and text_ko must be in Korean. title_ja, text, description_ja, hashtags_ja in Japanese.\n"
+        "Output JSON only, no markdown."
     )
     style_line = (
         f"Korean viral style instruction: {korean_style_prompt} "
@@ -759,17 +779,15 @@ def generate_script(
         )
 
     user_text = (
-        f"Source content (Korean): {seed_text}\n"
+        f"=== SOURCE CONTENT (Korean) ===\n{seed_text}\n\n"
+        f"=== METADATA ===\n"
         f"Content mood category: {content_category or 'humor'}\n"
         f"Language output: {language}\n"
-        f"Beats: {beats_count}\n"
-        f"Allowed tags: {tag_list}\n"
-        f"Trend context: {trend_context}\n"
-        f"{style_line}"
-        "Hook hard in the first 3 seconds and aim for a loop ending. "
-        "Hashtags: 3-6 items, reflect recent JP trends if context provided. "
-        "Keep title short and punchy. "
-        "Length: 20-55 seconds total. "
+        f"Allowed reaction tags: {tag_list}\n"
+        f"Trend context: {trend_context}\n\n"
+        f"=== STYLE INSTRUCTION ===\n{style_line}\n\n"
+        "IMPORTANT: Read the source content carefully. "
+        "The script beats MUST reflect the actual story/joke/reaction in the source. "
         "Output JSON only."
     )
     client = OpenAI(api_key=config.openai_api_key)
@@ -1615,6 +1633,10 @@ def fetch_bboom_list(config: AppConfig) -> List[Dict[str, str]]:
 
 
 def fetch_bboom_post_text(url: str) -> Dict[str, str]:
+    """
+    네이버 뿜 게시글 본문 + 댓글/반응 텍스트 최대한 수집.
+    seed_text 로 그대로 OpenAI 에 넘기므로 맥락이 풍부할수록 좋음.
+    """
     headers = {
         "User-Agent": (
             "Mozilla/5.0 (Windows NT 10.0; Win64; x64) "
@@ -1623,30 +1645,80 @@ def fetch_bboom_post_text(url: str) -> Dict[str, str]:
         ),
         "Referer": "https://m.bboom.naver.com/",
         "Accept-Language": "ko-KR,ko;q=0.9",
+        "Accept": "text/html,application/xhtml+xml,application/xml;q=0.9,*/*;q=0.8",
     }
     response = requests.get(url, headers=headers, timeout=30)
     response.raise_for_status()
     html = response.text
     soup = BeautifulSoup(html, "html.parser")
+
+    # ── 제목 ──────────────────────────────────────────────
     title = ""
     meta_title = soup.find("meta", property="og:title")
     if meta_title and meta_title.get("content"):
         title = meta_title["content"].strip()
     if not title and soup.title:
         title = soup.title.get_text(strip=True)
+
+    # ── og:description (미리보기 한줄 요약) ──────────────
     meta_desc = soup.find("meta", property="og:description")
     desc = meta_desc["content"].strip() if meta_desc and meta_desc.get("content") else ""
+
+    # ── 본문: 짧은 텍스트 노드 제거, 불필요 UI 텍스트 필터 ──
+    SKIP_KEYWORDS = {"더보기", "닫기", "공유", "신고", "좋아요", "댓글", "팔로우", "구독", "loading"}
     text_blocks = []
-    for tag in soup.find_all(["p", "span"]):
+    seen_texts: set = set()
+
+    # 본문 영역 후보 (class 명 기반 우선)
+    body_candidates = soup.find_all(
+        ["div", "section", "article"],
+        class_=lambda c: c and any(k in c for k in ("content", "body", "post", "text", "article", "view"))
+    )
+    search_root = body_candidates[0] if body_candidates else soup
+
+    for tag in search_root.find_all(["p", "span", "div", "li", "td", "blockquote"]):
+        # 자식 태그가 많은 컨테이너 div는 건너뜀 (텍스트 중복 방지)
+        if tag.name == "div" and len(tag.find_all(["p", "span", "li"])) > 3:
+            continue
         text = tag.get_text(" ", strip=True)
-        if text and len(text) > 5:
-            text_blocks.append(text)
-        if len(text_blocks) >= 6:
+        if not text or len(text) < 4 or len(text) > 300:
+            continue
+        if any(kw in text for kw in SKIP_KEYWORDS):
+            continue
+        if text in seen_texts:
+            continue
+        seen_texts.add(text)
+        text_blocks.append(text)
+        if len(text_blocks) >= 30:
             break
-    content = " ".join(text_blocks)
+
+    content = "\n".join(text_blocks)
     if not content:
         content = desc
-    return {"title": title, "content": content}
+
+    # ── 댓글/반응 섹션 별도 수집 ────────────────────────
+    comment_blocks = []
+    comment_area = soup.find_all(
+        ["div", "ul", "section"],
+        class_=lambda c: c and any(k in c for k in ("comment", "reply", "reaction", "cmt"))
+    )
+    for area in comment_area[:2]:
+        for tag in area.find_all(["p", "span", "li"]):
+            t = tag.get_text(" ", strip=True)
+            if t and 4 < len(t) < 150 and t not in seen_texts:
+                seen_texts.add(t)
+                comment_blocks.append(t)
+            if len(comment_blocks) >= 10:
+                break
+
+    comments_text = "\n".join(comment_blocks)
+
+    # ── 최종 조합 ────────────────────────────────────────
+    full_content = content
+    if comments_text:
+        full_content += f"\n\n[반응/댓글]\n{comments_text}"
+
+    return {"title": title, "content": full_content, "desc": desc}
 
 
 def send_telegram_message(token: str, chat_id: str, text: str) -> bool:
@@ -2014,29 +2086,29 @@ def _auto_bboom_flow(config: AppConfig, progress, status_box) -> None:
             post = {"title": item.get("title", ""), "content": ""}
         seed = f"{post.get('title','')}\n{post.get('content','')}"
 
-        # NEW: 글 분위기 카테고리 분석
+        # 글 분위기 카테고리 분석
         _status_update(progress, status_box, 0.15, "글 분위기 분석 중")
         content_category = analyze_content_category(config, seed)
         st.info(f"감지된 분위기 카테고리: **{content_category}**")
 
-        # NEW: 카테고리 맞는 BGM 선택/다운로드
-        _status_update(progress, status_box, 0.18, f"BGM 선정 중 ({content_category})")
-        bgm_dir = os.path.join(config.assets_dir, "bgm")
-        bgm_path = get_or_download_bgm(config, content_category)
-        if bgm_path:
-            st.info(f"BGM: {os.path.basename(bgm_path)}")
-        else:
-            bgm_path = pick_bgm_path(config)
-
-        _status_update(progress, status_box, 0.22, "스크립트 초안 생성")
+        # 스크립트 생성 (beats 수, BGM 쿼리 등 AI가 자동 결정)
+        _status_update(progress, status_box, 0.22, "AI 스크립트 생성 중...")
         script = generate_script(
             config=config,
             seed_text=seed,
-            beats_count=7,
             trend_context=trend_context,
             dialect_style=config.ja_dialect_style,
             content_category=content_category,
         )
+
+        # AI가 제안한 BGM 쿼리로 BGM 다운로드 (스크립트 생성 후 처리)
+        ai_bgm_query = script.get("bgm_query", "")
+        _status_update(progress, status_box, 0.30, f"BGM 선정 중 (키워드: {ai_bgm_query or content_category})")
+        bgm_path = get_or_download_bgm(config, content_category, custom_query=ai_bgm_query)
+        if bgm_path:
+            st.info(f"BGM: {os.path.basename(bgm_path)} (쿼리: {ai_bgm_query or content_category})")
+        else:
+            bgm_path = pick_bgm_path(config)
 
         texts = [beat.get("text", "") for beat in script.get("beats", [])]
         beat_tags = [beat.get("tag", "") for beat in script.get("beats", [])]
@@ -2073,18 +2145,22 @@ def _auto_bboom_flow(config: AppConfig, progress, status_box) -> None:
                 f"     사진 카테고리: {cat_label}\n"
             )
 
+        beats_count_actual = len(beats)
+        bgm_display = os.path.basename(bgm_path) if bgm_path else "없음"
+        bgm_query_display = ai_bgm_query if ai_bgm_query else content_category
         request_text = (
             f"[ 승인 요청 ]\n"
             f"━━━━━━━━━━━━━━━━━━━━\n"
             f"출처 글: {post.get('title', '')}\n"
             f"링크: {url}\n"
-            f"분위기: {content_category}  |  BGM: {os.path.basename(bgm_path) if bgm_path else '없음'}\n"
+            f"분위기: {content_category}  |  beats: {beats_count_actual}개\n"
+            f"BGM: {bgm_display}  (키워드: {bgm_query_display})\n"
             f"━━━━━━━━━━━━━━━━━━━━\n"
             f"제목 KO: {script.get('title_ko', '')}\n"
             f"제목 JA: {script.get('title_ja', '')}\n"
             f"해시태그: {' '.join(script.get('hashtags_ja', []))}\n"
             f"━━━━━━━━━━━━━━━━━━━━\n"
-            f"대본 미리보기\n"
+            f"대본 미리보기 ({beats_count_actual}컷)\n"
             f"{beats_preview}"
             f"━━━━━━━━━━━━━━━━━━━━\n"
             f"아래 버튼으로 응답해주세요."
