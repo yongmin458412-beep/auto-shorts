@@ -220,7 +220,35 @@ def _naver_blog_to_postview_url(url: str) -> Optional[str]:
     return None
 
 
-def extract_image_urls_from_html(html: str) -> List[str]:
+def _is_naver_post_image(url: str) -> bool:
+    """
+    네이버 블로그 본문 실제 이미지인지 판별.
+    postfiles / blogfiles 도메인만 허용.
+    UI 아이콘(ssl.pstatic.net), 썸네일(mblogthumb-phinf),
+    프로필(phinf.pstatic.net) 등은 모두 제외.
+    """
+    if not url:
+        return False
+    # 허용 도메인: 실제 본문 첨부 이미지
+    allowed = (
+        "postfiles.pstatic.net",
+        "blogfiles.pstatic.net",
+    )
+    if any(d in url for d in allowed):
+        # 경로에 이미지 확장자 또는 네이버 업로드 경로 포함 확인
+        path_lower = url.lower()
+        if any(ext in path_lower for ext in (".jpg", ".jpeg", ".png", ".gif", ".webp", "/mjax", "mjpeg")):
+            return True
+        # 확장자 없어도 postfiles 경로면 허용 (네이버는 확장자 생략 많음)
+        return True
+    return False
+
+
+def extract_image_urls_from_html(html: str, naver_mode: bool = False) -> List[str]:
+    """
+    naver_mode=True 이면 postfiles/blogfiles 도메인만 추출 (본문 이미지 전용).
+    naver_mode=False 이면 기존 방식 전체 추출.
+    """
     if not html:
         return []
     soup = BeautifulSoup(html, "html.parser")
@@ -244,7 +272,7 @@ def extract_image_urls_from_html(html: str) -> List[str]:
             if value:
                 urls.add(_normalize_url(value))
 
-    # 3) 정규식: 일반 이미지 URL (\\s → \s 버그 수정)
+    # 3) 정규식: 일반 이미지 URL
     for match in re.findall(
         r"https?://[^\"'\s<>]+\.(?:jpg|jpeg|png|gif|webp)(?:\?[^\"'\s<>]*)?",
         html,
@@ -252,15 +280,15 @@ def extract_image_urls_from_html(html: str) -> List[str]:
     ):
         urls.add(_normalize_url(match))
 
-    # 4) 정규식: pstatic.net 네이버 CDN (\\s → \s 버그 수정)
+    # 4) 정규식: 네이버 본문 이미지 CDN (postfiles / blogfiles 만)
     for match in re.findall(
-        r"https?://(?:blogfiles|postfiles|phinf|mblogthumb-phinf)\.pstatic\.net/[^\"'\s<>]+",
+        r"https?://(?:postfiles|blogfiles)\.pstatic\.net/[^\"'\s<>]+",
         html,
         flags=re.I,
     ):
         urls.add(_normalize_url(match))
 
-    # 5) 네이버 블로그 JSON 데이터 안에 박힌 이미지 URL 추출
+    # 5) JSON 데이터 안의 이미지 URL
     for match in re.findall(
         r'"(?:url|src|imageUrl|photoUrl)"\s*:\s*"(https?://[^"]+\.(?:jpg|jpeg|png|gif|webp)[^"]*)"',
         html,
@@ -272,9 +300,20 @@ def extract_image_urls_from_html(html: str) -> List[str]:
     for url in urls:
         if not url or url.startswith("data:"):
             continue
-        # 아이콘/썸네일 크기 필터 (너무 작은 건 제외)
-        if any(x in url for x in ["favicon", "icon_", "blank.", "loading."]):
-            continue
+        if naver_mode:
+            # 네이버 모드: 본문 실제 이미지만
+            if not _is_naver_post_image(url):
+                continue
+        else:
+            # 일반 모드: 명백한 UI 요소만 제외
+            if any(x in url for x in [
+                "favicon", "icon_", "blank.", "loading.",
+                "ssl.pstatic.net",        # 네이버 UI 정적 리소스
+                "mblogthumb-phinf",       # 썸네일
+                "phinf.pstatic.net",      # 프로필 이미지
+                "dthumb.pstatic.net",     # 동적 썸네일
+            ]):
+                continue
         cleaned.append(url)
     return cleaned
 
@@ -283,34 +322,31 @@ def fetch_post_image_urls(url: str) -> List[str]:
     if not url:
         return []
 
+    is_naver = "naver.com" in url
     collected: List[str] = []
 
-    # 1) PostView URL 변환 시도 (iframe 내부 직접 접근)
-    postview_url = _naver_blog_to_postview_url(url)
-    urls_to_try = []
+    # PostView URL 변환 (네이버 iframe 우회)
+    postview_url = _naver_blog_to_postview_url(url) if is_naver else None
+    urls_to_try: List[str] = []
     if postview_url and postview_url != url:
         urls_to_try.append(postview_url)
     urls_to_try.append(url)
 
-    # 모바일 버전 추가
+    # 모바일 버전 추가 (네이버 PC URL인 경우)
     if "blog.naver.com" in url and "m.blog.naver.com" not in url:
-        mobile_url = url.replace("blog.naver.com", "m.blog.naver.com")
-        urls_to_try.append(mobile_url)
+        urls_to_try.append(url.replace("blog.naver.com", "m.blog.naver.com"))
 
     for try_url in urls_to_try:
         try:
             response = requests.get(try_url, headers=_NAVER_HEADERS, timeout=30)
             response.raise_for_status()
-            found = extract_image_urls_from_html(response.text)
-            # pstatic.net 이미지가 있으면 우선 반환 (블로그 실제 이미지)
-            pstatic = [u for u in found if "pstatic.net" in u]
-            if pstatic:
-                return pstatic
+            found = extract_image_urls_from_html(response.text, naver_mode=is_naver)
+            if found:
+                return found
             collected.extend(found)
         except Exception:
             continue
 
-    # pstatic 없으면 수집된 전체 반환
     return list(dict.fromkeys(collected))
 
 
