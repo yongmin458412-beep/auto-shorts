@@ -1669,6 +1669,71 @@ def send_telegram_message(token: str, chat_id: str, text: str) -> bool:
     return success
 
 
+def send_telegram_approval_request(
+    token: str,
+    chat_id: str,
+    text: str,
+) -> Optional[str]:
+    """
+    인라인 버튼(✅ 승인 / 🔄 교환)이 포함된 승인 요청 메시지 전송.
+    성공 시 message_id 반환, 실패 시 None 반환.
+    """
+    if not token or not chat_id:
+        return None
+    url = f"https://api.telegram.org/bot{token}/sendMessage"
+    max_len = 3800  # 버튼 포함 여유 확보
+    body = text[:max_len] + ("..." if len(text) > max_len else "")
+    payload = {
+        "chat_id": chat_id,
+        "text": body,
+        "reply_markup": {
+            "inline_keyboard": [
+                [
+                    {"text": "✅ 승인", "callback_data": "approve"},
+                    {"text": "🔄 교환", "callback_data": "swap"},
+                ]
+            ]
+        },
+    }
+    try:
+        resp = requests.post(url, json=payload, timeout=30)
+        if resp.ok:
+            return str(resp.json().get("result", {}).get("message_id", ""))
+        print(f"[Telegram 버튼 전송 실패] status={resp.status_code} body={resp.text[:300]}")
+    except Exception as exc:
+        print(f"[Telegram 버튼 전송 오류] {exc}")
+    return None
+
+
+def _answer_callback_query(token: str, callback_query_id: str, text: str = "") -> None:
+    """버튼 클릭 후 로딩 스피너 제거 (answerCallbackQuery)."""
+    try:
+        requests.post(
+            f"https://api.telegram.org/bot{token}/answerCallbackQuery",
+            json={"callback_query_id": callback_query_id, "text": text},
+            timeout=10,
+        )
+    except Exception:
+        pass
+
+
+def _disable_approval_buttons(token: str, chat_id: str, message_id: str, result: str) -> None:
+    """버튼 클릭 후 메시지를 결과 텍스트로 교체해 버튼 비활성화."""
+    label = "✅ 승인됨" if result == "approve" else "🔄 교환됨"
+    try:
+        requests.post(
+            f"https://api.telegram.org/bot{token}/editMessageReplyMarkup",
+            json={
+                "chat_id": chat_id,
+                "message_id": int(message_id),
+                "reply_markup": {"inline_keyboard": [[{"text": label, "callback_data": "done"}]]},
+            },
+            timeout=10,
+        )
+    except Exception:
+        pass
+
+
 def get_telegram_updates(token: str, offset: int) -> List[Dict[str, Any]]:
     if not token:
         return []
@@ -1679,20 +1744,69 @@ def get_telegram_updates(token: str, offset: int) -> List[Dict[str, Any]]:
     return response.json().get("result", [])
 
 
-def wait_for_approval(config: AppConfig, progress, status_box) -> str:
+def wait_for_approval(
+    config: AppConfig,
+    progress,
+    status_box,
+    approval_message_id: Optional[str] = None,
+) -> str:
+    """
+    텔레그램에서 승인/교환 응답 대기.
+    - callback_query (버튼 클릭) 우선 처리
+    - 텍스트 메시지 fallback 지원 (이전 방식 호환)
+    """
     start_time = time.time()
     offset = _load_offset(config.telegram_offset_path)
     approve_set = {kw.lower() for kw in config.approve_keywords}
     swap_set = {kw.lower() for kw in config.swap_keywords}
+
     while time.time() - start_time < config.telegram_timeout_sec:
-        _status_update(progress, status_box, 0.25, "텔레그램 승인 대기")
+        _status_update(progress, status_box, 0.25, "텔레그램 버튼 응답 대기 중...")
         try:
             updates = get_telegram_updates(config.telegram_bot_token, offset)
         except Exception:
             updates = []
+
         for update in updates:
             update_id = update.get("update_id", 0)
             offset = max(offset, update_id + 1)
+
+            # ── 버튼 클릭 (callback_query) 처리 ──────────────────
+            callback = update.get("callback_query")
+            if callback:
+                cb_chat_id = str(callback.get("from", {}).get("id", ""))
+                cb_data = (callback.get("data") or "").strip().lower()
+                cb_id = callback.get("id", "")
+
+                # 관리자 체크
+                if config.telegram_admin_chat_id and cb_chat_id != str(config.telegram_admin_chat_id):
+                    continue
+
+                if cb_data == "approve":
+                    _answer_callback_query(config.telegram_bot_token, cb_id, "✅ 승인되었습니다!")
+                    if approval_message_id:
+                        _disable_approval_buttons(
+                            config.telegram_bot_token,
+                            config.telegram_admin_chat_id,
+                            approval_message_id,
+                            "approve",
+                        )
+                    _save_offset(config.telegram_offset_path, offset)
+                    return "approve"
+
+                if cb_data == "swap":
+                    _answer_callback_query(config.telegram_bot_token, cb_id, "🔄 교환 처리합니다.")
+                    if approval_message_id:
+                        _disable_approval_buttons(
+                            config.telegram_bot_token,
+                            config.telegram_admin_chat_id,
+                            approval_message_id,
+                            "swap",
+                        )
+                    _save_offset(config.telegram_offset_path, offset)
+                    return "swap"
+
+            # ── 텍스트 메시지 fallback ────────────────────────────
             message = update.get("message", {})
             chat = message.get("chat", {})
             chat_id = str(chat.get("id", ""))
@@ -1705,8 +1819,10 @@ def wait_for_approval(config: AppConfig, progress, status_box) -> str:
             if any(word in text for word in swap_set):
                 _save_offset(config.telegram_offset_path, offset)
                 return "swap"
+
         _save_offset(config.telegram_offset_path, offset)
         time.sleep(5)
+
     return "approve"
 
 
@@ -1894,31 +2010,15 @@ def _auto_bboom_flow(config: AppConfig, progress, status_box) -> None:
             beats_count=7,
             trend_context=trend_context,
             dialect_style=config.ja_dialect_style,
-            content_category=content_category,  # NEW
+            content_category=content_category,
         )
-        plan_text = _script_plan_text(script)
-        request_text = (
-            f"[승인 요청]\n링크: {url}\n"
-            f"제목: {post.get('title','')}\n"
-            f"분위기: {content_category}\n"
-            f"{plan_text}\n\n"
-            "응답: 승인 / 교환"
-        )
-        send_telegram_message(config.telegram_bot_token, config.telegram_admin_chat_id, request_text)
-        decision = wait_for_approval(config, progress, status_box)
-        if decision == "swap":
-            _mark_used_link(config.used_links_path, url, "swap", post.get("title", ""))
-            send_telegram_message(config.telegram_bot_token, config.telegram_admin_chat_id, "교환 처리됨. 다음 인기글로 진행합니다.")
-            continue
 
-        _status_update(progress, status_box, 0.3, "TTS 생성")
         texts = [beat.get("text", "") for beat in script.get("beats", [])]
         beat_tags = [beat.get("tag", "") for beat in script.get("beats", [])]
 
-        # NEW: 카테고리 기반 에셋 선택
+        # 에셋 미리 선택 (미리보기에 포함)
         assets = []
         for tag in beat_tags:
-            # 비트 태그로 1차 시도, 없으면 카테고리로 fallback
             asset = pick_asset(manifest_items, [tag])
             if not asset:
                 asset = pick_asset_by_category(manifest_items, content_category)
@@ -1928,6 +2028,54 @@ def _auto_bboom_flow(config: AppConfig, progress, status_box) -> None:
         if not assets:
             st.error("태그에 맞는 에셋이 없습니다.")
             return
+
+        # ── 텔레그램 미리보기 메시지 구성 ────────────────────────
+        beats = script.get("beats", [])
+        beats_preview = ""
+        for i, beat in enumerate(beats, 1):
+            tag = beat.get("tag", "")
+            txt = beat.get("text", "")
+            asset_name = os.path.basename(assets[min(i - 1, len(assets) - 1)]) if assets else "-"
+            beats_preview += f"  {i}. [{tag}] {txt}\n     사진: {asset_name}\n"
+
+        request_text = (
+            f"[ 승인 요청 ]\n"
+            f"━━━━━━━━━━━━━━━━━━━━\n"
+            f"출처 글: {post.get('title', '')}\n"
+            f"링크: {url}\n"
+            f"분위기: {content_category}  |  BGM: {os.path.basename(bgm_path) if bgm_path else '없음'}\n"
+            f"━━━━━━━━━━━━━━━━━━━━\n"
+            f"제목(안): {script.get('title_ja', '')}\n"
+            f"해시태그: {' '.join(script.get('hashtags_ja', []))}\n"
+            f"━━━━━━━━━━━━━━━━━━━━\n"
+            f"대본 + 사진 미리보기\n"
+            f"{beats_preview}"
+            f"━━━━━━━━━━━━━━━━━━━━\n"
+            f"아래 버튼으로 응답해주세요."
+        )
+
+        # 첫 번째 에셋 사진을 미리보기로 전송
+        if assets and os.path.exists(assets[0]):
+            try:
+                photo_url = f"https://api.telegram.org/bot{config.telegram_bot_token}/sendPhoto"
+                with open(assets[0], "rb") as photo_file:
+                    requests.post(
+                        photo_url,
+                        data={"chat_id": config.telegram_admin_chat_id, "caption": "대표 사진 미리보기"},
+                        files={"photo": photo_file},
+                        timeout=30,
+                    )
+            except Exception:
+                pass
+
+        approval_msg_id = send_telegram_approval_request(
+            config.telegram_bot_token, config.telegram_admin_chat_id, request_text
+        )
+        decision = wait_for_approval(config, progress, status_box, approval_message_id=approval_msg_id)
+        if decision == "swap":
+            _mark_used_link(config.used_links_path, url, "swap", post.get("title", ""))
+            send_telegram_message(config.telegram_bot_token, config.telegram_admin_chat_id, "🔄 교환 처리됨. 다음 인기글로 진행합니다.")
+            continue
         now = datetime.utcnow().strftime("%Y%m%d_%H%M%S")
         audio_path = os.path.join(config.output_dir, f"tts_{now}.mp3")
         voice_id = pick_voice_id(config.elevenlabs_voice_ids)
