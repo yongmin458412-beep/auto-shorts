@@ -823,13 +823,28 @@ def analyze_image_tags(
         b64 = base64.b64encode(file.read()).decode("utf-8")
     data_url = f"data:{mime};base64,{b64}"
     system_text = (
-        "You are a visual classifier. "
-        "Given an image, choose 1-3 tags from the allowed list. "
-        "Return JSON only: {\"tags\": [\"...\"]}."
+        "You are an expert Korean/Japanese internet meme and reaction image classifier. "
+        "These images are used as reaction clips in short-form videos (Reels/Shorts/TikTok). "
+        "Analyze the image carefully — look at facial expressions, body language, context, text overlays, and overall emotional tone. "
+        "Choose 1-3 tags that best describe HOW this image would be used as a reaction in a video. "
+        "Tag definitions:\n"
+        "  shock: sudden surprise, jaw-drop, eyes wide open, disbelief\n"
+        "  wow: amazement, impressed, mind-blown, spectacular\n"
+        "  laugh: funny, humorous, comedic, lol expression\n"
+        "  awkward: uncomfortable, embarrassed, cringe, nervous\n"
+        "  facepalm: disappointment, 'seriously?', exasperation, headshake\n"
+        "  angry: frustration, rage, upset, indignant\n"
+        "  cute: adorable, heartwarming, sweet, lovely\n"
+        "  plot: story setup, suspense, 'what happens next?', tension building\n"
+        "  ending: conclusion, resolution, final reveal, outro moment\n"
+        "Return JSON only: {\"tags\": [\"...\"], \"reason\": \"brief explanation\"}."
     )
     user_text = (
         f"Allowed tags: {', '.join(allowed_tags)}\n"
-        "Choose the best tags for how this image would be used as a reaction meme."
+        "Look at this image and choose the most fitting reaction tags. "
+        "Be precise — if the image shows sadness or crying, do NOT tag it as laugh. "
+        "If it shows anger or frustration, use angry or facepalm. "
+        "Match the actual emotional content of the image."
     )
     client = OpenAI(api_key=config.openai_api_key)
     response = client.responses.create(
@@ -880,14 +895,27 @@ def analyze_image_content_category(
         b64 = base64.b64encode(file.read()).decode("utf-8")
     data_url = f"data:{mime};base64,{b64}"
     system_text = (
-        "You are a visual mood classifier for short-form video content. "
-        f"Categories: {', '.join(CONTENT_CATEGORIES)}. "
-        "Return JSON only: {\"category\": \"...\", \"reason\": \"...\"}."
+        "You are an expert Korean/Japanese internet meme and reaction image classifier "
+        "for short-form video content (Reels/Shorts/TikTok). "
+        "Analyze the image carefully — facial expressions, body language, context clues, text overlays, color tone, and overall emotional atmosphere. "
+        "Pick the single most fitting category based on the ACTUAL emotional content of the image.\n\n"
+        "Category definitions (choose ONE):\n"
+        "  humor       — funny, comedic, joke, silly, meme with punchline\n"
+        "  touching    — emotional, tearful, moving story, heartfelt, makes you cry\n"
+        "  shocking    — jaw-dropping reveal, plot twist, unbelievable fact, WTF moment\n"
+        "  heartwarming — wholesome, warm fuzzy feeling, acts of kindness, family/pet love\n"
+        "  cringe      — awkward, embarrassing, secondhand embarrassment, 'why would they do that'\n"
+        "  exciting    — hype, energetic, celebration, victory, pumped up\n"
+        "  sad         — grief, loss, lonely, crying, melancholy, unfortunate situation\n"
+        "  anger       — frustration, injustice, rant, outrage, 'this is wrong'\n\n"
+        "IMPORTANT: Do not default to 'humor'. Carefully examine what emotion the image actually conveys. "
+        "A crying person = sad or touching, NOT humor. An angry face = anger, NOT humor. "
+        "Return JSON only: {\"category\": \"one_of_the_above\", \"reason\": \"brief_explanation\"}"
     )
     user_text = (
-        "Which single category best describes the mood/vibe of this image "
-        "for use in a short-form video (Reels/Shorts)? "
-        f"Choose from: {', '.join(CONTENT_CATEGORIES)}"
+        "Classify this image into exactly one category based on its actual emotional content. "
+        "Look carefully at expressions, context, and atmosphere. "
+        "Do NOT assume it is humor just because it's a meme format."
     )
     try:
         client = OpenAI(api_key=config.openai_api_key)
@@ -897,17 +925,32 @@ def analyze_image_content_category(
                 {
                     "role": "user",
                     "content": [
-                        {"type": "input_text", "text": user_text},
+                        {"type": "input_text", "text": system_text},
                         {"type": "input_image", "image_url": data_url},
+                        {"type": "input_text", "text": user_text},
                     ],
                 }
             ],
         )
         output_text = getattr(response, "output_text", "") or ""
         result = extract_json(output_text)
-        category = result.get("category", "humor")
+        category = result.get("category", "").strip().lower()
         if category in CONTENT_CATEGORIES:
             return category
+        # 유사 단어 매핑 (모델이 가끔 비슷한 단어로 반환할 때)
+        fallback_map = {
+            "funny": "humor", "comedy": "humor", "comic": "humor",
+            "emotional": "touching", "heartfelt": "touching", "cry": "touching",
+            "crying": "sad", "grief": "sad", "melancholy": "sad",
+            "wholesome": "heartwarming", "warm": "heartwarming", "sweet": "heartwarming",
+            "twist": "shocking", "reveal": "shocking", "wtf": "shocking",
+            "awkward": "cringe", "embarrass": "cringe",
+            "hype": "exciting", "energy": "exciting", "celebration": "exciting",
+            "angry": "anger", "rage": "anger", "frustrat": "anger",
+        }
+        for key, mapped in fallback_map.items():
+            if key in category:
+                return mapped
     except Exception:
         pass
     return "humor"
