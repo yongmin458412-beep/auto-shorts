@@ -2010,9 +2010,15 @@ def fetch_natenews_list(max_fetch: int = 30) -> List[Dict[str, str]]:
                 # /view/ 패턴 링크만
                 if "/view/" not in href:
                     continue
-                # URL 정규화 (중복 슬래시 제거)
-                full_url = re.sub(r"https?://[^/]+//", "https://news.nate.com/", href)
-                if not full_url.startswith("http"):
+                # URL 정규화
+                # 케이스1: //news.nate.com/view/... (프로토콜 상대 URL)
+                # 케이스2: /view/... (경로 상대 URL)
+                # 케이스3: https://... (절대 URL)
+                if href.startswith("//"):
+                    full_url = "https:" + href
+                elif href.startswith("http"):
+                    full_url = href
+                else:
                     full_url = "https://news.nate.com" + href
                 full_url = full_url.split("?")[0]
                 if full_url in seen or not title or len(title) < 10:
