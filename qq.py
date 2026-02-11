@@ -601,7 +601,9 @@ def fetch_bgm_from_pixabay(
     """
     if not api_key:
         return None
-    custom_query = custom_query or ""  # None 방어
+    if isinstance(custom_query, list):
+        custom_query = " ".join(custom_query)
+    custom_query = custom_query or ""  # None/list 방어
     if custom_query.strip():
         query = custom_query.strip()
     else:
@@ -2104,7 +2106,10 @@ def _auto_bboom_flow(config: AppConfig, progress, status_box) -> None:
         )
 
         # AI가 제안한 BGM 쿼리로 BGM 다운로드 (스크립트 생성 후 처리)
-        ai_bgm_query = script.get("bgm_query") or ""  # None 방어
+        ai_bgm_query = script.get("bgm_query")
+        if isinstance(ai_bgm_query, list):
+            ai_bgm_query = " ".join(ai_bgm_query)
+        ai_bgm_query = ai_bgm_query or ""  # None 방어
         _status_update(progress, status_box, 0.30, f"BGM 선정 중 (키워드: {ai_bgm_query or content_category})")
         bgm_path = get_or_download_bgm(config, content_category, custom_query=ai_bgm_query)
         if bgm_path:
