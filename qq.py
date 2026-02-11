@@ -2029,7 +2029,7 @@ def fetch_natenews_list(max_fetch: int = 30) -> List[Dict[str, str]]:
                 seen.add(full_url)
                 # 핫 키워드 포함 여부로 점수 매기기
                 hot_score = sum(1 for kw in NEWS_HOT_KEYWORDS if kw in title)
-                items.append({"url": full_url, "title": title, "source": "네이트뉴스", "hot_score": str(hot_score)})
+                items.append({"url": full_url, "title": title, "source": "네이트뉴스 🔥", "hot_score": str(hot_score)})
         except Exception as e:
             print(f"[네이트뉴스] 수집 오류 ({list_url}): {e}")
 
@@ -2096,9 +2096,9 @@ def fetch_natenews_post(url: str) -> Dict[str, str]:
         if not content.strip():
             content = desc
 
-        return {"title": title, "content": content, "desc": desc, "source": "네이트뉴스"}
+        return {"title": title, "content": content, "desc": desc, "source": "네이트뉴스 🔥"}
     except Exception as e:
-        return {"title": "", "content": "", "source": "네이트뉴스", "error": str(e)}
+        return {"title": "", "content": "", "source": "네이트뉴스 🔥", "error": str(e)}
 
 
 SOURCE_CRAWLERS = {
@@ -2150,7 +2150,14 @@ def fetch_post_by_source(source: str, url: str, config: AppConfig) -> Dict[str, 
     """소스에 맞는 크롤러로 글 본문 수집."""
     if source == "네이버 뿜":
         return fetch_bboom_post_text(url)
+    # 정확한 키 매칭 우선
     crawlers = SOURCE_CRAWLERS.get(source)
+    if not crawlers:
+        # 이모지 등 불일치 대비: 소스 이름 포함 여부로 fallback 매칭
+        for key, val in SOURCE_CRAWLERS.items():
+            if val and (source in key or key in source):
+                crawlers = val
+                break
     if crawlers:
         _, post_fn = crawlers
         return post_fn(url)
@@ -2882,23 +2889,35 @@ def _auto_content_flow(config: AppConfig, progress, status_box, selected_sources
     used_data = _load_used_links(config.used_links_path)
     trend_context = get_trend_context(config)
 
+    skipped_used = 0
+    skipped_short = 0
+
     for item in items:
         url = item.get("url", "")
         source = item.get("source", "")
-        if not url or _is_used_link(used_data, url):
+        if not url:
+            continue
+        if _is_used_link(used_data, url):
+            skipped_used += 1
+            print(f"[스킵-이미사용] {url}")
             continue
 
-        _status_update(progress, status_box, 0.10, f"[{source}] 글 내용 분석 중...")
+        _status_update(progress, status_box, 0.10, f"[{source}] 글 내용 분석 중... ({url[-30:]})")
         try:
             post = fetch_post_by_source(source, url, config)
-        except Exception:
+        except Exception as e:
+            print(f"[본문수집오류] {url} → {e}")
             post = {"title": item.get("title", ""), "content": "", "source": source}
 
         seed = f"{post.get('title','')}\n{post.get('content','')}"
+        print(f"[본문확인] source={source} len={len(seed.strip())} title={post.get('title','')[:30]}")
 
         # 본문이 너무 짧으면 스킵 (품질 필터)
         if len(seed.strip()) < 30:
-            print(f"[품질필터] 본문 너무 짧음, 스킵: {url}")
+            skipped_short += 1
+            print(f"[스킵-짧음] len={len(seed.strip())} url={url}")
+            if skipped_short >= 3:
+                st.warning(f"본문 수집 실패가 많습니다. 수집된 {len(items)}개 중 {skipped_used}개 이미사용, {skipped_short}개 본문없음")
             continue
 
         # 글 분위기 카테고리 분석
@@ -3085,7 +3104,7 @@ def _auto_content_flow(config: AppConfig, progress, status_box, selected_sources
         send_telegram_message(config.telegram_bot_token, config.telegram_admin_chat_id, summary_text)
         return
 
-    st.warning("사용 가능한 글이 더 이상 없습니다.")
+    st.warning(f"사용 가능한 글이 없습니다. (수집: {len(items)}개 / 이미사용: {skipped_used}개 / 본문없음: {skipped_short}개) — Streamlit Cloud 로그를 확인해주세요.")
 
 
 def run_streamlit_app() -> None:
