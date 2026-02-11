@@ -131,10 +131,22 @@ def download_images_from_urls(urls: List[str], output_dir: str, limit: int = 30)
         if not url:
             continue
         try:
-            response = requests.get(url, timeout=30, headers={"User-Agent": "Mozilla/5.0"})
+            # 네이버 CDN은 Referer 필수
+            headers = {
+                "User-Agent": (
+                    "Mozilla/5.0 (Windows NT 10.0; Win64; x64) "
+                    "AppleWebKit/537.36 (KHTML, like Gecko) "
+                    "Chrome/124.0.0.0 Safari/537.36"
+                ),
+                "Referer": "https://blog.naver.com/",
+            }
+            response = requests.get(url, timeout=30, headers=headers)
             response.raise_for_status()
             content_type = response.headers.get("Content-Type", "")
             if "image" not in content_type.lower():
+                continue
+            # 너무 작은 파일(아이콘 등) 제외 - 5KB 미만
+            if len(response.content) < 5120:
                 continue
             ext = os.path.splitext(urlparse(url).path)[1].lower()
             if ext not in {".jpg", ".jpeg", ".png", ".webp", ".gif"}:
@@ -160,37 +172,108 @@ def _normalize_url(url: str) -> str:
     return url
 
 
+_NAVER_HEADERS = {
+    "User-Agent": (
+        "Mozilla/5.0 (Windows NT 10.0; Win64; x64) "
+        "AppleWebKit/537.36 (KHTML, like Gecko) "
+        "Chrome/124.0.0.0 Safari/537.36"
+    ),
+    "Referer": "https://blog.naver.com/",
+    "Accept-Language": "ko-KR,ko;q=0.9,en-US;q=0.8,en;q=0.7",
+    "Accept": "text/html,application/xhtml+xml,application/xml;q=0.9,image/webp,*/*;q=0.8",
+}
+
+
+def _naver_blog_to_postview_url(url: str) -> Optional[str]:
+    """
+    blog.naver.com/{blogId}/{logNo} 형식을
+    PostView.naver?blogId=...&logNo=... 형식으로 변환.
+    이미 PostView 형식이면 그대로 반환.
+    """
+    # 이미 PostView URL인 경우
+    if "PostView" in url or "postview" in url.lower():
+        return url
+    # 표준 형식: blog.naver.com/{blogId}/{logNo}
+    match = re.search(
+        r"blog\.naver\.com/([^/?#]+)/(\d+)",
+        url,
+        flags=re.I,
+    )
+    if match:
+        blog_id, log_no = match.group(1), match.group(2)
+        return (
+            f"https://blog.naver.com/PostView.naver"
+            f"?blogId={blog_id}&logNo={log_no}&isInf=true"
+        )
+    # m.blog.naver.com/{blogId}/{logNo}
+    match = re.search(
+        r"m\.blog\.naver\.com/([^/?#]+)/(\d+)",
+        url,
+        flags=re.I,
+    )
+    if match:
+        blog_id, log_no = match.group(1), match.group(2)
+        return (
+            f"https://blog.naver.com/PostView.naver"
+            f"?blogId={blog_id}&logNo={log_no}&isInf=true"
+        )
+    return None
+
+
 def extract_image_urls_from_html(html: str) -> List[str]:
     if not html:
         return []
     soup = BeautifulSoup(html, "html.parser")
     urls: set[str] = set()
+
+    # 1) <img> 태그 모든 속성
     for img in soup.find_all("img"):
-        for attr in ("src", "data-src", "data-lazy-src", "data-original", "data-actualsrc"):
+        for attr in (
+            "src", "data-src", "data-lazy-src", "data-original",
+            "data-actualsrc", "data-lazy", "data-url",
+        ):
             value = img.get(attr)
             if value:
                 urls.add(_normalize_url(value))
+
+    # 2) style 속성 background-image
     for tag in soup.find_all(style=True):
         style = tag.get("style", "") or ""
         for match in re.findall(r"url\(([^)]+)\)", style, flags=re.I):
             value = match.strip().strip("'").strip('"')
             if value:
                 urls.add(_normalize_url(value))
+
+    # 3) 정규식: 일반 이미지 URL (\\s → \s 버그 수정)
     for match in re.findall(
-        r"https?://[^\"'\\s]+\\.(?:jpg|jpeg|png|gif|webp)(?:\\?[^\"'\\s]*)?",
+        r"https?://[^\"'\s<>]+\.(?:jpg|jpeg|png|gif|webp)(?:\?[^\"'\s<>]*)?",
         html,
         flags=re.I,
     ):
         urls.add(_normalize_url(match))
+
+    # 4) 정규식: pstatic.net 네이버 CDN (\\s → \s 버그 수정)
     for match in re.findall(
-        r"https?://(?:blogfiles|postfiles|phinf)\\.pstatic\\.net/[^\"'\\s]+",
+        r"https?://(?:blogfiles|postfiles|phinf|mblogthumb-phinf)\.pstatic\.net/[^\"'\s<>]+",
         html,
         flags=re.I,
     ):
         urls.add(_normalize_url(match))
+
+    # 5) 네이버 블로그 JSON 데이터 안에 박힌 이미지 URL 추출
+    for match in re.findall(
+        r'"(?:url|src|imageUrl|photoUrl)"\s*:\s*"(https?://[^"]+\.(?:jpg|jpeg|png|gif|webp)[^"]*)"',
+        html,
+        flags=re.I,
+    ):
+        urls.add(_normalize_url(match))
+
     cleaned = []
     for url in urls:
         if not url or url.startswith("data:"):
+            continue
+        # 아이콘/썸네일 크기 필터 (너무 작은 건 제외)
+        if any(x in url for x in ["favicon", "icon_", "blank.", "loading."]):
             continue
         cleaned.append(url)
     return cleaned
@@ -199,21 +282,36 @@ def extract_image_urls_from_html(html: str) -> List[str]:
 def fetch_post_image_urls(url: str) -> List[str]:
     if not url:
         return []
-    headers = {"User-Agent": "Mozilla/5.0"}
-    response = requests.get(url, headers=headers, timeout=30)
-    response.raise_for_status()
-    urls = extract_image_urls_from_html(response.text)
-    if urls:
-        return urls
+
+    collected: List[str] = []
+
+    # 1) PostView URL 변환 시도 (iframe 내부 직접 접근)
+    postview_url = _naver_blog_to_postview_url(url)
+    urls_to_try = []
+    if postview_url and postview_url != url:
+        urls_to_try.append(postview_url)
+    urls_to_try.append(url)
+
+    # 모바일 버전 추가
     if "blog.naver.com" in url and "m.blog.naver.com" not in url:
         mobile_url = url.replace("blog.naver.com", "m.blog.naver.com")
+        urls_to_try.append(mobile_url)
+
+    for try_url in urls_to_try:
         try:
-            response = requests.get(mobile_url, headers=headers, timeout=30)
+            response = requests.get(try_url, headers=_NAVER_HEADERS, timeout=30)
             response.raise_for_status()
-            return extract_image_urls_from_html(response.text)
+            found = extract_image_urls_from_html(response.text)
+            # pstatic.net 이미지가 있으면 우선 반환 (블로그 실제 이미지)
+            pstatic = [u for u in found if "pstatic.net" in u]
+            if pstatic:
+                return pstatic
+            collected.extend(found)
         except Exception:
-            return []
-    return []
+            continue
+
+    # pstatic 없으면 수집된 전체 반환
+    return list(dict.fromkeys(collected))
 
 
 def collect_images_from_post_urls(
@@ -1543,6 +1641,26 @@ def _save_offset(path: str, offset: int) -> None:
     _write_json_file(path, {"offset": offset})
 
 
+def _clear_inbox_unsaved(config: AppConfig, manifest_items: List[AssetItem]) -> int:
+    """
+    인박스 폴더에서 라이브러리(manifest)에 저장되지 않은 파일을 삭제.
+    session_state의 inbox_current_files 기준으로 처리.
+    반환값: 삭제된 파일 수
+    """
+    saved_paths = {item.path for item in manifest_items}
+    prev_files: List[str] = st.session_state.get("inbox_current_files", [])
+    deleted = 0
+    for file_path in prev_files:
+        if file_path not in saved_paths and os.path.exists(file_path):
+            try:
+                os.remove(file_path)
+                deleted += 1
+            except Exception:
+                pass
+    st.session_state["inbox_current_files"] = []
+    return deleted
+
+
 def _missing_required(config: AppConfig) -> List[str]:
     missing = []
     if not config.openai_api_key:
@@ -2099,6 +2217,13 @@ def run_streamlit_app() -> None:
                 if not collect_query.strip():
                     st.error("검색어를 입력하세요.")
                     return
+                # 새 검색어로 수집 시 이전 인박스 초기화
+                prev_query = st.session_state.get("inbox_source_key", "")
+                if f"serpapi_{collect_query}" != prev_query:
+                    _clear_inbox_unsaved(config, manifest_items)
+                    st.session_state["inbox_source_key"] = f"serpapi_{collect_query}"
+                    st.session_state["ai_tag_map"] = {}
+                    st.session_state["ai_category_map"] = {}
                 inbox_dir = os.path.join(config.assets_dir, "inbox")
                 collected = collect_images_serpapi(
                     query=collect_query,
@@ -2106,6 +2231,7 @@ def run_streamlit_app() -> None:
                     output_dir=inbox_dir,
                     limit=collect_count,
                 )
+                st.session_state["inbox_current_files"] = collected
                 st.success(f"{len(collected)}개 이미지를 인박스에 저장했습니다.")
             except Exception as exc:
                 st.error(f"수집 실패: {exc}")
@@ -2124,8 +2250,15 @@ def run_streamlit_app() -> None:
                     st.error("URL을 입력하세요.")
                 else:
                     try:
+                        new_url_key = f"url_{str(sorted(urls))}"
+                        if new_url_key != st.session_state.get("inbox_source_key", ""):
+                            _clear_inbox_unsaved(config, manifest_items)
+                            st.session_state["inbox_source_key"] = new_url_key
+                            st.session_state["ai_tag_map"] = {}
+                            st.session_state["ai_category_map"] = {}
                         inbox_dir = os.path.join(config.assets_dir, "inbox")
                         collected = download_images_from_urls(urls, inbox_dir, limit=url_limit)
+                        st.session_state["inbox_current_files"] = collected
                         st.success(f"{len(collected)}개 이미지를 인박스에 저장했습니다.")
                     except Exception as exc:
                         st.error(f"URL 수집 실패: {exc}")
@@ -2143,9 +2276,30 @@ def run_streamlit_app() -> None:
                 if not post_urls:
                     st.error("포스트 URL을 입력하세요.")
                 else:
+                    # 새 URL 입력 시 이전 수집 파일 초기화 (라이브러리에 저장된 건 보호)
+                    new_source_key = str(sorted(post_urls))
+                    prev_source_key = st.session_state.get("inbox_source_key", "")
+                    if new_source_key != prev_source_key:
+                        prev_files = st.session_state.get("inbox_current_files", [])
+                        saved_paths = {item.path for item in load_manifest(config.manifest_path)}
+                        deleted_count = 0
+                        for old_file in prev_files:
+                            if old_file not in saved_paths and os.path.exists(old_file):
+                                try:
+                                    os.remove(old_file)
+                                    deleted_count += 1
+                                except Exception:
+                                    pass
+                        if deleted_count:
+                            st.info(f"이전 수집 사진 {deleted_count}개를 초기화했습니다.")
+                        st.session_state["inbox_current_files"] = []
+                        st.session_state["inbox_source_key"] = new_source_key
+                        # AI 태그/카테고리 캐시도 초기화
+                        st.session_state["ai_tag_map"] = {}
+                        st.session_state["ai_category_map"] = {}
                     try:
                         inbox_dir = os.path.join(config.assets_dir, "inbox")
-                        total_urls, downloaded = collect_images_from_post_urls(
+                        total_urls, downloaded_count = collect_images_from_post_urls(
                             post_urls=post_urls,
                             output_dir=inbox_dir,
                             limit=post_limit,
@@ -2153,7 +2307,17 @@ def run_streamlit_app() -> None:
                         if total_urls == 0:
                             st.warning("이미지 URL을 찾지 못했습니다.")
                         else:
-                            st.success(f"발견 {total_urls}개 / 저장 {downloaded}개")
+                            # 방금 수집된 파일만 session_state에 기록
+                            inbox_dir_path = os.path.join(config.assets_dir, "inbox")
+                            all_inbox = [
+                                os.path.join(inbox_dir_path, f)
+                                for f in os.listdir(inbox_dir_path)
+                                if f.lower().endswith((".jpg", ".jpeg", ".png"))
+                            ]
+                            st.session_state["inbox_current_files"] = sorted(
+                                all_inbox, key=os.path.getmtime, reverse=True
+                            )[:downloaded_count]
+                            st.success(f"발견 {total_urls}개 / 저장 {downloaded_count}개")
                     except Exception as exc:
                         st.error(f"포스트 수집 실패: {exc}")
 
@@ -2162,6 +2326,8 @@ def run_streamlit_app() -> None:
         auto_count = st.slider("자동 수집 개수", 4, 30, 12, key="auto_collect_count")
         auto_queries = st.slider("검색어 개수", 2, 6, 4, key="auto_collect_queries")
         if st.button("일본 트렌드 자동 수집"):
+            # 새 수집 시 이전 인박스 초기화
+            _clear_inbox_unsaved(config, manifest_items)
             try:
                 inbox_dir = os.path.join(config.assets_dir, "inbox")
                 collected, queries = collect_images_auto_trend(
@@ -2170,17 +2336,29 @@ def run_streamlit_app() -> None:
                     total_count=auto_count,
                     max_queries=auto_queries,
                 )
+                st.session_state["inbox_current_files"] = collected
+                st.session_state["inbox_source_key"] = f"trend_{datetime.utcnow().isoformat()}"
+                st.session_state["ai_tag_map"] = {}
+                st.session_state["ai_category_map"] = {}
                 st.write("사용 검색어:", ", ".join(queries))
                 st.success(f"{len(collected)}개 이미지를 인박스에 저장했습니다.")
             except Exception as exc:
                 st.error(f"자동 수집 실패: {exc}")
 
-        inbox_dir = os.path.join(config.assets_dir, "inbox")
+        # 인박스 표시: session_state 기반 (현재 수집분만)
         inbox_files = [
-            os.path.join(inbox_dir, f)
-            for f in os.listdir(inbox_dir)
-            if f.lower().endswith((".jpg", ".jpeg", ".png"))
+            f for f in st.session_state.get("inbox_current_files", [])
+            if os.path.exists(f)
         ]
+        # 하위 호환: session_state가 비어있으면 폴더 전체 표시
+        if not inbox_files:
+            inbox_dir = os.path.join(config.assets_dir, "inbox")
+            if os.path.exists(inbox_dir):
+                inbox_files = [
+                    os.path.join(inbox_dir, f)
+                    for f in os.listdir(inbox_dir)
+                    if f.lower().endswith((".jpg", ".jpeg", ".png"))
+                ]
         if inbox_files:
             st.subheader("인박스")
             inbox_tags = st.text_input("인박스 태그(쉼표 구분)")
@@ -2255,7 +2433,12 @@ def run_streamlit_app() -> None:
                         tags.append(ai_cat_map[file_path])
                     tags = list(set(tags))
                     add_asset(config.manifest_path, file_path, tags)
-                st.success("선택한 짤이 라이브러리에 추가되었습니다.")
+                # 저장된 파일은 인박스 목록에서 제거 (다음 초기화 때 삭제 대상에서 제외)
+                saved_set = set(selected_files)
+                current = st.session_state.get("inbox_current_files", [])
+                st.session_state["inbox_current_files"] = [f for f in current if f not in saved_set]
+                st.success(f"선택한 짤 {len(selected_files)}개가 라이브러리에 추가되었습니다.")
+                st.rerun()
 
         st.subheader("라이브러리")
         if manifest_items:
