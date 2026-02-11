@@ -466,8 +466,8 @@ def load_config() -> AppConfig:
         telegram_timeout_sec=int(_get_secret("TELEGRAM_TIMEOUT_SEC", "600") or 600),
         telegram_offset_path=_get_secret("TELEGRAM_OFFSET_PATH", "data/state/telegram_offset.json")
         or "data/state/telegram_offset.json",
-        bboom_list_url=_get_secret("BBOOM_LIST_URL", "https://m.bboom.naver.com/best")
-        or "https://m.bboom.naver.com/best",
+        bboom_list_url=_get_secret("BBOOM_LIST_URL", "https://m.bboom.naver.com/")
+        or "https://m.bboom.naver.com/",
         bboom_max_fetch=int(_get_secret("BBOOM_MAX_FETCH", "30") or 30),
         used_links_path=_get_secret("USED_LINKS_PATH", "data/state/used_links.json")
         or "data/state/used_links.json",
@@ -1546,43 +1546,79 @@ def collect_images_auto_trend(
 
 
 def fetch_bboom_list(config: AppConfig) -> List[Dict[str, str]]:
-    headers = {"User-Agent": "Mozilla/5.0"}
-    response = requests.get(config.bboom_list_url, headers=headers, timeout=30)
+    _BBOOM_BASE = "https://m.bboom.naver.com"
+    # 메인 페이지 URL 자동 보정 (/best 는 404 → / 로)
+    list_url = config.bboom_list_url
+    if list_url.rstrip("/").endswith("/best"):
+        list_url = _BBOOM_BASE + "/"
+
+    headers = {
+        "User-Agent": (
+            "Mozilla/5.0 (Windows NT 10.0; Win64; x64) "
+            "AppleWebKit/537.36 (KHTML, like Gecko) "
+            "Chrome/124.0.0.0 Safari/537.36"
+        ),
+        "Referer": "https://www.naver.com/",
+        "Accept-Language": "ko-KR,ko;q=0.9",
+    }
+    response = requests.get(list_url, headers=headers, timeout=30)
     response.raise_for_status()
     html = response.text
     soup = BeautifulSoup(html, "html.parser")
     items: List[Dict[str, str]] = []
     seen = set()
+
     for anchor in soup.find_all("a", href=True):
         href = anchor.get("href", "")
-        if "postNo=" not in href and "postno=" not in href:
+        # 현재 뿜 게시글 URL 패턴: /best/get?boardNo=...&postNo=...
+        if "postNo=" not in href and "postno=" not in href.lower():
             continue
-        url = urljoin(config.bboom_list_url, href)
-        if url in seen:
+        # 앵커(#) 제거
+        href = href.split("#")[0]
+        full_url = urljoin(_BBOOM_BASE, href) if href.startswith("/") else href
+        if full_url in seen:
             continue
         title = anchor.get_text(" ", strip=True)
-        title = unescape(title)
+        title = unescape(title).strip()
+        # 제목 없으면 상위 부모에서 탐색
         if not title:
-            continue
-        seen.add(url)
-        items.append({"url": url, "title": title})
+            parent = anchor.find_parent(["li", "div", "article"])
+            if parent:
+                title = parent.get_text(" ", strip=True)[:80].strip()
+        if not title:
+            title = full_url
+        seen.add(full_url)
+        items.append({"url": full_url, "title": title})
         if len(items) >= config.bboom_max_fetch:
             break
+
     if items:
         return items
-    for match in re.findall(r'href=["\']([^"\']*postNo=\d+[^"\']*)', html):
-        url = urljoin(config.bboom_list_url, match)
-        if url in seen:
+
+    # fallback: 정규식으로 postNo 포함 경로 추출
+    for match in re.findall(r'href=["\']([^"\']*postNo=\d+[^"\']*)["\']', html, flags=re.I):
+        href = match.split("#")[0]
+        full_url = urljoin(_BBOOM_BASE, href) if href.startswith("/") else href
+        if full_url in seen:
             continue
-        seen.add(url)
-        items.append({"url": url, "title": url})
+        seen.add(full_url)
+        items.append({"url": full_url, "title": full_url})
         if len(items) >= config.bboom_max_fetch:
             break
+
     return items
 
 
 def fetch_bboom_post_text(url: str) -> Dict[str, str]:
-    headers = {"User-Agent": "Mozilla/5.0"}
+    headers = {
+        "User-Agent": (
+            "Mozilla/5.0 (Windows NT 10.0; Win64; x64) "
+            "AppleWebKit/537.36 (KHTML, like Gecko) "
+            "Chrome/124.0.0.0 Safari/537.36"
+        ),
+        "Referer": "https://m.bboom.naver.com/",
+        "Accept-Language": "ko-KR,ko;q=0.9",
+    }
     response = requests.get(url, headers=headers, timeout=30)
     response.raise_for_status()
     html = response.text
