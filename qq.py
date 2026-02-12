@@ -394,6 +394,7 @@ class AppConfig:
     openai_model: str
     openai_vision_model: str
     openai_tts_voices: List[str]
+    openai_tts_voice_preference: List[str]
     openai_tts_model: str
     sheet_id: str
     google_service_account_json: Optional[Dict[str, Any]]
@@ -414,6 +415,7 @@ class AppConfig:
     ja_dialect_style: str
     bgm_mode: str
     bgm_volume: float
+    asset_overlay_mode: str
     telegram_bot_token: str
     telegram_admin_chat_id: str
     telegram_timeout_sec: int
@@ -433,6 +435,7 @@ def load_config() -> AppConfig:
         openai_vision_model=_get_secret("OPENAI_VISION_MODEL", "") or "",
         openai_tts_voices=_get_list("OPENAI_TTS_VOICES")
         or ([v for v in [_get_secret("OPENAI_TTS_VOICE", "alloy")] if v]),
+        openai_tts_voice_preference=_get_list("OPENAI_TTS_VOICE_PREFERENCE"),
         openai_tts_model=_get_secret("OPENAI_TTS_MODEL", "tts-1") or "tts-1",
         sheet_id=_get_secret("SHEET_ID", "") or "",
         google_service_account_json=_get_json("GOOGLE_SERVICE_ACCOUNT_JSON"),
@@ -452,7 +455,8 @@ def load_config() -> AppConfig:
         pexels_api_key=_get_secret("PEXELS_API_KEY", "") or "",
         ja_dialect_style=_get_secret("JA_DIALECT_STYLE", "") or "",
         bgm_mode=_get_secret("BGM_MODE", "off") or "off",
-        bgm_volume=float(_get_secret("BGM_VOLUME", "0.08") or 0.08),
+        bgm_volume=float(_get_secret("BGM_VOLUME", "0.12") or 0.12),
+        asset_overlay_mode=_get_secret("ASSET_OVERLAY_MODE", "off") or "off",
         telegram_bot_token=_get_secret("TELEGRAM_BOT_TOKEN", "") or "",
         telegram_admin_chat_id=_get_secret("TELEGRAM_ADMIN_CHAT_ID", "") or "",
         telegram_timeout_sec=int(_get_secret("TELEGRAM_TIMEOUT_SEC", "600") or 600),
@@ -730,6 +734,9 @@ JP_SHORTS_SYSTEM_PROMPT: str = """당신은 유튜브 알고리즘을 장악한 
    - Twist (25~45초): 반전 해결이나 충격적 진실.
    - Reaction (45~55초): 제3자의 입장에서 던지는 현실적인 리액션 (반말/구어체).
 3. 언어: 자연스러운 일본어 구어체(반말).
+4. visual_search_keyword: 배경영상이 **사건/브랜드/현장과 직접 관련된 실제 영상**이 되도록
+   구체적이고 현실적인 키워드를 작성하세요. "calm, relaxing, nature" 같은
+   평범한 풍경 키워드는 금지. 가능하면 고유명사/연도/장소/사물 포함.
 
 [JSON 출력 포맷 (엄격 준수)]
 {
@@ -831,7 +838,8 @@ def generate_script_jp(
         if not script_ko and script_ja:
             script_ko = script_ja
         visual_kw = raw.get("visual_search_keyword") or raw.get("visual_keyword_en") or ""
-        visual_kw = str(visual_kw).strip() or "mystery case files close up"
+        visual_kw = str(visual_kw).strip()
+        visual_kw = _refine_visual_keyword(visual_kw, meta.get("topic_en", ""), role, script_ja)
         normalized.append(
             {
                 "order": order_val,
@@ -904,11 +912,11 @@ def _script_to_visual_keywords(script: Dict[str, Any]) -> List[str]:
         return [
             item.get("visual_search_keyword")
             or item.get("visual_keyword_en")
-            or "mystery case files close up"
+            or "archival newspaper headline close up"
             for item in timeline
         ]
     # 구 스키마 fallback — 전체 공통 키워드 반복
-    default_kw = script.get("bg_search_query", "mystery case files close up")
+    default_kw = script.get("bg_search_query", "archival newspaper headline close up")
     texts = _script_to_beats(script)
     return [default_kw] * len(texts)
 
@@ -941,6 +949,33 @@ def _build_caption_styles(roles: List[str], count: int) -> List[str]:
         role = roles[i] if i < len(roles) else ""
         styles.append("reaction" if role == "reaction" else "default")
     return styles
+
+
+_GENERIC_VIDEO_TOKENS = {
+    "calm", "relax", "relaxing", "nature", "landscape", "scenery",
+    "ocean", "sea", "forest", "sky", "clouds", "sunset", "sunrise",
+    "ambient", "background", "broll", "b-roll", "slow", "soft", "peaceful",
+}
+
+
+def _refine_visual_keyword(keyword: str, topic_en: str, role: str, script_ja: str) -> str:
+    kw = (keyword or "").strip()
+    topic = (topic_en or "").strip()
+    if not kw:
+        kw = topic
+    # 너무 일반적이거나 짧으면 주제 키워드를 강제 접두
+    tokens = {t for t in re.split(r"[^a-zA-Z0-9]+", kw.lower()) if t}
+    is_generic = (not tokens) or tokens.issubset(_GENERIC_VIDEO_TOKENS) or len(tokens) <= 2
+    if topic and (is_generic or topic.lower() not in kw.lower()):
+        kw = f"{topic} {kw}".strip()
+    # 훅은 시선을 잡는 아카이브/헤드라인류 키워드 보강
+    if role == "hook" and not any(
+        w in kw.lower()
+        for w in ("archive", "archival", "headline", "newspaper", "photo", "footage", "courtroom", "police", "factory")
+    ):
+        kw = f"{kw} archival photo".strip()
+    # 최후 보정
+    return kw or "archival newspaper headline close up"
 
 
 def match_bgm_by_mood(config: AppConfig, mood: str) -> Optional[str]:
@@ -987,10 +1022,17 @@ def match_bgm_by_mood(config: AppConfig, mood: str) -> Optional[str]:
     return fallback_path if os.path.exists(fallback_path) else None
 
 
-def pick_voice_id(voice_ids: List[str]) -> str:
+ENERGETIC_VOICE_ORDER = ["nova", "alloy", "shimmer", "echo", "fable", "onyx"]
+
+
+def pick_voice_id(voice_ids: List[str], preference: Optional[List[str]] = None) -> str:
     if not voice_ids:
         return ""
-    return random.choice(voice_ids)
+    pref_list = [v for v in (preference or []) if v in voice_ids]
+    if pref_list:
+        return random.choice(pref_list)
+    energetic = [v for v in ENERGETIC_VOICE_ORDER if v in voice_ids]
+    return random.choice(energetic or voice_ids)
 
 
 ALLOWED_REACTION_TAGS = [
@@ -1502,6 +1544,8 @@ def _overlay_sticker(
     canvas_width: int,
     canvas_height: int,
     size: int = 320,
+    position: Optional[Tuple[int, int]] = None,
+    opacity: float = 1.0,
 ) -> Image.Image:
     """에셋 이미지를 이모티콘처럼 우하단에 작게 붙입니다."""
     if not os.path.exists(asset_path):
@@ -1509,14 +1553,57 @@ def _overlay_sticker(
     try:
         sticker = Image.open(asset_path).convert("RGBA")
         sticker = sticker.resize((size, size), Image.LANCZOS)
-        margin = 30
-        x = canvas_width - size - margin
-        y = int(canvas_height * 0.10)   # 화면 상단 10% 위치 — 자막(하단)과 겹치지 않음
+        if opacity < 1.0:
+            alpha = sticker.split()[-1]
+            alpha = alpha.point(lambda p: int(p * max(0.0, min(opacity, 1.0))))
+            sticker.putalpha(alpha)
+        if position:
+            x, y = position
+        else:
+            margin = 30
+            x = canvas_width - size - margin
+            y = int(canvas_height * 0.10)   # 화면 상단 10% 위치 — 자막(하단)과 겹치지 않음
         base = image.convert("RGBA")
         base.paste(sticker, (x, y), sticker)
         return base.convert("RGB")
     except Exception:
         return image
+
+
+def _random_sticker_position(canvas_width: int, canvas_height: int, size: int) -> Tuple[int, int]:
+    margin = int(min(canvas_width, canvas_height) * 0.06)
+    x_min = margin
+    x_max = max(margin, canvas_width - size - margin)
+    y_min = int(canvas_height * 0.08)
+    y_max = max(y_min, int(canvas_height * 0.38))
+    if x_max <= x_min or y_max <= y_min:
+        return (canvas_width - size - margin, int(canvas_height * 0.10))
+    return (random.randint(x_min, x_max), random.randint(y_min, y_max))
+
+
+def _maybe_overlay_sticker(
+    image: Image.Image,
+    asset_path: str,
+    canvas_width: int,
+    canvas_height: int,
+    mode: str = "off",
+    size: int = 220,
+) -> Image.Image:
+    mode_key = (mode or "off").strip().lower()
+    if mode_key in {"off", "none", "false", "0"}:
+        return image
+    position = None
+    if mode_key == "random":
+        position = _random_sticker_position(canvas_width, canvas_height, size)
+    return _overlay_sticker(
+        image,
+        asset_path,
+        canvas_width,
+        canvas_height,
+        size=size,
+        position=position,
+        opacity=0.85,
+    )
 
 
 def _compose_frame(
@@ -1525,6 +1612,7 @@ def _compose_frame(
     size: Tuple[int, int],
     font_path: str,
     style: str = "default",
+    overlay_mode: str = "off",
 ) -> Image.Image:
     """정적 이미지 배경 프레임 생성 (배경영상 없을 때 fallback)."""
     if not MOVIEPY_AVAILABLE:
@@ -1534,19 +1622,20 @@ def _compose_frame(
     composed = background.copy()
     width, height = size
     composed = _draw_subtitle(composed, text, font_path, width, height, style=style)
-    composed = _overlay_sticker(composed, asset_path, width, height, size=200)
+    composed = _maybe_overlay_sticker(composed, asset_path, width, height, mode=overlay_mode, size=200)
     return composed
 
 
-# 한국 특화 fallback 쿼리 목록 (Pixabay / Pexels 공용)
-_KOREA_BG_FALLBACK_QUERIES = [
-    "seoul korea street",
-    "busan korea night",
-    "korea food market",
-    "seoul city korea",
-    "korean street walking",
-    "korea travel",
-    "seoul nightlife",
+# 글로벌 미스터리 fallback 쿼리 목록 (Pixabay / Pexels 공용)
+_GLOBAL_BG_FALLBACK_QUERIES = [
+    "archival newspaper headline",
+    "crime scene investigation board",
+    "police evidence board close up",
+    "old documents desk close up",
+    "vintage city night street",
+    "factory exterior night",
+    "courtroom sketch illustration",
+    "mysterious hallway dim light",
 ]
 
 
@@ -1622,8 +1711,8 @@ def fetch_pixabay_video(
     result = _try_q(query)
     if result:
         return result
-    # 2차~: 한국 특화 fallback
-    for fbq in _KOREA_BG_FALLBACK_QUERIES:
+    # 2차~: 글로벌 미스터리 fallback
+    for fbq in _GLOBAL_BG_FALLBACK_QUERIES:
         result = _try_q(fbq)
         if result:
             return result
@@ -1690,8 +1779,8 @@ def fetch_pexels_video(
     result = _try_query(query)
     if result:
         return result
-    # 2차~: 한국 특화 fallback 쿼리 순서대로 재시도
-    for fallback_q in _KOREA_BG_FALLBACK_QUERIES:
+    # 2차~: 글로벌 미스터리 fallback 쿼리 순서대로 재시도
+    for fallback_q in _GLOBAL_BG_FALLBACK_QUERIES:
         result = _try_query(fallback_q)
         if result:
             return result
@@ -1768,6 +1857,7 @@ def render_video(
     bgm_path: str | None = None,
     bgm_volume: float = 0.08,
     caption_styles: Optional[List[str]] = None,
+    overlay_mode: str = "off",
     bg_video_path: str | None = None,
     bg_video_paths: Optional[List[Optional[str]]] = None,
 ) -> str:
@@ -1820,17 +1910,18 @@ def render_video(
             _asset = asset_path
             _font = config.font_path
             _style = style
+            _overlay_mode = overlay_mode
 
-            def _make_frame(frame, __text=_text, __asset=_asset, __font=_font, __style=_style):
+            def _make_frame(frame, __text=_text, __asset=_asset, __font=_font, __style=_style, __overlay=_overlay_mode):
                 img = Image.fromarray(frame).convert("RGB")
                 img = _draw_subtitle(img, __text, __font, W, H, style=__style)
-                img = _overlay_sticker(img, __asset, W, H, size=320)
+                img = _maybe_overlay_sticker(img, __asset, W, H, mode=__overlay, size=260)
                 return np.array(img)
 
             clip = seg.fl_image(_make_frame).set_duration(dur)
         else:
             # fallback: 정적 이미지 배경
-            frame_img = _compose_frame(asset_path, text, (W, H), config.font_path, style=style)
+            frame_img = _compose_frame(asset_path, text, (W, H), config.font_path, style=style, overlay_mode=overlay_mode)
             clip = ImageClip(np.array(frame_img)).set_duration(dur)
             clip = clip.fx(vfx.resize, lambda t, d=dur: 1 + 0.02 * (t / max(d, 0.1)))
 
@@ -2550,6 +2641,12 @@ def _auto_jp_flow(config: AppConfig, progress, status_box, extra_hint: str = "")
     _status_update(progress, status_box, 0.18, f"BGM 매칭 중 (무드: {mood})")
     bgm_path = match_bgm_by_mood(config, mood)
     bgm_display = os.path.basename(bgm_path) if bgm_path else "자동생성(ambient)"
+    if not bgm_path or not os.path.exists(bgm_path):
+        st.warning(
+            "BGM 파일을 찾지 못했습니다. "
+            "assets/bgm/mystery|exciting|emotional 폴더에 음원을 넣거나 "
+            "PIXABAY_API_KEY를 설정하면 자동으로 매칭됩니다."
+        )
 
     # ── 배경 영상 — Pixabay 우선, Pexels 폴백 ─────────────
     # Pixabay: 한국 여행 영상 풍부 + 이미 BGM에 사용 중인 API key
@@ -2640,7 +2737,7 @@ def _auto_jp_flow(config: AppConfig, progress, status_box, extra_hint: str = "")
     # ── TTS 생성 ─────────────────────────────────────────
     now = datetime.utcnow().strftime("%Y%m%d_%H%M%S")
     audio_path = os.path.join(config.output_dir, f"tts_{now}.mp3")
-    voice_id = pick_voice_id(config.openai_tts_voices)
+    voice_id = pick_voice_id(config.openai_tts_voices, config.openai_tts_voice_preference)
     _status_update(progress, status_box, 0.50, "TTS 생성 중")
     try:
         tts_openai(config, "。".join(texts), audio_path, voice=voice_id)
@@ -2663,6 +2760,7 @@ def _auto_jp_flow(config: AppConfig, progress, status_box, extra_hint: str = "")
         bgm_volume=config.bgm_volume,
         bg_video_paths=bg_video_paths,
         caption_styles=caption_styles,
+        overlay_mode=config.asset_overlay_mode,
     )
 
     # ── 유튜브 업로드 ─────────────────────────────────────
@@ -2880,6 +2978,12 @@ def run_streamlit_app() -> None:
                         mood = _mood_val
                         _status_update(progress, status_box, 0.15, f"BGM 매칭 중 ({mood})")
                         bgm_path = match_bgm_by_mood(config, mood)
+                        if not bgm_path or not os.path.exists(bgm_path):
+                            st.warning(
+                                "BGM 파일을 찾지 못했습니다. "
+                                "assets/bgm/mystery|exciting|emotional 폴더에 음원을 넣거나 "
+                                "PIXABAY_API_KEY를 설정하면 자동으로 매칭됩니다."
+                            )
                         roles = _script_to_roles(script)
                         caption_styles = _build_caption_styles(roles, len(texts))
 
@@ -2912,7 +3016,7 @@ def run_streamlit_app() -> None:
                         _status_update(progress, status_box, 0.3, "TTS 생성")
                         now = datetime.utcnow().strftime("%Y%m%d_%H%M%S")
                         audio_path = os.path.join(config.output_dir, f"tts_{now}.mp3")
-                        voice_id = pick_voice_id(config.openai_tts_voices)
+                        voice_id = pick_voice_id(config.openai_tts_voices, config.openai_tts_voice_preference)
                         tts_openai(config, "。".join(texts), audio_path, voice=voice_id)
                         _status_update(progress, status_box, 0.6, "영상 렌더링")
                         output_path = os.path.join(config.output_dir, f"shorts_{now}.mp4")
@@ -2926,6 +3030,7 @@ def run_streamlit_app() -> None:
                             bgm_volume=config.bgm_volume,
                             bg_video_paths=bg_vids_manual,
                             caption_styles=caption_styles,
+                            overlay_mode=config.asset_overlay_mode,
                         )
                         video_id = ""
                         video_url = ""
@@ -3509,7 +3614,7 @@ def run_batch(count: int, seed: str = "", beats: int = 7) -> None:
             assets.append(asset.path)
         now = datetime.utcnow().strftime("%Y%m%d_%H%M%S")
         audio_path = os.path.join(config.output_dir, f"tts_{now}_{index}.mp3")
-        voice_id = pick_voice_id(config.openai_tts_voices)
+        voice_id = pick_voice_id(config.openai_tts_voices, config.openai_tts_voice_preference)
         tts_openai(config, "。".join(texts), audio_path, voice=voice_id)
         output_path = os.path.join(config.output_dir, f"shorts_{now}_{index}.mp4")
         bgm_path = match_bgm_by_mood(config, mood)
@@ -3536,6 +3641,7 @@ def run_batch(count: int, seed: str = "", beats: int = 7) -> None:
             bgm_volume=config.bgm_volume,
             bg_video_paths=bg_vids_b,
             caption_styles=caption_styles,
+            overlay_mode=config.asset_overlay_mode,
         )
         video_id = ""
         video_url = ""
