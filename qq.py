@@ -635,11 +635,44 @@ def analyze_content_category(
 # NEW: Pixabay Audio BGM 자동 다운로드
 # ─────────────────────────────────────────────
 
+def _pick_pixabay_audio_url(hit: Dict[str, Any]) -> str:
+    candidates: List[str] = []
+    audio = hit.get("audio")
+    if isinstance(audio, str):
+        candidates.append(audio)
+    elif isinstance(audio, dict):
+        for key in (
+            "url",
+            "previewURL",
+            "previewUrl",
+            "preview",
+            "large",
+            "medium",
+            "small",
+            "download",
+            "downloadURL",
+            "downloadUrl",
+            "file",
+        ):
+            value = audio.get(key)
+            if isinstance(value, str):
+                candidates.append(value)
+    for key in ("audio_url", "url", "previewURL", "previewUrl", "preview", "downloadURL", "downloadUrl"):
+        value = hit.get(key)
+        if isinstance(value, str):
+            candidates.append(value)
+    for value in candidates:
+        if isinstance(value, str) and value.startswith("http"):
+            return value
+    return ""
+
+
 def fetch_bgm_from_pixabay(
     api_key: str,
     category: str,
     output_dir: str,
     custom_query: str = "",  # AI가 생성한 BGM 검색 쿼리 (우선 사용)
+    config: Optional["AppConfig"] = None,
 ) -> Optional[str]:
     """
     카테고리에 맞는 BGM을 Pixabay에서 검색 후 다운로드.
@@ -657,6 +690,13 @@ def fetch_bgm_from_pixabay(
         keywords = BGM_CATEGORY_KEYWORDS.get(category, ["upbeat"])
         query = random.choice(keywords)
     os.makedirs(output_dir, exist_ok=True)
+    def _bgm_log(message: str) -> None:
+        if config is not None:
+            try:
+                _telemetry_log(message, config)
+            except Exception:
+                pass
+
     try:
         # Pixabay music API endpoint
         music_params = {
@@ -670,17 +710,18 @@ def fetch_bgm_from_pixabay(
             timeout=30,
         )
         if music_response.status_code != 200:
+            _bgm_log(f"Pixabay BGM API 실패: status={music_response.status_code}")
             return None
-        hits = music_response.json().get("hits", [])
+        payload = music_response.json()
+        hits = payload.get("hits", []) or []
+        _bgm_log(f"Pixabay BGM 결과 수: {len(hits)} (query='{query}')")
         if not hits:
             return None
         # 랜덤으로 하나 선택
         hit = random.choice(hits[:5])
-        audio_url = hit.get("audio", {}).get("url") if isinstance(hit.get("audio"), dict) else hit.get("audio")
+        audio_url = _pick_pixabay_audio_url(hit)
         if not audio_url:
-            # 다른 필드 탐색
-            audio_url = hit.get("url") or hit.get("previewURL")
-        if not audio_url:
+            _bgm_log(f"Pixabay BGM URL 추출 실패: keys={list(hit.keys())}")
             return None
         audio_response = requests.get(audio_url, timeout=60, headers={"User-Agent": "Mozilla/5.0"})
         audio_response.raise_for_status()
@@ -688,8 +729,10 @@ def fetch_bgm_from_pixabay(
         file_path = os.path.join(output_dir, filename)
         with open(file_path, "wb") as f:
             f.write(audio_response.content)
+        _bgm_log(f"Pixabay BGM 다운로드 완료: {os.path.basename(file_path)}")
         return file_path
-    except Exception:
+    except Exception as exc:
+        _bgm_log(f"Pixabay BGM 예외: {exc}")
         return None
 
 
@@ -714,6 +757,7 @@ def get_or_download_bgm(
             category=category,
             output_dir=bgm_category_dir,
             custom_query=custom_query,
+            config=config,
         )
         if path:
             return path
@@ -1056,6 +1100,7 @@ def match_bgm_by_mood(config: AppConfig, mood: str) -> Optional[str]:
 
     # Pixabay 자동 다운로드 (API 키 있을 때만)
     if config.pixabay_api_key:
+        _telemetry_log(f"Pixabay BGM 다운로드 시도 (mood={mood})", config)
         query_pool = BGM_CATEGORY_KEYWORDS.get(mood, [])
         custom_query = random.choice(query_pool) if query_pool else ""
         downloaded = fetch_bgm_from_pixabay(
@@ -1063,9 +1108,13 @@ def match_bgm_by_mood(config: AppConfig, mood: str) -> Optional[str]:
             category=mood,
             output_dir=bgm_dir,
             custom_query=custom_query,
+            config=config,
         )
         if downloaded and os.path.exists(downloaded):
             return downloaded
+        _telemetry_log("Pixabay BGM 다운로드 실패/결과 없음", config)
+    else:
+        _telemetry_log("PIXABAY_API_KEY 미설정: BGM 자동 다운로드 생략", config)
 
     # 로컬 일반 폴더 폴백
     fallback_dir = os.path.join(config.assets_dir, "bgm")
