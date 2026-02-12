@@ -65,6 +65,32 @@ def _get_bool(key: str, default: bool = False) -> bool:
     return str(value).lower() in {"1", "true", "yes", "y", "on"}
 
 
+def _ensure_writable_dir(path: str, fallback: str) -> str:
+    try:
+        os.makedirs(path, exist_ok=True)
+        test_path = os.path.join(path, ".write_test")
+        with open(test_path, "w", encoding="utf-8") as handle:
+            handle.write("ok")
+        os.remove(test_path)
+        return path
+    except Exception:
+        os.makedirs(fallback, exist_ok=True)
+        return fallback
+
+
+def _ensure_writable_file(path: str, fallback: str) -> str:
+    try:
+        os.makedirs(os.path.dirname(path), exist_ok=True)
+        test_path = os.path.join(os.path.dirname(path), ".write_test")
+        with open(test_path, "w", encoding="utf-8") as handle:
+            handle.write("ok")
+        os.remove(test_path)
+        return path
+    except Exception:
+        os.makedirs(os.path.dirname(fallback), exist_ok=True)
+        return fallback
+
+
 def _get_list(key: str) -> List[str]:
     value = _get_secret(key, "")
     if not value:
@@ -428,7 +454,15 @@ class AppConfig:
 def load_config() -> AppConfig:
     assets_dir = _get_secret("ASSETS_DIR", "data/assets")
     manifest_path = _get_secret("MANIFEST_PATH", "data/manifests/assets.json")
-    output_dir = _get_secret("OUTPUT_DIR", "data/output")
+    output_dir = _ensure_writable_dir(
+        _get_secret("OUTPUT_DIR", "data/output") or "data/output",
+        "/tmp/auto_shorts_output",
+    )
+    telegram_offset_path = _ensure_writable_file(
+        _get_secret("TELEGRAM_OFFSET_PATH", "data/state/telegram_offset.json")
+        or "data/state/telegram_offset.json",
+        "/tmp/auto_shorts_state/telegram_offset.json",
+    )
     return AppConfig(
         openai_api_key=_get_secret("OPENAI_API_KEY", "") or "",
         openai_model=_get_secret("OPENAI_MODEL", "gpt-4.1-mini") or "gpt-4.1-mini",
@@ -460,8 +494,7 @@ def load_config() -> AppConfig:
         telegram_bot_token=_get_secret("TELEGRAM_BOT_TOKEN", "") or "",
         telegram_admin_chat_id=_get_secret("TELEGRAM_ADMIN_CHAT_ID", "") or "",
         telegram_timeout_sec=int(_get_secret("TELEGRAM_TIMEOUT_SEC", "600") or 600),
-        telegram_offset_path=_get_secret("TELEGRAM_OFFSET_PATH", "data/state/telegram_offset.json")
-        or "data/state/telegram_offset.json",
+        telegram_offset_path=telegram_offset_path,
         approve_keywords=_get_list("APPROVE_KEYWORDS") or ["승인", "approve", "ok", "yes"],
         swap_keywords=_get_list("SWAP_KEYWORDS") or ["교환", "swap", "change", "next"],
         pixabay_api_key=_get_secret("PIXABAY_API_KEY", "") or "",
@@ -3679,6 +3712,25 @@ def run_batch(count: int, seed: str = "", beats: int = 7) -> None:
         _write_local_log(os.path.join(config.output_dir, "runs.jsonl"), log_row)
 
 
+def _run_streamlit_app_safe() -> None:
+    try:
+        run_streamlit_app()
+    except Exception:
+        import traceback
+
+        err = traceback.format_exc()
+        try:
+            st.error("앱 실행 중 오류가 발생했습니다. 아래 로그를 확인하세요.")
+            st.code(err)
+        except Exception:
+            pass
+        try:
+            with open("/tmp/auto_shorts_error.log", "w", encoding="utf-8") as file:
+                file.write(err)
+        except Exception:
+            pass
+
+
 if os.getenv("RUN_BATCH") == "1":
     run_batch(
         count=int(os.getenv("BATCH_COUNT", "2")),
@@ -3686,4 +3738,4 @@ if os.getenv("RUN_BATCH") == "1":
         beats=int(os.getenv("BATCH_BEATS", "7")),
     )
 else:
-    run_streamlit_app()
+    _run_streamlit_app_safe()
