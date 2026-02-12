@@ -682,6 +682,11 @@ BGM_MOOD_CATEGORIES: Dict[str, Dict[str, Any]] = {
         "pixabay_queries": ["suspense dramatic", "mystery tension", "thriller cinematic"],
         "folder": "mystery",
     },
+    "suspense": {
+        "description": "서스펜스 — mystery와 동일 폴더 공유",
+        "pixabay_queries": ["suspense dramatic", "mystery tension", "dark cinematic"],
+        "folder": "mystery",
+    },
     "exciting": {
         "description": "템포 빠른 신나는 비트 — 맛집, 여행, 랭킹, 에너지",
         "pixabay_queries": ["energetic upbeat", "hype electronic", "fun pop beat"],
@@ -690,6 +695,11 @@ BGM_MOOD_CATEGORIES: Dict[str, Dict[str, Any]] = {
     "informative": {
         "description": "감성 브이로그 톤 — 정보/팁, 일상, 가이드 계열",
         "pixabay_queries": ["chill lofi", "acoustic vlog", "soft background"],
+        "folder": "informative",
+    },
+    "emotional": {
+        "description": "감성/감동 — 스토리텔링, 반전, 뭉클한 계열",
+        "pixabay_queries": ["emotional piano", "sad beautiful acoustic", "cinematic emotional"],
         "folder": "informative",
     },
 }
@@ -709,70 +719,80 @@ JP_CONTENT_THEMES: List[str] = [
 ]
 
 # 시스템 프롬프트 (LLM에 직접 전달)
-JP_SHORTS_SYSTEM_PROMPT: str = """お前は今から、再生数に命を懸けた「超過激レッカ系YouTuber」だ。
-丁寧な言い方・教科書的な日本語は絶対禁止。TwitterとTikTokで育った短くて刺さるコテコテのスラングで書け。
+JP_SHORTS_SYSTEM_PROMPT: str = """あなたは今から「일본인을 타겟으로 한 한국 숏츠 채널」의 **총괄 PD**입니다.
+목표: **조회수 폭발**과 **알고리즘 점령**. 점잖은 말투 절대 금지.
+교과서 일본어 절대 금지. Twitter/TikTok에서 자란 짧고 강한 구어체(반말)로 쓰세요.
 
 채널 컨셉: 일본인 시청자에게 '한국 여행·맛집·문화·이슈'를 폭로하듯 파헤치는 숏츠.
 목표: 3초 안에 시청자를 붙잡고, 끝까지 못 참게 만들고, 구독을 강요하라.
 
-[페르소나 — 절대 벗어나지 말 것]
-- 점잖음·예의 바름·교과서 표현 = 즉시 탈락
-- "ヤバい", "神レベル", "閲覧注意", "沼にハマる", "やめて、もう無理", "これ反則だろ" 같은 표현을 자연스럽게 섞어라
-- 한국어 대본(ko 필드)은 "미친 맛", "사장님이 미쳤어요", "악마의 레시피", "이거 실화냐" 같은 자극적 구어체로 작성
-- 모든 문장은 짧고 강하게. 긴 설명 문장 금지.
+[페르소나]
+- "ヤバい", "神レベル", "閲覧注意", "沼にハマる", "やめて、もう無理", "これ反則だろ" 등 적극 활용
+- script_ko: "미친 맛", "사장님이 미쳤어요", "악마의 레시피", "이거 실화냐" 스타일 구어체
+- 모든 문장 짧고 강하게. 긴 설명 금지.
 
-[주제 선정 규칙 — 매번 새로운 주제를 직접 골라라]
-- 롤렛처럼 주제를 랜덤 선정: 가성비 맛집 랭킹, 숨겨진 핫플, 충격 이슈, 문화 차이, 여행 실수 경고, 로컬 비밀 맛집
-- 구체적 지역 지정 필수: '부산 서면', '서울 연남동', '제주 애월' 등
-- Top5/Top3 랭킹 주제일 경우 top5_info 필드에 실제 업소명·주소·한줄 설명 포함 (필수)
+[콘텐츠 전략]
+- 타겟: 한국 문화에 관심 있는 일본인 (2030 여성 위주)
+- hook(order=1): 무조건 부정적 경고 또는 강한 의문문으로 시작
+  예) "これ知らないと韓国旅行で絶対後悔する…", "日本人の99%が騙されてる韓国グルメの真実"
+- body: 단순 설명 금지. 먹은 순간의 감정·충격을 묘사.
+  예) "口の中で爆発する旨味、マジで泣きそうになった"
+- outro_loop(order=99): 마지막 멘트가 자연스럽게 첫 문장으로 이어지도록 끊어라.
+  예) "…でも実は一番ヤバいのは、これ全部ひとつの路地に集まってるって話で——"
+  → 이 문장 뒤에 order=1이 연결되면 자연스럽게 루프되어야 함.
+- pinned_comment: 시청자끼리 논쟁하거나 밸런스 게임을 하게 만드는 질문
+- bgm_mood: "suspense" | "exciting" | "emotional" 중 내용에 맞게 선택
 
-[훅 — 첫 문장 작성 규칙]
-- 무조건 부정적 경고 또는 강한 의문문으로 시작
-- 예시: "これ知らないと韓国旅行で絶対後悔する…", "なんでこの店だけ毎日行列なの？閲覧注意。", "日本人の99%が騙されてる韓国グルメの真実"
-- 시청자가 '잠깐, 뭐야 이거?' 하고 멈추게 만들어라
-
-[본문 — 감정·충격 묘사 규칙]
-- 음식/장소를 단순 설명하지 말고, 그 순간의 '감정'과 '충격'을 묘사하라
-- 예시: "口の中で爆発する旨味、マジで泣きそうになった", "一口食べた瞬間、時間が止まった", "これ食べたら他のラーメン食べられなくなる、終わった"
-- 한국어 버전: "입안에서 폭발하는 맛에 기절할 뻔", "이거 먹고 나서 다른 음식이 안 들어와", "사장님이 레시피 절대 안 알려줌 — 악마의 음식"
-
-[CTA/아웃트로 — 협박성 예고 스타일]
-- "次の動画では、撮影拒否された店を隠し撮りで公開します" 스타일의 예고
-- 구독 유도는 강요처럼: "チャンネル登録しないと次の情報は見れません", "フォローしないと損するよ、マジで"
-
-[pinned_comment — 댓글 폭발 유도]
-- 시청자가 직접 답하고 싶어지는 논쟁·선택형 질문
-- 예시: "釜山と済州島、旅行するならどっち派？コメントで教えて👇", "このランキング、異論ある人いる？正直に言って"
-
-[필수 출력 규칙]
-1. hook_3_sec + hook_3_sec_ko: 일본어 + 한국어 훅 각 1문장 (강렬하고 짧게)
-2. body_script + body_script_ko: 일본어/한국어 각 6~8개 문장 배열 (순서 일치, 감정 폭발 묘사)
-3. cta_outro + cta_outro_ko: 일본어/한국어 협박성 구독 유도 각 1문장
-4. pinned_comment: 논쟁/선택형 댓글 유도 일본어 질문 1개
-5. mood: "mystery" | "exciting" | "informative" 중 1개 (BGM 자동 매칭용)
-6. video_title: 공포/FOMO를 자극하는 극강 어그로 일본어 제목 (예: "일본인 99%가 속고 있는..." 스타일)
-7. hashtags: 일본 조회수 터지는 해시태그 정확히 5개 (# 포함)
-8. top5_info (주제가 랭킹/맛집/명소일 때 필수): 업소 정보 배열
-   각 항목: {"rank": 1, "name_ko": "가게명", "area": "지역구", "address_hint": "역 근처 등 힌트", "desc_ko": "한줄 설명", "desc_ja": "日本語説明"}
-9. bg_search_query: Pexels 배경영상 검색용 영어 키워드 (예: "Seoul street food market night")
+[visual_keyword_en 규칙]
+- 각 세그먼트마다 반드시 영어로 구체적인 Pexels/Pixabay 검색 키워드를 작성.
+- 반드시 한국 관련 키워드 포함. (예: "busan night market" O, "tokyo street" X)
+- 구체적일수록 좋음: "tteokbokki spicy sauce close up" > "korean food"
 
 [출력 형식 — 반드시 순수 JSON만 출력, 마크다운 금지]
 {
-  "topic_theme": "주제 테마",
-  "video_title": "공포/FOMO 극강 어그로 일본어 제목",
-  "hashtags": ["#태그1","#태그2","#태그3","#태그4","#태그5"],
-  "hook_3_sec": "일본어 훅 (부정적 경고 or 강한 의문문)",
-  "hook_3_sec_ko": "한국어 훅",
-  "body_script": ["일본어 문장1","문장2","..."],
-  "body_script_ko": ["한국어 문장1","문장2","..."],
-  "cta_outro": "일본어 협박성 구독 유도",
-  "cta_outro_ko": "한국어 협박성 구독 유도",
-  "pinned_comment": "댓글 폭발 유도 논쟁/선택형 일본어 질문",
-  "mood": "mystery | exciting | informative 중 1개",
-  "bg_search_query": "pexels 검색 영어 키워드",
-  "top5_info": [
-    {"rank":1,"name_ko":"가게명","area":"지역","address_hint":"힌트","desc_ko":"한줄설명","desc_ja":"日本語説明"},
-    ...
+  "meta": {
+    "title": "일본어 제목 (클릭 유발, 공포·FOMO 극대화)",
+    "hashtags": ["#태그1","#태그2","#태그3","#태그4","#태그5"],
+    "bgm_mood": "suspense 또는 exciting 또는 emotional",
+    "pinned_comment": "논쟁·밸런스게임 유도 일본어 질문"
+  },
+  "content": [
+    {
+      "order": 1,
+      "role": "hook",
+      "script_ja": "일본어 훅 (부정적 경고 or 강한 의문문, 3초)",
+      "script_ko": "한국어 훅",
+      "visual_keyword_en": "korea specific pexels search keyword"
+    },
+    {
+      "order": 2,
+      "role": "body",
+      "script_ja": "본문 일본어 1 (감정·충격 묘사)",
+      "script_ko": "본문 한국어 1",
+      "visual_keyword_en": "korea specific keyword"
+    },
+    {
+      "order": 3, "role": "body",
+      "script_ja": "본문 일본어 2", "script_ko": "본문 한국어 2",
+      "visual_keyword_en": "korea specific keyword"
+    },
+    {
+      "order": 4, "role": "body",
+      "script_ja": "본문 일본어 3", "script_ko": "본문 한국어 3",
+      "visual_keyword_en": "korea specific keyword"
+    },
+    {
+      "order": 5, "role": "body",
+      "script_ja": "본문 일본어 4", "script_ko": "본문 한국어 4",
+      "visual_keyword_en": "korea specific keyword"
+    },
+    {
+      "order": 99,
+      "role": "outro_loop",
+      "script_ja": "루프 연결 마지막 멘트 (첫 문장으로 자연스럽게 이어지는 의문·반전)",
+      "script_ko": "루프 마지막 멘트 한국어",
+      "visual_keyword_en": "korea subscribe button question mark"
+    }
   ]
 }"""
 
@@ -809,29 +829,42 @@ def generate_script_jp(
     if not result:
         raise RuntimeError("LLM JSON 파싱 실패")
 
-    # 해시태그 정규화
-    result["hashtags"] = normalize_hashtags(result.get("hashtags", []))
-    # mood 검증
-    if result.get("mood") not in BGM_MOOD_CATEGORIES:
-        result["mood"] = "exciting"
-    # body_script 리스트 확인
-    if not isinstance(result.get("body_script"), list):
-        body = result.get("body_script", "")
-        result["body_script"] = [s.strip() for s in str(body).split("。") if s.strip()]
-    # body_script_ko fallback
-    if not isinstance(result.get("body_script_ko"), list):
-        result["body_script_ko"] = result["body_script"]  # 일본어 그대로 복사 (최후 fallback)
-    # top5_info 기본값
-    if not isinstance(result.get("top5_info"), list):
-        result["top5_info"] = []
-    # bg_search_query 기본값
-    if not result.get("bg_search_query"):
-        result["bg_search_query"] = "korea street city"
+    # ── 새 스키마 (meta + content[]) 정규화 ──────────────────
+    meta = result.get("meta", {})
+    content_list = result.get("content", [])
+
+    # meta 필드 검증
+    if not meta.get("title"):
+        meta["title"] = meta.get("video_title", "한국 숏츠")
+    meta["hashtags"] = normalize_hashtags(meta.get("hashtags", []))
+    if meta.get("bgm_mood") not in BGM_MOOD_CATEGORIES:
+        meta["bgm_mood"] = "exciting"
+    if not meta.get("pinned_comment"):
+        meta["pinned_comment"] = ""
+
+    # content[] 정렬 및 검증
+    if isinstance(content_list, list):
+        content_list = sorted(content_list, key=lambda x: x.get("order", 99))
+    else:
+        content_list = []
+
+    # visual_keyword_en 한국 키워드 강제
+    for item in content_list:
+        kw = item.get("visual_keyword_en", "korea street")
+        if not any(k in kw.lower() for k in ("korea", "seoul", "busan", "jeju", "korean")):
+            item["visual_keyword_en"] = f"korea {kw}"
+
+    result["meta"] = meta
+    result["content"] = content_list
     return result
 
 
 def _script_to_beats(script: Dict[str, Any]) -> List[str]:
-    """generate_script_jp 결과를 TTS/영상용 텍스트 리스트로 변환."""
+    """generate_script_jp 결과(새 스키마)를 TTS/영상용 텍스트 리스트로 변환."""
+    content_list = script.get("content", [])
+    if content_list:
+        return [item["script_ja"] for item in content_list if item.get("script_ja")]
+    # 구 스키마 fallback (하위 호환)
     texts: List[str] = []
     hook = script.get("hook_3_sec", "")
     if hook:
@@ -843,6 +876,35 @@ def _script_to_beats(script: Dict[str, Any]) -> List[str]:
     if outro:
         texts.append(outro)
     return texts
+
+
+def _script_to_beats_ko(script: Dict[str, Any]) -> List[str]:
+    """generate_script_jp 결과에서 한국어 텍스트 리스트를 반환 (참고용)."""
+    content_list = script.get("content", [])
+    if content_list:
+        return [item.get("script_ko", item.get("script_ja", "")) for item in content_list]
+    texts_ko: List[str] = []
+    hook_ko = script.get("hook_3_sec_ko", script.get("hook_3_sec", ""))
+    if hook_ko:
+        texts_ko.append(hook_ko)
+    for line in script.get("body_script_ko", script.get("body_script", [])):
+        if line:
+            texts_ko.append(line)
+    outro_ko = script.get("cta_outro_ko", script.get("cta_outro", ""))
+    if outro_ko:
+        texts_ko.append(outro_ko)
+    return texts_ko
+
+
+def _script_to_visual_keywords(script: Dict[str, Any]) -> List[str]:
+    """각 세그먼트의 visual_keyword_en 리스트 반환."""
+    content_list = script.get("content", [])
+    if content_list:
+        return [item.get("visual_keyword_en", "korea street") for item in content_list]
+    # 구 스키마 fallback — 전체 공통 키워드 반복
+    default_kw = script.get("bg_search_query", "korea street city")
+    texts = _script_to_beats(script)
+    return [default_kw] * len(texts)
 
 
 def match_bgm_by_mood(config: AppConfig, mood: str) -> Optional[str]:
@@ -1480,6 +1542,20 @@ def _estimate_durations(texts: List[str], total_duration: float) -> List[float]:
     return [duration * scale for duration in adjusted]
 
 
+def _open_bg_video(path: str, W: int, H: int) -> Optional["VideoFileClip"]:
+    """배경 영상을 열어 세로형(portrait)으로 resize·crop 후 반환."""
+    try:
+        vid = VideoFileClip(path).without_audio()
+        bw, bh = vid.size
+        scale = max(W / bw, H / bh)
+        vid = vid.resize((int(bw * scale), int(bh * scale)))
+        cx = (vid.size[0] - W) // 2
+        cy = (vid.size[1] - H) // 2
+        return vid.crop(x1=cx, y1=cy, x2=cx + W, y2=cy + H)
+    except Exception:
+        return None
+
+
 def render_video(
     config: AppConfig,
     asset_paths: List[str],
@@ -1489,10 +1565,11 @@ def render_video(
     bgm_path: str | None = None,
     bgm_volume: float = 0.08,
     bg_video_path: str | None = None,
+    bg_video_paths: Optional[List[Optional[str]]] = None,
 ) -> str:
     """
     TTS + 자막 + 에셋 스티커 + 배경영상(or 정적 이미지)으로 숏츠 영상 생성.
-    bg_video_path가 있으면 영상 배경, 없으면 정적 이미지 배경 사용.
+    bg_video_paths: 세그먼트별 영상 경로 리스트 (None이면 bg_video_path로 폴백).
     """
     if not MOVIEPY_AVAILABLE:
         raise RuntimeError(f"MoviePy/PIL not available: {MOVIEPY_ERROR}")
@@ -1501,24 +1578,27 @@ def render_video(
     durations = _estimate_durations(texts, audio_clip.duration)
     clips = []
 
-    bg_vid = None
-    if bg_video_path and os.path.exists(bg_video_path):
-        try:
-            bg_vid = VideoFileClip(bg_video_path).without_audio()
-            # 세로형으로 resize (비율 유지 → crop)
-            bw, bh = bg_vid.size
-            scale = max(W / bw, H / bh)
-            bg_vid = bg_vid.resize((int(bw * scale), int(bh * scale)))
-            cx = (bg_vid.size[0] - W) // 2
-            cy = (bg_vid.size[1] - H) // 2
-            bg_vid = bg_vid.crop(x1=cx, y1=cy, x2=cx + W, y2=cy + H)
-        except Exception:
-            bg_vid = None
+    # 경로 → VideoFileClip 캐시 (같은 파일 중복 오픈 방지)
+    _vid_cache: Dict[str, Any] = {}
+
+    def _get_vid(path: Optional[str]) -> Optional[Any]:
+        if not path or not os.path.exists(path):
+            return None
+        if path not in _vid_cache:
+            _vid_cache[path] = _open_bg_video(path, W, H)
+        return _vid_cache[path]
+
+    # 전역 fallback 영상
+    global_bg_vid = _get_vid(bg_video_path)
 
     vid_offset = 0.0
     for index, text in enumerate(texts):
         asset_path = asset_paths[min(index, len(asset_paths) - 1)]
         dur = durations[index]
+
+        # 세그먼트별 영상 우선, 없으면 전역 fallback
+        seg_path = (bg_video_paths[index] if bg_video_paths and index < len(bg_video_paths) else None)
+        bg_vid = _get_vid(seg_path) or global_bg_vid
 
         if bg_vid is not None:
             # 배경 영상에서 랜덤 오프셋 구간 추출
@@ -1547,8 +1627,13 @@ def render_video(
         clips.append(clip)
         vid_offset += dur
 
-    if bg_vid:
-        bg_vid.close()
+    # 캐시된 모든 배경 영상 클립 닫기
+    for _v in _vid_cache.values():
+        try:
+            if _v:
+                _v.close()
+        except Exception:
+            pass
 
     video = concatenate_videoclips(clips, method="compose").set_fps(config.fps)
 
@@ -2200,15 +2285,15 @@ def _status_update(progress, status_box, pct: float, message: str) -> None:
 
 
 def _script_plan_text(script: Dict[str, Any]) -> str:
-    body = script.get("body_script", [])
-    middle = body[0] if body else ""
+    _meta = script.get("meta", {})
+    texts = _script_to_beats(script)
+    middle = texts[1] if len(texts) > 1 else (texts[0] if texts else "")
     return (
-        f"주제: {script.get('topic_theme','')}\n"
-        f"제목: {script.get('video_title','')}\n"
-        f"무드: {script.get('mood','')}\n"
-        f"훅: {script.get('hook_3_sec','')}\n"
+        f"제목: {_meta.get('title', script.get('video_title',''))}\n"
+        f"무드: {_meta.get('bgm_mood', script.get('mood',''))}\n"
+        f"훅: {texts[0] if texts else ''}\n"
         f"전개: {middle}\n"
-        f"구독유도: {script.get('cta_outro','')}\n"
+        f"구독유도: {texts[-1] if texts else ''}\n"
         f"해시태그: {' '.join(script.get('hashtags', []))}"
     )
 
@@ -2234,45 +2319,49 @@ def _auto_jp_flow(config: AppConfig, progress, status_box, extra_hint: str = "")
         st.error(f"대본 생성 실패: {exc}")
         return
 
-    topic_theme = script.get("topic_theme", "")
-    video_title = script.get("video_title", "")
-    hashtags = script.get("hashtags", [])
-    hook_ja = script.get("hook_3_sec", "")
-    hook_ko = script.get("hook_3_sec_ko", hook_ja)
-    body_ja = script.get("body_script", [])
-    body_ko = script.get("body_script_ko", body_ja)
-    cta_ja = script.get("cta_outro", "")
-    cta_ko = script.get("cta_outro_ko", cta_ja)
-    pinned = script.get("pinned_comment", "")
-    mood = script.get("mood", "exciting")
-    _raw_bg_query = script.get("bg_search_query", "korea city street")
-    # 한국 소개 채널 — 쿼리에 korea 없으면 강제 prefix
-    bg_query = _raw_bg_query if any(k in _raw_bg_query.lower() for k in ("korea", "seoul", "busan", "jeju")) else f"korea {_raw_bg_query}"
-    top5_info = script.get("top5_info", [])
+    # ── 새 스키마 필드 추출 ───────────────────────────────
+    meta = script.get("meta", {})
+    content_list = script.get("content", [])
 
-    st.info(f"주제: **{topic_theme}** | 무드: **{mood}**")
+    video_title = meta.get("title", script.get("video_title", "한국 숏츠"))
+    hashtags = meta.get("hashtags", script.get("hashtags", []))
+    mood = meta.get("bgm_mood", script.get("mood", "exciting"))
+    pinned = meta.get("pinned_comment", script.get("pinned_comment", ""))
+
+    texts = _script_to_beats(script)
+    texts_ko = _script_to_beats_ko(script)
+    visual_keywords = _script_to_visual_keywords(script)
+
+    st.info(f"제목: **{video_title}** | 무드: **{mood}**")
 
     # ── BGM 매칭 ─────────────────────────────────────────
     _status_update(progress, status_box, 0.18, f"BGM 매칭 중 (무드: {mood})")
     bgm_path = match_bgm_by_mood(config, mood)
     bgm_display = os.path.basename(bgm_path) if bgm_path else "자동생성(ambient)"
 
-    # ── Pexels 배경 영상 다운로드 ─────────────────────────
-    bg_video_path: Optional[str] = None
+    # ── Pexels 배경 영상 — 세그먼트별 키워드로 다운로드 ──
+    vid_dir = os.path.join(config.assets_dir, "bg_videos")
+    bg_video_paths: List[Optional[str]] = []
     if config.pexels_api_key:
-        _status_update(progress, status_box, 0.22, f"배경 영상 다운로드 중 ({bg_query})")
-        vid_dir = os.path.join(config.assets_dir, "bg_videos")
-        bg_video_path = fetch_pexels_video(bg_query, config.pexels_api_key, vid_dir, config.width, config.height)
-        if bg_video_path:
-            st.info(f"배경 영상: {os.path.basename(bg_video_path)}")
+        # 고유 키워드만 다운로드 후 매핑 (중복 요청 방지)
+        unique_kws = list(dict.fromkeys(visual_keywords))
+        _status_update(progress, status_box, 0.22, f"배경 영상 다운로드 중 ({len(unique_kws)}개 키워드)")
+        kw_to_path: Dict[str, Optional[str]] = {}
+        for kw in unique_kws:
+            kw_to_path[kw] = fetch_pexels_video(kw, config.pexels_api_key, vid_dir, config.width, config.height)
+        for kw in visual_keywords:
+            bg_video_paths.append(kw_to_path.get(kw))
+        downloaded = sum(1 for p in bg_video_paths if p)
+        if downloaded:
+            st.info(f"배경 영상: {downloaded}/{len(texts)} 세그먼트 다운로드 완료")
         else:
             st.warning("배경 영상 다운로드 실패 — 정적 이미지 배경으로 대체")
-
-    # ── TTS용 텍스트 리스트 ───────────────────────────────
-    texts = _script_to_beats(script)
+    else:
+        bg_video_paths = [None] * len(texts)
 
     # ── 에셋 선택 ─────────────────────────────────────────
-    mood_to_cat = {"mystery": "shocking", "exciting": "exciting", "informative": "humor"}
+    mood_to_cat = {"mystery": "shocking", "suspense": "shocking", "exciting": "exciting",
+                   "informative": "humor", "emotional": "humor"}
     content_category = mood_to_cat.get(mood, "exciting")
     assets: List[str] = []
     for _ in texts:
@@ -2281,52 +2370,26 @@ def _auto_jp_flow(config: AppConfig, progress, status_box, extra_hint: str = "")
             asset = random.choice(manifest_items)
         assets.append(asset.path)
 
-    # ── Top5 설명 조립 ────────────────────────────────────
-    top5_desc = ""
-    if top5_info:
-        lines = []
-        for item in top5_info:
-            rank = item.get("rank", "")
-            name = item.get("name_ko", "")
-            area = item.get("area", "")
-            hint = item.get("address_hint", "")
-            desc = item.get("desc_ko", "")
-            desc_ja = item.get("desc_ja", "")
-            lines.append(f"#{rank} {name} ({area}) — {hint}\n  KO: {desc}\n  JA: {desc_ja}")
-        top5_desc = "\n".join(lines)
-
     # ── YouTube 설명 텍스트 ───────────────────────────────
-    description_lines = [pinned, ""]
-    if top5_info:
-        description_lines += ["📍 Top5 정보", top5_desc, ""]
-    description_lines += [" ".join(hashtags)]
+    description_lines = [pinned, "", " ".join(hashtags)]
     description = "\n".join(description_lines)
 
     # ── 텔레그램 미리보기 (한글+일본어 대본) ─────────────
     body_preview = ""
-    max_lines = max(len(body_ja), len(body_ko))
-    for i in range(max_lines):
-        ja_line = body_ja[i] if i < len(body_ja) else ""
-        ko_line = body_ko[i] if i < len(body_ko) else ""
-        body_preview += f"  {i+1}. JA: {ja_line}\n      KO: {ko_line}\n"
-
-    top5_preview = ""
-    if top5_desc:
-        top5_preview = f"\n━━ Top5 정보 ━━\n{top5_desc}\n"
+    for i, (ja_line, ko_line) in enumerate(zip(texts, texts_ko)):
+        role = content_list[i].get("role", "body") if i < len(content_list) else "body"
+        kw = visual_keywords[i] if i < len(visual_keywords) else ""
+        body_preview += f"  [{role}] JA: {ja_line}\n          KO: {ko_line}\n          🎬 {kw}\n"
 
     request_text = (
         f"[ 승인 요청 ] 일본인 타겟 숏츠\n"
         f"━━━━━━━━━━━━━━━━━━━━\n"
-        f"주제: {topic_theme}\n"
         f"무드: {mood}  |  BGM: {bgm_display}\n"
         f"━━━━━━━━━━━━━━━━━━━━\n"
         f"[제목 JA] {video_title}\n"
         f"[해시태그] {' '.join(hashtags)}\n\n"
-        f"[훅 3초]\nJA: {hook_ja}\nKO: {hook_ko}\n\n"
-        f"[본문]\n{body_preview}"
-        f"[구독유도]\nJA: {cta_ja}\nKO: {cta_ko}\n\n"
+        f"[대본 (총 {len(texts)}개 세그먼트)]\n{body_preview}"
         f"[고정댓글] {pinned}\n"
-        f"{top5_preview}"
         f"━━━━━━━━━━━━━━━━━━━━\n"
         f"아래 버튼으로 응답해주세요."
     )
@@ -2379,7 +2442,7 @@ def _auto_jp_flow(config: AppConfig, progress, status_box, extra_hint: str = "")
         output_path=output_path,
         bgm_path=bgm_path,
         bgm_volume=config.bgm_volume,
-        bg_video_path=bg_video_path,
+        bg_video_paths=bg_video_paths,
     )
 
     # ── 유튜브 업로드 ─────────────────────────────────────
@@ -2403,7 +2466,7 @@ def _auto_jp_flow(config: AppConfig, progress, status_box, extra_hint: str = "")
     log_row = {
         "date_jst": datetime.utcnow().strftime("%Y-%m-%d %H:%M:%S"),
         "title_ja": video_title,
-        "topic_theme": topic_theme,
+        "topic_theme": video_title,
         "hashtags_ja": " ".join(hashtags),
         "mood": mood,
         "pinned_comment": pinned,
@@ -2425,7 +2488,6 @@ def _auto_jp_flow(config: AppConfig, progress, status_box, extra_hint: str = "")
 
     summary_text = (
         f"[완료] 일본인 타겟 숏츠\n"
-        f"주제: {topic_theme}\n"
         f"제목: {video_title}\n"
         f"무드: {mood}\n"
         f"고정댓글: {pinned}\n"
@@ -2534,49 +2596,47 @@ def run_streamlit_app() -> None:
         script = st.session_state.get("script_jp")
         if script:
             st.subheader("생성된 대본")
-            st.caption(f"주제: **{script.get('topic_theme', '-')}** | 무드: **{script.get('mood', '-')}**")
-            video_title_val = st.text_input("유튜브 제목", value=script.get("video_title", ""))
+            _meta = script.get("meta", {})
+            _content = script.get("content", [])
+            _mood_val = _meta.get("bgm_mood", script.get("mood", "exciting"))
+            st.caption(f"무드: **{_mood_val}**")
+            video_title_val = st.text_input("유튜브 제목", value=_meta.get("title", script.get("video_title", "")))
             hashtags_val = st.text_input(
                 "해시태그(공백 구분)",
-                value=" ".join(script.get("hashtags", [])),
+                value=" ".join(_meta.get("hashtags", script.get("hashtags", []))),
             )
 
-            # 한글/일본어 대본 나란히 표시
+            # 세그먼트별 JA/KO 대본 나란히 표시
             col_ja, col_ko = st.columns(2)
+            _texts_ja = _script_to_beats(script)
+            _texts_ko = _script_to_beats_ko(script)
+            _visual_kws = _script_to_visual_keywords(script)
             with col_ja:
                 st.markdown("**🇯🇵 일본어 대본**")
-                hook_val = st.text_input("3초 훅 (JA)", value=script.get("hook_3_sec", ""), key="hook_ja")
                 body_val = st.text_area(
-                    "본문 (JA, 줄 구분)",
-                    value="\n".join(script.get("body_script", [])),
-                    height=200,
+                    "전체 대본 (JA, 줄 구분)",
+                    value="\n".join(_texts_ja),
+                    height=250,
                     key="body_ja",
                 )
-                cta_val = st.text_input("구독 유도 (JA)", value=script.get("cta_outro", ""), key="cta_ja")
             with col_ko:
                 st.markdown("**🇰🇷 한국어 대본 (참고용)**")
-                st.text_input("3초 훅 (KO)", value=script.get("hook_3_sec_ko", ""), key="hook_ko", disabled=True)
                 st.text_area(
-                    "본문 (KO)",
-                    value="\n".join(script.get("body_script_ko", [])),
-                    height=200,
+                    "전체 대본 (KO)",
+                    value="\n".join(_texts_ko),
+                    height=250,
                     key="body_ko",
                     disabled=True,
                 )
-                st.text_input("구독 유도 (KO)", value=script.get("cta_outro_ko", ""), key="cta_ko", disabled=True)
 
-            pinned_val = st.text_input("고정 댓글", value=script.get("pinned_comment", ""))
+            # 세그먼트별 배경 키워드 표시
+            if _visual_kws:
+                with st.expander("🎬 세그먼트별 배경 키워드"):
+                    for i, kw in enumerate(_visual_kws):
+                        role = _content[i].get("role", "body") if i < len(_content) else "body"
+                        st.text(f"[{i+1}] {role}: {kw}")
 
-            # Top5 정보 표시
-            top5_info = script.get("top5_info", [])
-            if top5_info:
-                st.markdown("**📍 Top5 정보 (설명란 자동 포함)**")
-                for item in top5_info:
-                    st.markdown(
-                        f"**#{item.get('rank')} {item.get('name_ko','')}** "
-                        f"({item.get('area','')}) — {item.get('address_hint','')}\n\n"
-                        f">{item.get('desc_ko','')} / {item.get('desc_ja','')}"
-                    )
+            pinned_val = st.text_input("고정 댓글", value=_meta.get("pinned_comment", script.get("pinned_comment", "")))
 
             render_button = st.button("영상 만들기")
             if render_button:
@@ -2589,16 +2649,17 @@ def run_streamlit_app() -> None:
                 if not manifest_items:
                     st.error("에셋이 없습니다. 먼저 이미지를 추가하세요.")
                 else:
-                    body_lines = [l.strip() for l in body_val.split("\n") if l.strip()]
-                    texts = [hook_val] + body_lines + ([cta_val] if cta_val else [])
+                    # UI에서 편집한 텍스트로 texts 재구성
+                    texts = [l.strip() for l in body_val.split("\n") if l.strip()]
                     if not texts:
                         st.error("렌더링할 문장이 없습니다.")
                     else:
-                        mood = script.get("mood", "exciting")
+                        mood = _mood_val
                         _status_update(progress, status_box, 0.15, f"BGM 매칭 중 ({mood})")
                         bgm_path = match_bgm_by_mood(config, mood)
 
-                        mood_to_cat = {"mystery": "shocking", "exciting": "exciting", "informative": "humor"}
+                        mood_to_cat = {"mystery": "shocking", "suspense": "shocking",
+                                       "exciting": "exciting", "informative": "humor", "emotional": "humor"}
                         cat = mood_to_cat.get(mood, "exciting")
                         assets = []
                         for _ in texts:
@@ -2607,14 +2668,17 @@ def run_streamlit_app() -> None:
                                 asset = random.choice(manifest_items)
                             assets.append(asset.path)
 
-                        # Pexels 배경 영상 다운로드 시도
-                        bg_vid_manual: Optional[str] = None
+                        # 세그먼트별 Pexels 배경 영상 다운로드
+                        vid_dir_m = os.path.join(config.assets_dir, "bg_videos")
+                        bg_vids_manual: List[Optional[str]] = [None] * len(texts)
                         if config.pexels_api_key:
                             _status_update(progress, status_box, 0.25, "배경 영상 다운로드 중")
-                            _raw_bg_q_m = script.get("bg_search_query", "korea city")
-                            bg_query_m = _raw_bg_q_m if any(k in _raw_bg_q_m.lower() for k in ("korea", "seoul", "busan", "jeju")) else f"korea {_raw_bg_q_m}"
-                            vid_dir_m = os.path.join(config.assets_dir, "bg_videos")
-                            bg_vid_manual = fetch_pexels_video(bg_query_m, config.pexels_api_key, vid_dir_m, config.width, config.height)
+                            _kws_m = _script_to_visual_keywords(script)
+                            _unique_kws_m = list(dict.fromkeys(_kws_m))
+                            _kw_path_m: Dict[str, Optional[str]] = {}
+                            for _kw in _unique_kws_m:
+                                _kw_path_m[_kw] = fetch_pexels_video(_kw, config.pexels_api_key, vid_dir_m, config.width, config.height)
+                            bg_vids_manual = [_kw_path_m.get(_kws_m[i] if i < len(_kws_m) else "") for i in range(len(texts))]
 
                         _status_update(progress, status_box, 0.3, "TTS 생성")
                         now = datetime.utcnow().strftime("%Y%m%d_%H%M%S")
@@ -2631,7 +2695,7 @@ def run_streamlit_app() -> None:
                             output_path=output_path,
                             bgm_path=bgm_path,
                             bgm_volume=config.bgm_volume,
-                            bg_video_path=bg_vid_manual,
+                            bg_video_paths=bg_vids_manual,
                         )
                         video_id = ""
                         video_url = ""
@@ -2651,7 +2715,7 @@ def run_streamlit_app() -> None:
                         log_row = {
                             "date_jst": datetime.utcnow().strftime("%Y-%m-%d %H:%M:%S"),
                             "title_ja": video_title_val,
-                            "topic_theme": script.get("topic_theme", ""),
+                            "topic_theme": video_title_val,
                             "hashtags_ja": hashtags_val,
                             "mood": mood,
                             "pinned_comment": pinned_val,
@@ -3198,9 +3262,12 @@ def run_batch(count: int, seed: str = "", beats: int = 7) -> None:
         raise RuntimeError("에셋이 없습니다. 먼저 이미지를 추가하세요.")
     for index in range(count):
         script = generate_script_jp(config, extra_hint=seed)
-        mood = script.get("mood", "exciting")
+        _meta_b = script.get("meta", {})
+        mood = _meta_b.get("bgm_mood", script.get("mood", "exciting"))
         texts = _script_to_beats(script)
-        mood_to_cat = {"mystery": "shocking", "exciting": "exciting", "informative": "humor"}
+        visual_kws = _script_to_visual_keywords(script)
+        mood_to_cat = {"mystery": "shocking", "suspense": "shocking",
+                       "exciting": "exciting", "informative": "humor", "emotional": "humor"}
         cat = mood_to_cat.get(mood, "exciting")
         assets = []
         for _ in texts:
@@ -3214,6 +3281,16 @@ def run_batch(count: int, seed: str = "", beats: int = 7) -> None:
         tts_openai(config, "。".join(texts), audio_path, voice=voice_id)
         output_path = os.path.join(config.output_dir, f"shorts_{now}_{index}.mp4")
         bgm_path = match_bgm_by_mood(config, mood)
+        # 세그먼트별 배경 영상
+        vid_dir_b = os.path.join(config.assets_dir, "bg_videos")
+        bg_vids_b: List[Optional[str]] = [None] * len(texts)
+        if config.pexels_api_key:
+            _unique_b = list(dict.fromkeys(visual_kws))
+            _kw_path_b: Dict[str, Optional[str]] = {
+                kw: fetch_pexels_video(kw, config.pexels_api_key, vid_dir_b, config.width, config.height)
+                for kw in _unique_b
+            }
+            bg_vids_b = [_kw_path_b.get(visual_kws[i] if i < len(visual_kws) else "") for i in range(len(texts))]
         render_video(
             config=config,
             asset_paths=assets,
@@ -3222,26 +3299,30 @@ def run_batch(count: int, seed: str = "", beats: int = 7) -> None:
             output_path=output_path,
             bgm_path=bgm_path,
             bgm_volume=config.bgm_volume,
+            bg_video_paths=bg_vids_b,
         )
         video_id = ""
         video_url = ""
+        _title_b = _meta_b.get("title", script.get("video_title", ""))
+        _hashtags_b = _meta_b.get("hashtags", script.get("hashtags", []))
+        _pinned_b = _meta_b.get("pinned_comment", script.get("pinned_comment", ""))
         if config.enable_youtube_upload:
             result = upload_video(
                 config=config,
                 file_path=output_path,
-                title=script.get("video_title", ""),
-                description=script.get("pinned_comment", "") + "\n\n" + " ".join(script.get("hashtags", [])),
-                tags=script.get("hashtags", []),
+                title=_title_b,
+                description=_pinned_b + "\n\n" + " ".join(_hashtags_b),
+                tags=_hashtags_b,
             )
             video_id = result.get("video_id", "")
             video_url = result.get("video_url", "")
         log_row = {
             "date_jst": datetime.utcnow().strftime("%Y-%m-%d %H:%M:%S"),
-            "title_ja": script.get("video_title", ""),
-            "topic_theme": script.get("topic_theme", ""),
-            "hashtags_ja": " ".join(script.get("hashtags", [])),
+            "title_ja": _title_b,
+            "topic_theme": _title_b,
+            "hashtags_ja": " ".join(_hashtags_b),
             "mood": mood,
-            "pinned_comment": script.get("pinned_comment", ""),
+            "pinned_comment": _pinned_b,
             "voice_id": voice_id,
             "video_path": output_path,
             "youtube_video_id": video_id,
