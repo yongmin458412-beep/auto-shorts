@@ -883,7 +883,7 @@ def match_bgm_by_mood(config: AppConfig, mood: str) -> Optional[str]:
     fallback_path = os.path.join(bgm_dir, f"generated_{mood}.wav")
     if not os.path.exists(fallback_path):
         try:
-            _generate_bgm_fallback(fallback_path, duration=120.0, mood=mood)
+            _generate_bgm_fallback(fallback_path, duration=15.0, mood=mood)
         except Exception:
             return None
     return fallback_path if os.path.exists(fallback_path) else None
@@ -1232,11 +1232,32 @@ def tags_from_text(text: str) -> List[str]:
     return [part for part in parts if part]
 
 
+_SYSTEM_FONT_CANDIDATES = [
+    # Streamlit Cloud / Ubuntu
+    "/usr/share/fonts/truetype/noto/NotoSansCJK-Regular.ttc",
+    "/usr/share/fonts/opentype/noto/NotoSansCJK-Regular.ttc",
+    "/usr/share/fonts/truetype/noto/NotoSansCJKjp-Regular.otf",
+    "/usr/share/fonts/noto-cjk/NotoSansCJK-Regular.ttc",
+    "/usr/share/fonts/truetype/unifont/unifont.ttf",
+    # macOS
+    "/System/Library/Fonts/AppleSDGothicNeo.ttc",
+    "/Library/Fonts/NanumGothic.ttf",
+    "/System/Library/Fonts/Hiragino Sans GB.ttc",
+]
+
+
 def _load_font(font_path: str, size: int) -> ImageFont.FreeTypeFont:
     if not MOVIEPY_AVAILABLE:
         raise RuntimeError(f"MoviePy/PIL not available: {MOVIEPY_ERROR}")
     if font_path and os.path.exists(font_path):
         return ImageFont.truetype(font_path, size=size)
+    # 시스템 CJK 폰트 폴백
+    for candidate in _SYSTEM_FONT_CANDIDATES:
+        if os.path.exists(candidate):
+            try:
+                return ImageFont.truetype(candidate, size=size)
+            except Exception:
+                continue
     return ImageFont.load_default()
 
 
@@ -1330,7 +1351,7 @@ def _overlay_sticker(
     asset_path: str,
     canvas_width: int,
     canvas_height: int,
-    size: int = 220,
+    size: int = 320,
 ) -> Image.Image:
     """에셋 이미지를 이모티콘처럼 우하단에 작게 붙입니다."""
     if not os.path.exists(asset_path):
@@ -1513,7 +1534,7 @@ def render_video(
             def _make_frame(frame, __text=_text, __asset=_asset, __font=_font):
                 img = Image.fromarray(frame).convert("RGB")
                 img = _draw_subtitle(img, __text, __font, W, H)
-                img = _overlay_sticker(img, __asset, W, H, size=200)
+                img = _overlay_sticker(img, __asset, W, H, size=320)
                 return np.array(img)
 
             clip = seg.fl_image(_make_frame).set_duration(dur)
@@ -2221,7 +2242,9 @@ def _auto_jp_flow(config: AppConfig, progress, status_box, extra_hint: str = "")
     cta_ko = script.get("cta_outro_ko", cta_ja)
     pinned = script.get("pinned_comment", "")
     mood = script.get("mood", "exciting")
-    bg_query = script.get("bg_search_query", "korea city street")
+    _raw_bg_query = script.get("bg_search_query", "korea city street")
+    # 한국 소개 채널 — 쿼리에 korea 없으면 강제 prefix
+    bg_query = _raw_bg_query if any(k in _raw_bg_query.lower() for k in ("korea", "seoul", "busan", "jeju")) else f"korea {_raw_bg_query}"
     top5_info = script.get("top5_info", [])
 
     st.info(f"주제: **{topic_theme}** | 무드: **{mood}**")
@@ -2585,7 +2608,8 @@ def run_streamlit_app() -> None:
                         bg_vid_manual: Optional[str] = None
                         if config.pexels_api_key:
                             _status_update(progress, status_box, 0.25, "배경 영상 다운로드 중")
-                            bg_query_m = script.get("bg_search_query", "korea city")
+                            _raw_bg_q_m = script.get("bg_search_query", "korea city")
+                            bg_query_m = _raw_bg_q_m if any(k in _raw_bg_q_m.lower() for k in ("korea", "seoul", "busan", "jeju")) else f"korea {_raw_bg_q_m}"
                             vid_dir_m = os.path.join(config.assets_dir, "bg_videos")
                             bg_vid_manual = fetch_pexels_video(bg_query_m, config.pexels_api_key, vid_dir_m, config.width, config.height)
 
