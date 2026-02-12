@@ -12,7 +12,7 @@ import time
 from html import unescape
 from urllib.parse import urljoin, urlencode, urlparse
 from dataclasses import dataclass
-from datetime import datetime
+from datetime import datetime, timedelta
 from zoneinfo import ZoneInfo
 from typing import Any, Dict, List, Optional, Tuple
 
@@ -451,6 +451,7 @@ class AppConfig:
     auto_run_hour: int
     auto_run_tz: str
     auto_run_state_path: str
+    auto_run_lock_path: str
     generated_bg_dir: str
     telegram_bot_token: str
     telegram_admin_chat_id: str
@@ -478,6 +479,14 @@ class AppConfig:
     highlight_clip_sample_fps: float
     highlight_clip_max_scan_sec: float
     ab_test_enabled: bool
+    retry_pending_uploads: bool
+    pending_uploads_path: str
+    youtube_api_key: str
+    ab_report_enabled: bool
+    ab_report_hour: int
+    ab_report_days: int
+    ab_report_max_items: int
+    ab_report_state_path: str
     # 플랫폼: instagram(기본), youtube, tiktok(준비)
     upload_platform: str
     enable_instagram_upload: bool
@@ -502,6 +511,21 @@ def load_config() -> AppConfig:
         _get_secret("AUTO_RUN_STATE_PATH", "data/state/auto_run_state.json")
         or "data/state/auto_run_state.json",
         "/tmp/auto_shorts_state/auto_run_state.json",
+    )
+    auto_run_lock_path = _ensure_writable_file(
+        _get_secret("AUTO_RUN_LOCK_PATH", "data/state/auto_run.lock")
+        or "data/state/auto_run.lock",
+        "/tmp/auto_shorts_state/auto_run.lock",
+    )
+    pending_uploads_path = _ensure_writable_file(
+        _get_secret("PENDING_UPLOADS_PATH", "data/state/pending_uploads.json")
+        or "data/state/pending_uploads.json",
+        "/tmp/auto_shorts_state/pending_uploads.json",
+    )
+    ab_report_state_path = _ensure_writable_file(
+        _get_secret("AB_REPORT_STATE_PATH", "data/state/ab_report_state.json")
+        or "data/state/ab_report_state.json",
+        "/tmp/auto_shorts_state/ab_report_state.json",
     )
     pixabay_api_key = (_get_secret("PIXABAY_API_KEY", "") or "").strip()
     pexels_api_key = (_get_secret("PEXELS_API_KEY", "") or "").strip()
@@ -540,6 +564,7 @@ def load_config() -> AppConfig:
         auto_run_hour=int(_get_secret("AUTO_RUN_HOUR", "18") or 18),
         auto_run_tz=_get_secret("AUTO_RUN_TZ", "Asia/Seoul") or "Asia/Seoul",
         auto_run_state_path=auto_run_state_path,
+        auto_run_lock_path=auto_run_lock_path,
         generated_bg_dir=_get_secret("GENERATED_BG_DIR", "data/assets/generated_bg") or "data/assets/generated_bg",
         telegram_bot_token=_get_secret("TELEGRAM_BOT_TOKEN", "") or "",
         telegram_admin_chat_id=_get_secret("TELEGRAM_ADMIN_CHAT_ID", "") or "",
@@ -567,6 +592,14 @@ def load_config() -> AppConfig:
         highlight_clip_sample_fps=float(_get_secret("HIGHLIGHT_CLIP_SAMPLE_FPS", "2") or 2),
         highlight_clip_max_scan_sec=float(_get_secret("HIGHLIGHT_CLIP_MAX_SCAN_SEC", "900") or 900),
         ab_test_enabled=_get_bool("AB_TEST_ENABLED", True),
+        retry_pending_uploads=_get_bool("RETRY_PENDING_UPLOADS", True),
+        pending_uploads_path=pending_uploads_path,
+        youtube_api_key=(_get_secret("YOUTUBE_API_KEY", "") or "").strip(),
+        ab_report_enabled=_get_bool("AB_REPORT_ENABLED", True),
+        ab_report_hour=int(_get_secret("AB_REPORT_HOUR", "20") or 20),
+        ab_report_days=int(_get_secret("AB_REPORT_DAYS", "7") or 7),
+        ab_report_max_items=int(_get_secret("AB_REPORT_MAX_ITEMS", "20") or 20),
+        ab_report_state_path=ab_report_state_path,
         upload_platform=(_get_secret("UPLOAD_PLATFORM", "instagram") or "instagram").strip().lower(),
         enable_instagram_upload=_get_bool("ENABLE_INSTAGRAM_UPLOAD", True),
         instagram_access_token=(_get_secret("INSTAGRAM_ACCESS_TOKEN", "") or "").strip(),
@@ -3377,6 +3410,179 @@ def _parse_youtube_error(err: Exception) -> Tuple[str, str]:
     return reason, message
 
 
+def _load_pending_uploads(path: str) -> List[Dict[str, Any]]:
+    data = _read_json_file(path, {"items": []})
+    items = data.get("items", [])
+    return items if isinstance(items, list) else []
+
+
+def _save_pending_uploads(path: str, items: List[Dict[str, Any]]) -> None:
+    _write_json_file(path, {"items": items})
+
+
+def _queue_pending_upload(
+    config: AppConfig,
+    file_path: str,
+    title: str,
+    description: str,
+    tags: List[str],
+    thumb_path: str = "",
+    error: str = "",
+) -> None:
+    if not config.retry_pending_uploads:
+        return
+    items = _load_pending_uploads(config.pending_uploads_path)
+    items.append(
+        {
+            "file_path": file_path,
+            "title": title,
+            "description": description,
+            "tags": tags,
+            "thumb_path": thumb_path,
+            "created_at": datetime.utcnow().strftime("%Y-%m-%d %H:%M:%S"),
+            "attempts": 0,
+            "last_error": error,
+        }
+    )
+    _save_pending_uploads(config.pending_uploads_path, items)
+
+
+def _try_upload_pending(config: AppConfig, use_streamlit: bool = True, max_items: int = 1) -> None:
+    if not config.retry_pending_uploads or not config.enable_youtube_upload:
+        return
+    items = _load_pending_uploads(config.pending_uploads_path)
+    if not items:
+        return
+    processed = 0
+    remain: List[Dict[str, Any]] = []
+    for item in items:
+        if processed >= max_items:
+            remain.append(item)
+            continue
+        if not os.path.exists(item.get("file_path", "")):
+            continue
+        _ui_info("대기열 업로드 재시도 중...", use_streamlit)
+        result = upload_video(
+            config=config,
+            file_path=item.get("file_path", ""),
+            title=item.get("title", ""),
+            description=item.get("description", ""),
+            tags=item.get("tags", []),
+        )
+        error = str(result.get("error", "") or "").strip()
+        reason = str(result.get("error_reason", "") or "").strip()
+        if error:
+            item["attempts"] = int(item.get("attempts", 0)) + 1
+            item["last_error"] = error
+            remain.append(item)
+            if reason == "uploadLimitExceeded":
+                _ui_warning("유튜브 업로드 한도 초과로 재시도 보류.", use_streamlit)
+                break
+        else:
+            processed += 1
+            video_id = result.get("video_id", "")
+            if item.get("thumb_path") and video_id:
+                set_video_thumbnail(config, video_id, item["thumb_path"])
+            msg = f"✅ 대기열 업로드 완료: {video_id}"
+            _telemetry_log(msg, config)
+            if config.telegram_bot_token and config.telegram_admin_chat_id:
+                send_telegram_message(config.telegram_bot_token, config.telegram_admin_chat_id, msg)
+    _save_pending_uploads(config.pending_uploads_path, remain)
+
+
+def _fetch_youtube_stats(video_id: str, api_key: str) -> Dict[str, int]:
+    if not video_id or not api_key:
+        return {}
+    try:
+        resp = requests.get(
+            "https://www.googleapis.com/youtube/v3/videos",
+            params={"part": "statistics", "id": video_id, "key": api_key},
+            timeout=15,
+        )
+        data = resp.json()
+        items = data.get("items", [])
+        if not items:
+            return {}
+        stats = items[0].get("statistics", {})
+        return {
+            "viewCount": int(stats.get("viewCount", 0)),
+            "likeCount": int(stats.get("likeCount", 0)),
+            "commentCount": int(stats.get("commentCount", 0)),
+        }
+    except Exception:
+        return {}
+
+
+def _summarize_ab_tests(config: AppConfig) -> str:
+    path = os.path.join(config.output_dir, "ab_tests.jsonl")
+    if not os.path.exists(path):
+        return "A/B 로그가 없습니다."
+    lines = []
+    with open(path, "r", encoding="utf-8") as file:
+        lines = file.readlines()
+    records = []
+    for line in lines[-200:]:
+        try:
+            records.append(json.loads(line))
+        except Exception:
+            pass
+    if not records:
+        return "A/B 로그가 없습니다."
+    now = _get_local_now(config)
+    cutoff = now - timedelta(days=int(config.ab_report_days))
+    filtered = []
+    for rec in records:
+        try:
+            ts = datetime.strptime(rec.get("date_jst", ""), "%Y-%m-%d %H:%M:%S")
+        except Exception:
+            ts = now
+        if ts >= cutoff:
+            filtered.append(rec)
+    if not filtered:
+        return "최근 A/B 로그가 없습니다."
+    # 최근 N개만 통계
+    filtered = filtered[-int(config.ab_report_max_items):]
+    stats_by_variant: Dict[str, Dict[str, Any]] = {}
+    for rec in filtered:
+        variant = rec.get("caption_variant", "default")
+        stats_by_variant.setdefault(variant, {"count": 0, "views": 0, "likes": 0, "comments": 0})
+        stats_by_variant[variant]["count"] += 1
+        if config.youtube_api_key and rec.get("youtube_video_id"):
+            s = _fetch_youtube_stats(rec["youtube_video_id"], config.youtube_api_key)
+            stats_by_variant[variant]["views"] += s.get("viewCount", 0)
+            stats_by_variant[variant]["likes"] += s.get("likeCount", 0)
+            stats_by_variant[variant]["comments"] += s.get("commentCount", 0)
+    lines = ["[A/B 리포트]"]
+    lines.append(f"기간: 최근 {int(config.ab_report_days)}일 / 표본 {len(filtered)}개")
+    for variant, stat in stats_by_variant.items():
+        if config.youtube_api_key:
+            avg_views = int(stat["views"] / max(stat["count"], 1))
+            lines.append(
+                f"- {variant}: {stat['count']}개, 평균 조회 {avg_views}, 좋아요 {stat['likes']}, 댓글 {stat['comments']}"
+            )
+        else:
+            lines.append(f"- {variant}: {stat['count']}개")
+    if not config.youtube_api_key:
+        lines.append("※ 조회수 집계를 위해 YOUTUBE_API_KEY를 설정하세요.")
+    return "\n".join(lines)
+
+
+def _maybe_send_ab_report(config: AppConfig, use_streamlit: bool = True) -> None:
+    if not config.ab_report_enabled:
+        return
+    if not config.telegram_bot_token or not config.telegram_admin_chat_id:
+        return
+    now = _get_local_now(config)
+    if now.hour < int(config.ab_report_hour):
+        return
+    state = _read_json_file(config.ab_report_state_path, {"last_report_date": ""})
+    if state.get("last_report_date") == now.date().isoformat():
+        return
+    report = _summarize_ab_tests(config)
+    send_telegram_message(config.telegram_bot_token, config.telegram_admin_chat_id, report)
+    _write_json_file(config.ab_report_state_path, {"last_report_date": now.date().isoformat()})
+
+
 def upload_video(
     config: AppConfig,
     file_path: str,
@@ -4055,6 +4261,28 @@ def _get_local_now(config: AppConfig) -> datetime:
         return datetime.utcnow()
 
 
+def _acquire_run_lock(path: str, ttl_sec: int = 7200) -> bool:
+    try:
+        if os.path.exists(path):
+            age = time.time() - os.path.getmtime(path)
+            if age < ttl_sec:
+                return False
+        os.makedirs(os.path.dirname(path) or ".", exist_ok=True)
+        with open(path, "w", encoding="utf-8") as file:
+            file.write(str(int(time.time())))
+        return True
+    except Exception:
+        return True
+
+
+def _release_run_lock(path: str) -> None:
+    try:
+        if os.path.exists(path):
+            os.remove(path)
+    except Exception:
+        pass
+
+
 def _should_auto_run(config: AppConfig) -> bool:
     if not config.auto_run_daily:
         return False
@@ -4222,6 +4450,8 @@ def _auto_jp_flow(
     manifest_items = load_manifest(config.manifest_path)
 
     # ── 대본 생성 ─────────────────────────────────────────
+    if getattr(config, "retry_pending_uploads", False):
+        _try_upload_pending(config, use_streamlit=use_streamlit, max_items=1)
     _telemetry_log("자동 생성 시작 — 대본 생성 단계 진입", config)
     _status_update(progress, status_box, 0.10, "AI 대본 생성 중 (주제 자동 선정)...")
     try:
@@ -4346,10 +4576,10 @@ def _auto_jp_flow(
             bg_image_paths.append(kw_to_image.get(kw))
         downloaded = sum(1 for p in bg_video_paths if p)
         if downloaded:
-            st.info(f"배경 영상: {downloaded}/{len(texts)} 세그먼트 완료")
+            _ui_info(f"배경 영상: {downloaded}/{len(texts)} 세그먼트 완료", use_streamlit)
             _telemetry_log(f"배경 영상 다운로드 완료 {downloaded}/{len(texts)}", config)
         else:
-            st.warning("배경 영상 다운로드 실패 — 정적 이미지 배경으로 대체")
+            _ui_warning("배경 영상 다운로드 실패 — 정적 이미지 배경으로 대체", use_streamlit)
             _telemetry_log("배경 영상 다운로드 실패 — 정적 이미지로 대체", config)
         if any(p is None for p in bg_image_paths):
             placeholder = _ensure_placeholder_image(config)
@@ -4452,7 +4682,7 @@ def _auto_jp_flow(
     except Exception as tts_err:
         err_msg = f"❌ TTS 생성 실패: {tts_err}"
         _telemetry_log(err_msg, config)
-        st.error(err_msg)
+        _ui_error(err_msg, use_streamlit)
         send_telegram_message(config.telegram_bot_token, config.telegram_admin_chat_id, err_msg)
         return False
 
@@ -4478,7 +4708,7 @@ def _auto_jp_flow(
         _telemetry_log("영상 렌더링 완료", config)
     except Exception as render_err:
         _telemetry_log(f"영상 렌더링 실패: {render_err}", config)
-        st.error(f"영상 렌더링 실패: {render_err}")
+        _ui_error(f"영상 렌더링 실패: {render_err}", use_streamlit)
         return False
 
     # ── 썸네일 생성 ───────────────────────────────────────
@@ -4565,6 +4795,15 @@ def _auto_jp_flow(
                 err_text += f"\n{extra_hint_msg}"
             _telemetry_log(err_text, config)
             send_telegram_message(config.telegram_bot_token, config.telegram_admin_chat_id, err_text)
+            _queue_pending_upload(
+                config,
+                file_path=output_path,
+                title=video_title,
+                description=description,
+                tags=hashtags,
+                thumb_path=thumb_path,
+                error=upload_error,
+            )
         else:
             _telemetry_log(f"유튜브 업로드 완료: {video_id}", config)
             if thumb_path and video_id:
@@ -4625,7 +4864,8 @@ def _auto_jp_flow(
     )
 
     _status_update(progress, status_box, 1.0, "완료")
-    st.video(output_path)
+    if use_streamlit:
+        st.video(output_path)
 
     if video_url:
         report = _build_upload_report_ko(
@@ -4646,6 +4886,7 @@ def _auto_jp_flow(
             f"로컬: {output_path}"
         )
         send_telegram_message(config.telegram_bot_token, config.telegram_admin_chat_id, summary_text)
+    _maybe_send_ab_report(config, use_streamlit=use_streamlit)
     return True
 
 
@@ -4727,6 +4968,11 @@ def run_streamlit_app() -> None:
         "- `HIGHLIGHT_CLIP_DURATION_SEC` (하이라이트 길이)\n"
         "- `HIGHLIGHT_CLIP_SAMPLE_FPS` (모션 샘플링 FPS)\n\n"
         "- `AB_TEST_ENABLED` (자막/BGM A/B 기록)\n\n"
+        "- `RETRY_PENDING_UPLOADS` (업로드 실패 재시도)\n"
+        "- `PENDING_UPLOADS_PATH` (대기열 저장 경로)\n"
+        "- `AUTO_RUN_LOCK_PATH` (중복 실행 방지)\n"
+        "- `YOUTUBE_API_KEY` (A/B 리포트 통계용)\n"
+        "- `AB_REPORT_ENABLED`, `AB_REPORT_HOUR`, `AB_REPORT_DAYS`\n\n"
         "**BGM 무드 폴더:** `assets/bgm/mystery_suspense/`, `assets/bgm/fast_exciting/`"
     )
     missing = _missing_required(config)
@@ -4750,8 +4996,14 @@ def run_streamlit_app() -> None:
 
         if _should_auto_run(config):
             _telemetry_log("자동 스케줄 실행 트리거", config)
-            if _auto_jp_flow(config, progress, status_box, extra_hint=""):
-                _mark_auto_run_done(config)
+            if _acquire_run_lock(config.auto_run_lock_path):
+                try:
+                    if _auto_jp_flow(config, progress, status_box, extra_hint=""):
+                        _mark_auto_run_done(config)
+                finally:
+                    _release_run_lock(config.auto_run_lock_path)
+            else:
+                _telemetry_log("자동 실행 잠금으로 스킵", config)
 
         extra_hint = st.text_input(
             "주제 힌트 (선택)",
@@ -5050,6 +5302,15 @@ def run_streamlit_app() -> None:
                                 err_text += f"\n{extra_hint_msg}"
                             _telemetry_log(err_text, config)
                             send_telegram_message(config.telegram_bot_token, config.telegram_admin_chat_id, err_text)
+                            _queue_pending_upload(
+                                config,
+                                file_path=output_path,
+                                title=video_title_val,
+                                description=pinned_val + "\n\n" + hashtags_val,
+                                tags=hashtags_val.split(),
+                                thumb_path=thumb_path,
+                                error=upload_error,
+                            )
                         else:
                             if thumb_path and video_id:
                                 if set_video_thumbnail(config, video_id, thumb_path):
@@ -5856,6 +6117,15 @@ def run_batch(count: int, seed: str = "", beats: int = 7) -> None:
                     err_text += f"\n{extra_hint_msg}"
                 _telemetry_log(err_text, config)
                 send_telegram_message(config.telegram_bot_token, config.telegram_admin_chat_id, err_text)
+                _queue_pending_upload(
+                    config,
+                    file_path=output_path,
+                    title=_title_b,
+                    description=_pinned_b + "\n\n" + " ".join(_hashtags_b),
+                    tags=_hashtags_b,
+                    thumb_path=thumb_path,
+                    error=upload_error,
+                )
             else:
                 if thumb_path and video_id:
                     set_video_thumbnail(config, video_id, thumb_path)
