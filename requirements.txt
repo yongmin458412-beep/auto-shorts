@@ -12,3 +12,5 @@ google-auth
 google-api-python-client
 google-auth-oauthlib
 beautifulsoup4
+yt-dlp
+gTTS

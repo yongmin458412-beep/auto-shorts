@@ -468,6 +468,9 @@ class AppConfig:
     thumbnail_enabled: bool
     thumbnail_use_hook: bool
     thumbnail_max_chars: int
+    use_minecraft_parkour_bg: bool
+    tts_provider: str
+    use_japanese_caption_style: bool
 
 
 def load_config() -> AppConfig:
@@ -502,7 +505,8 @@ def load_config() -> AppConfig:
         assets_dir=assets_dir,
         manifest_path=manifest_path,
         output_dir=output_dir,
-        font_path=_get_secret("FONT_PATH", "") or "",
+        font_path=(_get_secret("FONT_PATH", "") or "").strip()
+        or _ensure_japanese_font(_get_secret("ASSETS_DIR", "data/assets") or "data/assets"),
         width=int(_get_secret("VIDEO_WIDTH", "1080") or 1080),
         height=int(_get_secret("VIDEO_HEIGHT", "1920") or 1920),
         fps=int(_get_secret("VIDEO_FPS", "30") or 30),
@@ -515,7 +519,7 @@ def load_config() -> AppConfig:
         pexels_api_key=pexels_api_key,
         ja_dialect_style=_get_secret("JA_DIALECT_STYLE", "") or "",
         bgm_mode=_get_secret("BGM_MODE", "off") or "off",
-        bgm_volume=float(_get_secret("BGM_VOLUME", "0.12") or 0.12),
+        bgm_volume=float(_get_secret("BGM_VOLUME", "0.2") or 0.2),  # 일본 쇼츠: TTS 가독성 위해 20%
         asset_overlay_mode=_get_secret("ASSET_OVERLAY_MODE", "off") or "off",
         max_video_duration_sec=float(_get_secret("MAX_VIDEO_DURATION_SEC", "59") or 59),
         require_approval=_get_bool("REQUIRE_APPROVAL", False),
@@ -540,6 +544,9 @@ def load_config() -> AppConfig:
         thumbnail_enabled=_get_bool("THUMBNAIL_ENABLED", True),
         thumbnail_use_hook=_get_bool("THUMBNAIL_USE_HOOK", True),
         thumbnail_max_chars=int(_get_secret("THUMBNAIL_MAX_CHARS", "22") or 22),
+        use_minecraft_parkour_bg=_get_bool("USE_MINECRAFT_PARKOUR_BG", True),
+        tts_provider=(_get_secret("TTS_PROVIDER", "") or "openai").strip().lower() or "openai",
+        use_japanese_caption_style=_get_bool("USE_JAPANESE_CAPTION_STYLE", True),
     )
 
 
@@ -1346,6 +1353,19 @@ def match_bgm_by_mood(config: AppConfig, mood: str) -> Optional[str]:
     if existing:
         return random.choice(existing)
 
+    # Minecraft BGM 슬롯 우선 (일본 쇼츠 + Minecraft Parkour 배경 시)
+    if getattr(config, "use_minecraft_parkour_bg", False):
+        minecraft_dir = os.path.join(config.assets_dir, "bgm", "minecraft")
+        minecraft_files = _list_audio_files(minecraft_dir)
+        if not minecraft_files:
+            # YouTube에서 Minecraft BGM 자동 수집
+            _telemetry_log("Minecraft BGM YouTube 자동 수집 시도", config)
+            downloaded = fetch_youtube_minecraft_bgm(minecraft_dir)
+            if downloaded:
+                minecraft_files = [downloaded]
+        if minecraft_files:
+            return random.choice(minecraft_files)
+
     # Pixabay 자동 다운로드 (API 키 있을 때만)
     if config.pixabay_api_key:
         _append_bgm_debug(f"Pixabay BGM 시도 (mood={mood})")
@@ -1366,6 +1386,17 @@ def match_bgm_by_mood(config: AppConfig, mood: str) -> Optional[str]:
     else:
         _append_bgm_debug("PIXABAY_API_KEY 미설정")
         _telemetry_log("PIXABAY_API_KEY 미설정: BGM 자동 다운로드 생략", config)
+
+    # Minecraft BGM 슬롯 (일본 쇼츠 + Minecraft Parkour 배경 시 우선)
+    if getattr(config, "use_minecraft_parkour_bg", False):
+        minecraft_dir = os.path.join(config.assets_dir, "bgm", "minecraft")
+        minecraft_files = _list_audio_files(minecraft_dir)
+        if not minecraft_files:
+            downloaded = fetch_youtube_minecraft_bgm(minecraft_dir)
+            if downloaded:
+                minecraft_files = [downloaded]
+        if minecraft_files:
+            return random.choice(minecraft_files)
 
     # 로컬 일반 폴더 폴백
     fallback_dir = os.path.join(config.assets_dir, "bgm")
@@ -1560,6 +1591,9 @@ def tts_openai(
     output_path: str,
     voice: str,
 ) -> str:
+    """
+    OpenAI TTS API로 음성 생성. 일본어 텍스트 지원.
+    """
     if not config.openai_api_key:
         raise RuntimeError("OPENAI_API_KEY가 없습니다.")
     if not voice:
@@ -1584,6 +1618,41 @@ def tts_openai(
     with open(output_path, "wb") as file:
         file.write(response.content)
     return output_path
+
+
+def tts_gtts(
+    text: str,
+    output_path: str,
+    lang: str = "ja",
+) -> str:
+    """
+    gTTS로 일본어 TTS 생성. OPENAI_API_KEY 없을 때 폴백용.
+    lang='ja'로 일본어 지원.
+    """
+    try:
+        from gtts import gTTS
+    except ImportError:
+        raise RuntimeError("gTTS가 설치되지 않았습니다. pip install gTTS")
+    os.makedirs(os.path.dirname(output_path), exist_ok=True)
+    tts = gTTS(text=text, lang=lang, slow=False)
+    tts.save(output_path)
+    return output_path
+
+
+def tts_generate(
+    config: AppConfig,
+    text: str,
+    output_path: str,
+    voice: str = "",
+) -> str:
+    """
+    TTS 생성. tts_provider에 따라 OpenAI TTS 또는 gTTS 선택.
+    일본어 텍스트 처리 가능.
+    """
+    provider = (getattr(config, "tts_provider", "") or "openai").strip().lower()
+    if provider == "gtts":
+        return tts_gtts(text, output_path, lang="ja")
+    return tts_openai(config, text, output_path, voice=voice or "alloy")
 
 
 @dataclass
@@ -1737,6 +1806,45 @@ _SYSTEM_FONT_CANDIDATES = [
     "/Library/Fonts/NanumGothic.ttf",
     "/System/Library/Fonts/Hiragino Sans GB.ttc",
 ]
+
+# 일본어 가독성용 Noto Sans JP Bold (일본 예능 자막 스타일)
+_JAPANESE_FONT_CANDIDATES = [
+    "/usr/share/fonts/opentype/noto/NotoSansCJK-Bold.ttc",
+    "/usr/share/fonts/truetype/noto/NotoSansCJK-Bold.ttc",
+    "/usr/share/fonts/noto-cjk/NotoSansCJK-Bold.ttc",
+    "/usr/share/fonts/truetype/noto/NotoSansCJKjp-Bold.otf",
+] + _SYSTEM_FONT_CANDIDATES
+
+
+def _ensure_japanese_font(assets_dir: str) -> str:
+    """
+    ./assets/fonts/ 경로에서 일본어 폰트를 불러오거나, 없으면 Google Fonts에서
+    Noto Sans JP Bold를 다운로드합니다. 일본어 자막 깨짐 방지용.
+    """
+    fonts_dir = os.path.join(assets_dir, "fonts")
+    os.makedirs(fonts_dir, exist_ok=True)
+    for name in ("NotoSansJP-Bold.otf", "NotoSansJP-Bold.ttf", "NotoSansCJKjp-Bold.otf"):
+        p = os.path.join(fonts_dir, name)
+        if os.path.exists(p):
+            return p
+    try:
+        url = "https://github.com/google/fonts/raw/main/ofl/notosansjp/NotoSansJP-Bold.otf"
+        resp = requests.get(url, timeout=30)
+        if resp.status_code == 200 and len(resp.content) > 10000:
+            path = os.path.join(fonts_dir, "NotoSansJP-Bold.otf")
+            with open(path, "wb") as f:
+                f.write(resp.content)
+            return path
+    except Exception:
+        pass
+    for candidate in _JAPANESE_FONT_CANDIDATES:
+        if os.path.exists(candidate) and ImageFont:
+            try:
+                ImageFont.truetype(candidate, size=24)
+                return candidate
+            except Exception:
+                continue
+    return ""
 
 
 def _load_font(font_path: str, size: int) -> ImageFont.FreeTypeFont:
@@ -2005,14 +2113,21 @@ def _draw_subtitle(
     safe_bottom = int(canvas_height * 0.68)
     box_y = safe_bottom - total_h
     box_y = max(int(canvas_height * 0.45), box_y)  # 최소 45% 아래 유지
-    # 스타일 결정 (reaction은 말풍선 느낌)
+    # 스타일 결정 (reaction은 말풍선, japanese_variety는 일본 예능 스타일: 노란색+검정테두리)
     style_key = (style or "").strip().lower()
     is_reaction = style_key in {"reaction", "outro", "outro_loop"}
+    is_japanese_variety = style_key == "japanese_variety"
     if is_reaction:
         box_fill = (255, 232, 92, 220)
         text_fill = (25, 20, 0)
         stroke_fill = (0, 0, 0)
         stroke_width = 2
+    elif is_japanese_variety:
+        # 일본 예능 자막: 노란색 글씨 + 검은색 테두리 (Stroke 효과 강화)
+        box_fill = (0, 0, 0, 0)  # 배경 박스 없음 (자막만)
+        text_fill = (255, 235, 59)  # 노란색 (#FFEB3B)
+        stroke_fill = (0, 0, 0)
+        stroke_width = 6  # 굵은 검정 테두리
     else:
         box_fill = (0, 0, 0, 170)
         text_fill = (255, 255, 255)
@@ -2030,7 +2145,7 @@ def _draw_subtitle(
         if progress > 0.85:
             alpha_mul = max(0.0, 1.0 - (progress - 0.85) / 0.15)
 
-    # 반투명 배경 박스 (텍스트 크기에 맞게만, 화면 하단까지 늘리지 않음)
+    # 반투명 배경 박스 (japanese_variety는 박스 없음, reaction은 말풍선)
     box_pad = 18
     overlay = Image.new("RGBA", image.size, (0, 0, 0, 0))
     box_draw = ImageDraw.Draw(overlay)
@@ -2040,10 +2155,11 @@ def _draw_subtitle(
         canvas_width - pad_x + box_pad,
         box_y + total_h + box_pad,
     ]
-    if hasattr(box_draw, "rounded_rectangle") and is_reaction:
-        box_draw.rounded_rectangle(box_rect, radius=24, fill=box_fill)
-    else:
-        box_draw.rectangle(box_rect, fill=box_fill)
+    if not is_japanese_variety:
+        if hasattr(box_draw, "rounded_rectangle") and is_reaction:
+            box_draw.rounded_rectangle(box_rect, radius=24, fill=box_fill)
+        else:
+            box_draw.rectangle(box_rect, fill=box_fill)
 
     # 말풍선 꼬리 (reaction 전용)
     if is_reaction:
@@ -2421,6 +2537,158 @@ def fetch_pexels_video(
     return None
 
 
+def fetch_youtube_minecraft_parkour_video(
+    output_dir: str,
+    canvas_w: int = 1080,
+    canvas_h: int = 1920,
+) -> Optional[str]:
+    """
+    YouTube에서 'Minecraft Parkour No Copyright gameplay' 키워드로 검색하여
+    조회수가 높고 1분 이상인 영상을 yt-dlp로 다운로드합니다.
+    - 1080p 이상 선호, 쇼츠 비율(9:16) 크롭 시 중앙이 잘리지 않도록 처리 (render 단계에서 crop)
+    - output_dir에 이미 파일이 있으면 스킵
+    - 반환: 다운로드된 파일 경로 또는 None
+    """
+    os.makedirs(output_dir, exist_ok=True)
+    # 기존 파일이 있으면 첫 번째 파일 재사용 (스킵)
+    for f in os.listdir(output_dir):
+        if f.lower().endswith((".mp4", ".mkv", ".webm")):
+            existing = os.path.join(output_dir, f)
+            if os.path.getsize(existing) > 100000:  # 100KB 이상
+                return existing
+
+    try:
+        import yt_dlp
+    except ImportError:
+        return None
+
+    search_url = "ytsearch20:Minecraft Parkour No Copyright gameplay"
+    ydl_opts_info = {
+        "quiet": True,
+        "no_warnings": True,
+        "extract_flat": False,
+        "noplaylist": False,
+    }
+    try:
+        with yt_dlp.YoutubeDL(ydl_opts_info) as ydl:
+            info = ydl.extract_info(search_url, download=False)
+    except Exception:
+        return None
+
+    entries = info.get("entries") or []
+    # 1분(60초) 이상, duration/view_count 있는 것만 필터, 조회수 높은 순 정렬
+    candidates = []
+    for e in entries:
+        if not e:
+            continue
+        dur = e.get("duration") or 0
+        views = e.get("view_count") or e.get("play_count") or 0
+        vid = e.get("id") or e.get("url")
+        if vid and dur >= 60:
+            candidates.append((views, dur, e))
+
+    if not candidates:
+        return None
+
+    candidates.sort(key=lambda x: x[0], reverse=True)
+    best = candidates[0][2]
+    video_url = best.get("webpage_url") or best.get("url")
+    if not video_url and best.get("id"):
+        video_url = f"https://www.youtube.com/watch?v={best['id']}"
+
+    if not video_url:
+        return None
+
+    out_tmpl = os.path.join(output_dir, "minecraft_parkour_%(id)s.%(ext)s")
+    ydl_opts_dl = {
+        "format": "bestvideo[height>=720][ext=mp4]/bestvideo[height>=720]/bestvideo[ext=mp4]/best[ext=mp4]/best",
+        "outtmpl": out_tmpl,
+        "merge_output_format": "mp4",
+        "quiet": True,
+        "no_warnings": True,
+    }
+    try:
+        with yt_dlp.YoutubeDL(ydl_opts_dl) as ydl:
+            ydl.download([video_url])
+    except Exception:
+        return None
+
+    # 다운로드된 파일 찾기
+    for f in os.listdir(output_dir):
+        if f.startswith("minecraft_parkour_") and f.lower().endswith((".mp4", ".mkv", ".webm")):
+            return os.path.join(output_dir, f)
+    return None
+
+
+def fetch_youtube_minecraft_bgm(output_dir: str) -> Optional[str]:
+    """
+    YouTube에서 'Minecraft BGM No Copyright' 등으로 검색하여
+    저작권 프리 Minecraft BGM을 yt-dlp로 오디오만 다운로드합니다.
+    - output_dir에 이미 파일이 있으면 스킵
+    - 반환: 다운로드된 MP3 경로 또는 None
+    """
+    os.makedirs(output_dir, exist_ok=True)
+    existing = _list_audio_files(output_dir)
+    if existing:
+        return random.choice(existing)
+
+    try:
+        import yt_dlp
+    except ImportError:
+        return None
+
+    search_queries = [
+        "Minecraft BGM No Copyright",
+        "Minecraft music royalty free",
+        "Minecraft background music calm",
+    ]
+    for search_query in search_queries:
+        search_url = f"ytsearch15:{search_query}"
+        ydl_opts_info = {"quiet": True, "no_warnings": True, "extract_flat": False}
+        try:
+            with yt_dlp.YoutubeDL(ydl_opts_info) as ydl:
+                info = ydl.extract_info(search_url, download=False)
+        except Exception:
+            continue
+
+        entries = info.get("entries") or []
+        candidates = []
+        for e in entries:
+            if not e:
+                continue
+            dur = e.get("duration") or 0
+            if dur and 60 <= dur <= 600:  # 1분~10분
+                candidates.append(e)
+
+        if not candidates:
+            continue
+
+        best = random.choice(candidates[:5])  # 상위 5개 중 랜덤
+        video_url = best.get("webpage_url") or best.get("url")
+        if not video_url and best.get("id"):
+            video_url = f"https://www.youtube.com/watch?v={best['id']}"
+        if not video_url:
+            continue
+
+        out_tmpl = os.path.join(output_dir, "minecraft_bgm_%(id)s.%(ext)s")
+        ydl_opts_dl = {
+            "format": "bestaudio/best",
+            "outtmpl": out_tmpl,
+            "postprocessors": [{"key": "FFmpegExtractAudio", "preferredcodec": "mp3"}],
+            "quiet": True,
+            "no_warnings": True,
+        }
+        try:
+            with yt_dlp.YoutubeDL(ydl_opts_dl) as ydl:
+                ydl.download([video_url])
+        except Exception:
+            continue
+
+        for f in os.listdir(output_dir):
+            if f.startswith("minecraft_bgm_") and f.lower().endswith((".mp3", ".m4a")):
+                return os.path.join(output_dir, f)
+    return None
+
 
 def _generate_bgm_fallback(output_path: str, duration: float, mood: str) -> str:
     """
@@ -2534,6 +2802,9 @@ def render_video(
             if caption_styles and index < len(caption_styles)
             else "default"
         )
+        # 일본 쇼츠 타겟: use_japanese_caption_style이면 default → japanese_variety (노란글씨+검정테두리)
+        if getattr(config, "use_japanese_caption_style", False) and style == "default":
+            style = "japanese_variety"
         cap_text = caption_texts[index] if index < len(caption_texts) else text
 
         # 세그먼트별 영상 우선, 없으면 전역 fallback
@@ -3535,9 +3806,8 @@ def _auto_jp_flow(config: AppConfig, progress, status_box, extra_hint: str = "")
             "BGM 파일을 넣어주세요. (PIXABAY_API_KEY가 있으면 자동 다운로드 시도)"
         )
 
-    # ── 배경 영상 — Pixabay 우선, Pexels 폴백 ─────────────
-    # Pixabay: 한국 여행 영상 풍부 + 이미 BGM에 사용 중인 API key
-    # Pexels: portrait 한국 영상 부족 → 폴백으로만 사용
+    # ── 배경 영상 — Minecraft Parkour(yt-dlp) 우선, Pixabay/Pexels 폴백 ─────────────
+    # 일본 쇼츠 타겟: Minecraft Parkour No Copyright 영상을 YouTube에서 다운로드
     generated_bg_paths = _get_generated_bg_paths(config, len(texts))
     unique_kws = list(dict.fromkeys(visual_keywords))
     bg_video_paths: List[Optional[str]] = []
@@ -3546,6 +3816,44 @@ def _auto_jp_flow(config: AppConfig, progress, status_box, extra_hint: str = "")
         bg_video_paths = [None] * len(texts)
         bg_image_paths = generated_bg_paths
         _telemetry_log("생성 배경 이미지 사용", config)
+    elif config.use_bg_videos and config.use_minecraft_parkour_bg:
+        # 1순위: YouTube Minecraft Parkour (일본 쇼츠 타겟)
+        backgrounds_dir = os.path.join(config.assets_dir, "backgrounds")
+        mc_path = fetch_youtube_minecraft_parkour_video(backgrounds_dir, config.width, config.height)
+        if mc_path:
+            bg_video_paths = [mc_path] * len(texts)
+            placeholder = _ensure_placeholder_image(config)
+            bg_image_paths = [placeholder] * len(texts)
+            _telemetry_log("Minecraft Parkour 배경 영상 사용", config)
+            st.info("배경 영상: Minecraft Parkour (YouTube)")
+        else:
+            _telemetry_log("Minecraft Parkour 다운로드 실패 — Pixabay/Pexels 폴백", config)
+            # 폴백: Pixabay/Pexels
+            if config.pixabay_api_key or config.pexels_api_key:
+                _status_update(progress, status_box, 0.22, "배경 영상 다운로드 중 (Pixabay 폴백)")
+                kw_to_path = {}
+                kw_to_image = {}
+                for kw in unique_kws:
+                    path = None
+                    if config.pixabay_api_key:
+                        path = fetch_pixabay_video(kw, config.pixabay_api_key, config.width, config.height)
+                    if not path and config.pexels_api_key:
+                        path = fetch_pexels_video(kw, config.pexels_api_key, "/tmp/pexels_bg", config.width, config.height)
+                    kw_to_path[kw] = path
+                    if not path and config.pexels_api_key:
+                        kw_to_image[kw] = fetch_pexels_image(kw, config.pexels_api_key, "/tmp/pexels_bg_images")
+                    else:
+                        kw_to_image[kw] = None
+                for kw in visual_keywords:
+                    bg_video_paths.append(kw_to_path.get(kw))
+                    bg_image_paths.append(kw_to_image.get(kw))
+                if any(p is None for p in bg_image_paths):
+                    placeholder = _ensure_placeholder_image(config)
+                    bg_image_paths = [p or placeholder for p in bg_image_paths]
+            else:
+                bg_video_paths = [None] * len(texts)
+                placeholder = _ensure_placeholder_image(config)
+                bg_image_paths = [placeholder] * len(texts)
     elif (config.pixabay_api_key or config.pexels_api_key) and config.use_bg_videos:
         _telemetry_log(f"배경 영상 다운로드 시작 ({len(unique_kws)}개 키워드)", config)
         _status_update(progress, status_box, 0.22, f"배경 영상 다운로드 중 ({len(unique_kws)}개 키워드, Pixabay 우선)")
@@ -3670,7 +3978,7 @@ def _auto_jp_flow(config: AppConfig, progress, status_box, extra_hint: str = "")
     _telemetry_log("TTS 생성 시작", config)
     _status_update(progress, status_box, 0.50, "TTS 생성 중")
     try:
-        tts_openai(config, "。".join(texts), audio_path, voice=voice_id)
+        tts_generate(config, "。".join(texts), audio_path, voice=voice_id)
         _telemetry_log("TTS 생성 완료", config)
     except Exception as tts_err:
         err_msg = f"❌ TTS 생성 실패: {tts_err}"
@@ -3824,6 +4132,9 @@ def run_streamlit_app() -> None:
             os.path.join(config.assets_dir, "bgm", "trending"),
             # 무드별 BGM 디렉토리 (mystery_suspense / fast_exciting)
             *[os.path.join(config.assets_dir, "bgm", mood) for mood in BGM_MOOD_CATEGORIES],
+            os.path.join(config.assets_dir, "bgm", "minecraft"),
+            os.path.join(config.assets_dir, "backgrounds"),
+            os.path.join(config.assets_dir, "fonts"),
             os.path.join(config.assets_dir, "sfx"),
             os.path.join(config.assets_dir, "bg_videos"),
             config.generated_bg_dir,
@@ -4036,6 +4347,40 @@ def run_streamlit_app() -> None:
                     if gen_bg_manual:
                         bg_imgs_manual = gen_bg_manual
                         _telemetry_log("수동 렌더링: 생성 배경 이미지 사용", config)
+                    elif config.use_bg_videos and config.use_minecraft_parkour_bg:
+                        _status_update(progress, status_box, 0.25, "배경 영상 다운로드 중 (Minecraft Parkour)")
+                        _bg_dir_m = os.path.join(config.assets_dir, "backgrounds")
+                        _mc_m = fetch_youtube_minecraft_parkour_video(_bg_dir_m, config.width, config.height)
+                        if _mc_m:
+                            bg_vids_manual = [_mc_m] * len(texts)
+                            placeholder = _ensure_placeholder_image(config)
+                            bg_imgs_manual = [placeholder] * len(texts)
+                            _telemetry_log("수동 렌더링: Minecraft Parkour 배경 사용", config)
+                        elif (config.pixabay_api_key or config.pexels_api_key):
+                            _status_update(progress, status_box, 0.25, "배경 영상 다운로드 중 (Pixabay 폴백)")
+                            _kws_m = _script_to_visual_keywords(script)
+                            _unique_kws_m = list(dict.fromkeys(_kws_m))
+                            _kw_path_m = {}
+                            _kw_img_m = {}
+                            for _kw in _unique_kws_m:
+                                _p = None
+                                if config.pixabay_api_key:
+                                    _p = fetch_pixabay_video(_kw, config.pixabay_api_key, config.width, config.height)
+                                if not _p and config.pexels_api_key:
+                                    _p = fetch_pexels_video(_kw, config.pexels_api_key, "/tmp/pexels_bg", config.width, config.height)
+                                _kw_path_m[_kw] = _p
+                                if not _p and config.pexels_api_key:
+                                    _kw_img_m[_kw] = fetch_pexels_image(_kw, config.pexels_api_key, "/tmp/pexels_bg_images")
+                                else:
+                                    _kw_img_m[_kw] = None
+                            bg_vids_manual = [_kw_path_m.get(_kws_m[i] if i < len(_kws_m) else "") for i in range(len(texts))]
+                            bg_imgs_manual = [_kw_img_m.get(_kws_m[i] if i < len(_kws_m) else "") for i in range(len(texts))]
+                            if any(p is None for p in bg_imgs_manual):
+                                placeholder = _ensure_placeholder_image(config)
+                                bg_imgs_manual = [p or placeholder for p in bg_imgs_manual]
+                        else:
+                            placeholder = _ensure_placeholder_image(config)
+                            bg_imgs_manual = [placeholder] * len(texts)
                     elif (config.pixabay_api_key or config.pexels_api_key) and config.use_bg_videos:
                         _status_update(progress, status_box, 0.25, "배경 영상 다운로드 중 (Pixabay 우선)")
                         _kws_m = _script_to_visual_keywords(script)
@@ -4068,7 +4413,7 @@ def run_streamlit_app() -> None:
                     now = datetime.utcnow().strftime("%Y%m%d_%H%M%S")
                     audio_path = os.path.join(config.output_dir, f"tts_{now}.mp3")
                     voice_id = pick_voice_id(config.openai_tts_voices, config.openai_tts_voice_preference)
-                    tts_openai(config, "。".join(texts), audio_path, voice=voice_id)
+                    tts_generate(config, "。".join(texts), audio_path, voice=voice_id)
                     _status_update(progress, status_box, 0.6, "영상 렌더링")
                     output_path = os.path.join(config.output_dir, f"shorts_{now}.mp4")
                     try:
@@ -4769,7 +5114,7 @@ def run_batch(count: int, seed: str = "", beats: int = 7) -> None:
         now = datetime.utcnow().strftime("%Y%m%d_%H%M%S")
         audio_path = os.path.join(config.output_dir, f"tts_{now}_{index}.mp3")
         voice_id = pick_voice_id(config.openai_tts_voices, config.openai_tts_voice_preference)
-        tts_openai(config, "。".join(texts), audio_path, voice=voice_id)
+        tts_generate(config, "。".join(texts), audio_path, voice=voice_id)
         output_path = os.path.join(config.output_dir, f"shorts_{now}_{index}.mp4")
         bgm_path = match_bgm_by_mood(config, mood)
         # 세그먼트별 배경: 키워드 이미지 우선 (영상은 옵션)
@@ -4778,6 +5123,39 @@ def run_batch(count: int, seed: str = "", beats: int = 7) -> None:
         gen_bg_b = _get_generated_bg_paths(config, len(texts))
         if gen_bg_b:
             bg_imgs_b = gen_bg_b
+        elif config.use_bg_videos and config.use_minecraft_parkour_bg:
+            # Minecraft Parkour 배경 영상 우선 (일본 쇼츠 타겟)
+            _bg_dir = os.path.join(config.assets_dir, "backgrounds")
+            _mc_b = fetch_youtube_minecraft_parkour_video(_bg_dir, config.width, config.height)
+            if _mc_b:
+                bg_vids_b = [_mc_b] * len(texts)
+                placeholder = _ensure_placeholder_image(config)
+                bg_imgs_b = [placeholder] * len(texts)
+            else:
+                if config.pixabay_api_key or config.pexels_api_key:
+                    _unique_b = list(dict.fromkeys(visual_kws))
+                    _kw_path_b = {}
+                    _kw_img_b = {}
+                    for kw in _unique_b:
+                        _pb = None
+                        if config.pixabay_api_key:
+                            _pb = fetch_pixabay_video(kw, config.pixabay_api_key, config.width, config.height)
+                        if not _pb and config.pexels_api_key:
+                            _pb = fetch_pexels_video(kw, config.pexels_api_key, "/tmp/pexels_bg", config.width, config.height)
+                        _kw_path_b[kw] = _pb
+                        if not _pb and config.pexels_api_key:
+                            _kw_img_b[kw] = fetch_pexels_image(kw, config.pexels_api_key, "/tmp/pexels_bg_images")
+                        else:
+                            _kw_img_b[kw] = None
+                    bg_vids_b = [_kw_path_b.get(visual_kws[i] if i < len(visual_kws) else "") for i in range(len(texts))]
+                    bg_imgs_b = [_kw_img_b.get(visual_kws[i] if i < len(visual_kws) else "") for i in range(len(texts))]
+                    if any(p is None for p in bg_imgs_b):
+                        placeholder = _ensure_placeholder_image(config)
+                        bg_imgs_b = [p or placeholder for p in bg_imgs_b]
+                else:
+                    bg_vids_b = [None] * len(texts)
+                    placeholder = _ensure_placeholder_image(config)
+                    bg_imgs_b = [placeholder] * len(texts)
         elif (config.pixabay_api_key or config.pexels_api_key) and config.use_bg_videos:
             _unique_b = list(dict.fromkeys(visual_kws))
             _kw_path_b: Dict[str, Optional[str]] = {}
