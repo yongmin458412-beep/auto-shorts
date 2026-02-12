@@ -1421,9 +1421,9 @@ def _overlay_sticker(
     try:
         sticker = Image.open(asset_path).convert("RGBA")
         sticker = sticker.resize((size, size), Image.LANCZOS)
-        margin = 40
+        margin = 30
         x = canvas_width - size - margin
-        y = canvas_height - size - 200  # 자막 위
+        y = int(canvas_height * 0.10)   # 화면 상단 10% 위치 — 자막(하단)과 겹치지 않음
         base = image.convert("RGBA")
         base.paste(sticker, (x, y), sticker)
         return base.convert("RGB")
@@ -1449,14 +1449,96 @@ def _compose_frame(
     return composed
 
 
-# 한국 관련 Pexels 검색 보강 접미사 (결과가 0일 때 순서대로 fallback)
+# 한국 특화 fallback 쿼리 목록 (Pixabay / Pexels 공용)
 _KOREA_BG_FALLBACK_QUERIES = [
     "seoul korea street",
     "busan korea night",
     "korea food market",
     "seoul city korea",
     "korean street walking",
+    "korea travel",
+    "seoul nightlife",
 ]
+
+
+def fetch_pixabay_video(
+    query: str,
+    api_key: str,
+    canvas_w: int = 1080,
+    canvas_h: int = 1920,
+) -> Optional[str]:
+    """Pixabay Videos API에서 세로형 한국 배경영상 검색·다운로드.
+    세로형 = height > width인 영상만 우선. 없으면 가로형도 허용 (render_video에서 crop).
+    저장 위치: /tmp/pixabay_bg/
+    """
+    if not api_key:
+        return None
+    save_dir = "/tmp/pixabay_bg"
+    os.makedirs(save_dir, exist_ok=True)
+
+    def _try_q(q: str) -> Optional[str]:
+        try:
+            params = {
+                "key": api_key,
+                "q": q,
+                "video_type": "film",
+                "per_page": 15,
+                "safesearch": "true",
+            }
+            resp = requests.get(
+                "https://pixabay.com/api/videos/",
+                params=params,
+                timeout=30,
+            )
+            resp.raise_for_status()
+            hits = resp.json().get("hits", [])
+            if not hits:
+                return None
+            random.shuffle(hits)
+            # 세로형(portrait) 우선, 없으면 가로형도 허용
+            def _pick_url(hit: Dict[str, Any]) -> Optional[str]:
+                vids = hit.get("videos", {})
+                # large → medium → small 순서로 시도, 해상도 적당한 것 선택
+                for key in ("large", "medium", "small"):
+                    v = vids.get(key, {})
+                    url = v.get("url", "")
+                    if url:
+                        return url
+                return None
+
+            portrait = [h for h in hits if
+                        h.get("videos", {}).get("large", {}).get("height", 0) >
+                        h.get("videos", {}).get("large", {}).get("width", 1)]
+            candidates = portrait or hits
+            for hit in candidates[:8]:
+                url = _pick_url(hit)
+                if not url:
+                    continue
+                try:
+                    vresp = requests.get(url, stream=True, timeout=120)
+                    vresp.raise_for_status()
+                    fname = f"pxbay_{random.randint(100000, 999999)}.mp4"
+                    fpath = os.path.join(save_dir, fname)
+                    with open(fpath, "wb") as f_out:
+                        for chunk in vresp.iter_content(chunk_size=65536):
+                            f_out.write(chunk)
+                    return fpath
+                except Exception:
+                    continue
+        except Exception:
+            pass
+        return None
+
+    # 1차: 요청 쿼리
+    result = _try_q(query)
+    if result:
+        return result
+    # 2차~: 한국 특화 fallback
+    for fbq in _KOREA_BG_FALLBACK_QUERIES:
+        result = _try_q(fbq)
+        if result:
+            return result
+    return None
 
 
 def fetch_pexels_video(
@@ -2370,21 +2452,28 @@ def _auto_jp_flow(config: AppConfig, progress, status_box, extra_hint: str = "")
     bgm_path = match_bgm_by_mood(config, mood)
     bgm_display = os.path.basename(bgm_path) if bgm_path else "자동생성(ambient)"
 
-    # ── Pexels 배경 영상 — 세그먼트별 키워드로 다운로드 ──
-    vid_dir = os.path.join(config.assets_dir, "bg_videos")
+    # ── 배경 영상 — Pixabay 우선, Pexels 폴백 ─────────────
+    # Pixabay: 한국 여행 영상 풍부 + 이미 BGM에 사용 중인 API key
+    # Pexels: portrait 한국 영상 부족 → 폴백으로만 사용
+    unique_kws = list(dict.fromkeys(visual_keywords))
     bg_video_paths: List[Optional[str]] = []
-    if config.pexels_api_key:
-        # 고유 키워드만 다운로드 후 매핑 (중복 요청 방지)
-        unique_kws = list(dict.fromkeys(visual_keywords))
-        _status_update(progress, status_box, 0.22, f"배경 영상 다운로드 중 ({len(unique_kws)}개 키워드)")
+    if config.pixabay_api_key or config.pexels_api_key:
+        _status_update(progress, status_box, 0.22, f"배경 영상 다운로드 중 ({len(unique_kws)}개 키워드, Pixabay 우선)")
         kw_to_path: Dict[str, Optional[str]] = {}
         for kw in unique_kws:
-            kw_to_path[kw] = fetch_pexels_video(kw, config.pexels_api_key, vid_dir, config.width, config.height)
+            path: Optional[str] = None
+            # 1순위: Pixabay Videos
+            if config.pixabay_api_key:
+                path = fetch_pixabay_video(kw, config.pixabay_api_key, config.width, config.height)
+            # 2순위: Pexels (Pixabay 실패 시)
+            if not path and config.pexels_api_key:
+                path = fetch_pexels_video(kw, config.pexels_api_key, "/tmp/pexels_bg", config.width, config.height)
+            kw_to_path[kw] = path
         for kw in visual_keywords:
             bg_video_paths.append(kw_to_path.get(kw))
         downloaded = sum(1 for p in bg_video_paths if p)
         if downloaded:
-            st.info(f"배경 영상: {downloaded}/{len(texts)} 세그먼트 다운로드 완료")
+            st.info(f"배경 영상: {downloaded}/{len(texts)} 세그먼트 완료")
         else:
             st.warning("배경 영상 다운로드 실패 — 정적 이미지 배경으로 대체")
     else:
@@ -2699,16 +2788,20 @@ def run_streamlit_app() -> None:
                                 asset = random.choice(manifest_items)
                             assets.append(asset.path)
 
-                        # 세그먼트별 Pexels 배경 영상 다운로드
-                        vid_dir_m = os.path.join(config.assets_dir, "bg_videos")
+                        # 세그먼트별 배경 영상 — Pixabay 우선, Pexels 폴백
                         bg_vids_manual: List[Optional[str]] = [None] * len(texts)
-                        if config.pexels_api_key:
-                            _status_update(progress, status_box, 0.25, "배경 영상 다운로드 중")
+                        if config.pixabay_api_key or config.pexels_api_key:
+                            _status_update(progress, status_box, 0.25, "배경 영상 다운로드 중 (Pixabay 우선)")
                             _kws_m = _script_to_visual_keywords(script)
                             _unique_kws_m = list(dict.fromkeys(_kws_m))
                             _kw_path_m: Dict[str, Optional[str]] = {}
                             for _kw in _unique_kws_m:
-                                _kw_path_m[_kw] = fetch_pexels_video(_kw, config.pexels_api_key, vid_dir_m, config.width, config.height)
+                                _p: Optional[str] = None
+                                if config.pixabay_api_key:
+                                    _p = fetch_pixabay_video(_kw, config.pixabay_api_key, config.width, config.height)
+                                if not _p and config.pexels_api_key:
+                                    _p = fetch_pexels_video(_kw, config.pexels_api_key, "/tmp/pexels_bg", config.width, config.height)
+                                _kw_path_m[_kw] = _p
                             bg_vids_manual = [_kw_path_m.get(_kws_m[i] if i < len(_kws_m) else "") for i in range(len(texts))]
 
                         _status_update(progress, status_box, 0.3, "TTS 생성")
@@ -3312,15 +3405,18 @@ def run_batch(count: int, seed: str = "", beats: int = 7) -> None:
         tts_openai(config, "。".join(texts), audio_path, voice=voice_id)
         output_path = os.path.join(config.output_dir, f"shorts_{now}_{index}.mp4")
         bgm_path = match_bgm_by_mood(config, mood)
-        # 세그먼트별 배경 영상
-        vid_dir_b = os.path.join(config.assets_dir, "bg_videos")
+        # 세그먼트별 배경 영상 — Pixabay 우선, Pexels 폴백
         bg_vids_b: List[Optional[str]] = [None] * len(texts)
-        if config.pexels_api_key:
+        if config.pixabay_api_key or config.pexels_api_key:
             _unique_b = list(dict.fromkeys(visual_kws))
-            _kw_path_b: Dict[str, Optional[str]] = {
-                kw: fetch_pexels_video(kw, config.pexels_api_key, vid_dir_b, config.width, config.height)
-                for kw in _unique_b
-            }
+            _kw_path_b: Dict[str, Optional[str]] = {}
+            for kw in _unique_b:
+                _pb: Optional[str] = None
+                if config.pixabay_api_key:
+                    _pb = fetch_pixabay_video(kw, config.pixabay_api_key, config.width, config.height)
+                if not _pb and config.pexels_api_key:
+                    _pb = fetch_pexels_video(kw, config.pexels_api_key, "/tmp/pexels_bg", config.width, config.height)
+                _kw_path_b[kw] = _pb
             bg_vids_b = [_kw_path_b.get(visual_kws[i] if i < len(visual_kws) else "") for i in range(len(texts))]
         render_video(
             config=config,
