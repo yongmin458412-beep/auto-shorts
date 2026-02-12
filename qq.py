@@ -461,6 +461,9 @@ class AppConfig:
     pixabay_api_key: str
     use_bg_videos: bool
     render_threads: int
+    use_korean_template: bool
+    caption_max_chars: int
+    caption_hold_ratio: float
 
 
 def load_config() -> AppConfig:
@@ -525,8 +528,11 @@ def load_config() -> AppConfig:
         approve_keywords=_get_list("APPROVE_KEYWORDS") or ["승인", "approve", "ok", "yes"],
         swap_keywords=_get_list("SWAP_KEYWORDS") or ["교환", "swap", "change", "next"],
         pixabay_api_key=pixabay_api_key,
-        use_bg_videos=_get_bool("USE_BG_VIDEOS", True),
+        use_bg_videos=_get_bool("USE_BG_VIDEOS", False),
         render_threads=int(_get_secret("RENDER_THREADS", "2") or 2),
+        use_korean_template=_get_bool("USE_KOREAN_TEMPLATE", True),
+        caption_max_chars=int(_get_secret("CAPTION_MAX_CHARS", "18") or 18),
+        caption_hold_ratio=float(_get_secret("CAPTION_HOLD_RATIO", "0.8") or 0.8),
     )
 
 
@@ -890,16 +896,22 @@ JP_SHORTS_SYSTEM_PROMPT: str = """당신은 유튜브 쇼츠에서 조회수를 
 4) Reaction Outro (45~60초): 1인칭 혼잣말
    - 촬영 끄기 직전에 혼자 중얼거리는 느낌. "구독해주세요" 금지.
 
-### 2. 키워드 규칙
+### 2. 자막/반응 유도 규칙
+- script_ja는 **짧고 임팩트 있게** (한 문장, 너무 길게 쓰지 말 것).
+- meta.hashtags는 4~6개. 감정/논란/검증을 자극하는 태그 혼합.
+- meta.pinned_comment는 시청자 반응을 유도하는 질문형 한 줄(일본어 반말).
+
+### 3. 키워드 규칙
 visual_search_keyword는 Pexels에서 실제 영상을 찾을 수 있도록 **구체적인 명사(영어)** 위주로 작성.
 추상적 표현 금지. 가능하면 고유명사/장소/연도/사물 포함.
 
-### 3. JSON 출력 형식 (엄격 준수)
+### 4. JSON 출력 형식 (엄격 준수)
 {
   "meta": {
     "topic_en": "주제 키워드 (영어)",
     "title_ja": "일본어 제목 (클릭 유도형)",
     "hashtags": ["#태그1", "#태그2", "#태그3"],
+    "pinned_comment": "고정 댓글 (반응 유도 질문)",
     "bgm_mood": "mystery_suspense" 또는 "fast_exciting"
   },
   "story_timeline": [
@@ -982,7 +994,15 @@ def generate_script_jp(
     if meta.get("bgm_mood") not in BGM_MOOD_CATEGORIES:
         meta["bgm_mood"] = "mystery_suspense"
     if not meta.get("pinned_comment"):
-        meta["pinned_comment"] = ""
+        meta["pinned_comment"] = "これ、信じる？それとも…？コメントで教えて。"
+    # 해시태그 최소 4개 유지
+    if isinstance(meta.get("hashtags"), list) and len(meta["hashtags"]) < 4:
+        defaults = ["#衝撃", "#暴露", "#検証", "#裏話", "#都市伝説"]
+        for tag in defaults:
+            if len(meta["hashtags"]) >= 4:
+                break
+            if tag not in meta["hashtags"]:
+                meta["hashtags"].append(tag)
 
     # story_timeline 정렬 및 검증
     normalized: List[Dict[str, Any]] = []
@@ -1629,6 +1649,49 @@ def _wrap_cjk_text(text: str, max_width_px: int, font_size: int) -> List[str]:
     return lines or [text]
 
 
+def _shorten_caption_text(text: str, max_chars: int = 18) -> str:
+    if not text:
+        return text
+    # 문장 분리 — 첫 문장/구문만 사용
+    head = re.split(r"[。．.!?？！\\n、]", text, maxsplit=1)[0].strip()
+    if not head:
+        head = text.strip()
+    if len(head) > max_chars:
+        head = head[:max_chars].rstrip() + "…"
+    return head
+
+
+def _build_caption_texts(texts: List[str], max_chars: int) -> List[str]:
+    return [_shorten_caption_text(t, max_chars=max_chars) for t in texts]
+
+
+def _apply_korean_template(image: Image.Image, canvas_width: int, canvas_height: int) -> Image.Image:
+    """한국형 쇼츠 템플릿 느낌의 오버레이 (상·하단 그라디언트 + 얇은 프레임)."""
+    overlay = Image.new("RGBA", (canvas_width, canvas_height), (0, 0, 0, 0))
+    draw = ImageDraw.Draw(overlay)
+
+    grad_h = int(canvas_height * 0.18)
+    # 상단 그라디언트
+    for y in range(grad_h):
+        alpha = int(160 * (1 - y / max(1, grad_h)))
+        draw.line([(0, y), (canvas_width, y)], fill=(0, 0, 0, alpha))
+    # 하단 그라디언트
+    for y in range(grad_h):
+        alpha = int(200 * (y / max(1, grad_h)))
+        draw.line(
+            [(0, canvas_height - grad_h + y), (canvas_width, canvas_height - grad_h + y)],
+            fill=(0, 0, 0, alpha),
+        )
+    # 얇은 프레임
+    frame_margin = max(6, int(canvas_width * 0.006))
+    draw.rectangle(
+        [frame_margin, frame_margin, canvas_width - frame_margin, canvas_height - frame_margin],
+        outline=(255, 255, 255, 40),
+        width=2,
+    )
+    return Image.alpha_composite(image.convert("RGBA"), overlay).convert("RGB")
+
+
 def _draw_subtitle(
     image: Image.Image,
     text: str,
@@ -1636,6 +1699,9 @@ def _draw_subtitle(
     canvas_width: int,
     canvas_height: int,
     style: str = "default",
+    t: Optional[float] = None,
+    duration: Optional[float] = None,
+    hold_ratio: float = 1.0,
 ) -> Image.Image:
     """자막을 YouTube Shorts 안전 영역(화면 60% 지점)에 렌더링.
     모바일 Shorts 하단 UI(제목·좋아요·댓글 등)가 화면 하단 ~30%를 덮으므로
@@ -1643,6 +1709,14 @@ def _draw_subtitle(
     """
     if not MOVIEPY_AVAILABLE:
         raise RuntimeError(f"MoviePy/PIL not available: {MOVIEPY_ERROR}")
+    # 진행률 기반 노출 제어 (자막을 더 짧게 보여줌)
+    if duration and t is not None and duration > 0:
+        progress = max(0.0, min(t / duration, 1.0))
+        if progress > max(0.05, min(hold_ratio, 1.0)):
+            return image
+    else:
+        progress = 0.0
+
     # 폰트 크기: 1080px 기준 72px (가독성 향상)
     font_size = max(52, canvas_width // 15)
     font = _load_font(font_path, font_size)
@@ -1669,6 +1743,17 @@ def _draw_subtitle(
         text_fill = (255, 255, 255)
         stroke_fill = (0, 0, 0)
         stroke_width = 3
+
+    # 애니메이션: 팝업 + 살짝 위/아래 이동 + 페이드 아웃
+    scale = 1.0
+    y_bounce = 0
+    alpha_mul = 1.0
+    if duration and t is not None and duration > 0:
+        pop_t = min(max(progress / 0.15, 0.0), 1.0)
+        scale = 0.92 + 0.08 * pop_t
+        y_bounce = int((1.0 - pop_t) * 12)
+        if progress > 0.85:
+            alpha_mul = max(0.0, 1.0 - (progress - 0.85) / 0.15)
 
     # 반투명 배경 박스 (텍스트 크기에 맞게만, 화면 하단까지 늘리지 않음)
     box_pad = 18
@@ -1701,23 +1786,27 @@ def _draw_subtitle(
                 fill=box_fill,
             )
     image = Image.alpha_composite(image.convert("RGBA"), overlay).convert("RGB")
-    draw = ImageDraw.Draw(image)
+    text_layer = Image.new("RGBA", image.size, (0, 0, 0, 0))
+    draw = ImageDraw.Draw(text_layer)
     y = box_y
     for line in lines:
+        scaled_size = max(20, int(font_size * scale))
+        scaled_font = _load_font(font_path, scaled_size)
         try:
-            lw = font.getbbox(line)[2]
+            lw = scaled_font.getbbox(line)[2]
         except Exception:
-            lw = len(line) * font_size
+            lw = len(line) * scaled_size
         lx = max(pad_x, (canvas_width - lw) // 2)
         draw.text(
-            (lx, y),
+            (lx, y + y_bounce),
             line,
-            font=font,
-            fill=text_fill,
+            font=scaled_font,
+            fill=(text_fill[0], text_fill[1], text_fill[2], int(255 * alpha_mul)),
             stroke_width=stroke_width,
-            stroke_fill=stroke_fill,
+            stroke_fill=(stroke_fill[0], stroke_fill[1], stroke_fill[2], int(255 * alpha_mul)),
         )
         y += line_h
+    image = Image.alpha_composite(image.convert("RGBA"), text_layer).convert("RGB")
     return image
 
 
@@ -1796,12 +1885,15 @@ def _compose_frame(
     font_path: str,
     style: str = "default",
     overlay_mode: str = "off",
+    use_template: bool = True,
 ) -> Image.Image:
     """정적 이미지 배경 프레임 생성 (배경영상 없을 때 fallback)."""
     if not MOVIEPY_AVAILABLE:
         raise RuntimeError(f"MoviePy/PIL not available: {MOVIEPY_ERROR}")
     base = Image.open(asset_path).convert("RGB")
-    background = _make_background(base, size)
+    background = _fit_image_to_canvas(base, size)
+    if use_template:
+        background = _apply_korean_template(background, size[0], size[1])
     composed = background.copy()
     width, height = size
     composed = _draw_subtitle(composed, text, font_path, width, height, style=style)
@@ -1900,6 +1992,90 @@ def fetch_pixabay_video(
         if result:
             return result
     return None
+
+
+def fetch_pixabay_image(
+    query: str,
+    api_key: str,
+    output_dir: str = "/tmp/pixabay_images",
+) -> Optional[str]:
+    if not api_key:
+        return None
+    save_dir = _ensure_writable_dir(output_dir, "/tmp/pixabay_images")
+
+    def _try_q(q: str) -> Optional[str]:
+        try:
+            params = {
+                "key": api_key,
+                "q": q,
+                "image_type": "photo",
+                "orientation": "vertical",
+                "per_page": 10,
+                "safesearch": "true",
+            }
+            resp = requests.get("https://pixabay.com/api/", params=params, timeout=30)
+            if resp.status_code != 200:
+                return None
+            hits = resp.json().get("hits", []) or []
+            if not hits:
+                return None
+            random.shuffle(hits)
+            for hit in hits[:6]:
+                url = hit.get("largeImageURL") or hit.get("webformatURL") or hit.get("previewURL")
+                if not url:
+                    continue
+                try:
+                    img_resp = requests.get(url, stream=True, timeout=60)
+                    img_resp.raise_for_status()
+                    ext = os.path.splitext(urlparse(url).path)[1] or ".jpg"
+                    fname = f"pximg_{random.randint(100000, 999999)}{ext}"
+                    fpath = os.path.join(save_dir, fname)
+                    with open(fpath, "wb") as out:
+                        for chunk in img_resp.iter_content(chunk_size=65536):
+                            out.write(chunk)
+                    return fpath
+                except Exception:
+                    continue
+        except Exception:
+            return None
+        return None
+
+    result = _try_q(query)
+    if result:
+        return result
+    for fbq in _GLOBAL_BG_FALLBACK_QUERIES:
+        result = _try_q(fbq)
+        if result:
+            return result
+    return None
+
+
+def fetch_segment_images(
+    config: AppConfig,
+    keywords: List[str],
+) -> List[Optional[str]]:
+    if not keywords:
+        return []
+    unique_kws = [kw for kw in dict.fromkeys(keywords) if kw]
+    kw_to_path: Dict[str, Optional[str]] = {}
+    for kw in unique_kws:
+        path: Optional[str] = None
+        if config.pixabay_api_key:
+            path = fetch_pixabay_image(kw, config.pixabay_api_key, "/tmp/pixabay_images")
+        if not path and config.pexels_api_key:
+            path = fetch_pexels_image(kw, config.pexels_api_key, "/tmp/pexels_bg_images")
+        if not path:
+            for fbq in _GLOBAL_BG_FALLBACK_QUERIES:
+                if config.pixabay_api_key:
+                    path = fetch_pixabay_image(fbq, config.pixabay_api_key, "/tmp/pixabay_images")
+                if not path and config.pexels_api_key:
+                    path = fetch_pexels_image(fbq, config.pexels_api_key, "/tmp/pexels_bg_images")
+                if path:
+                    break
+        kw_to_path[kw] = path
+
+    placeholder = _ensure_placeholder_image(config)
+    return [kw_to_path.get(kw) or placeholder for kw in keywords]
 
 
 def fetch_pexels_video(
@@ -2011,7 +2187,7 @@ def _estimate_durations(texts: List[str], total_duration: float) -> List[float]:
     lengths = [max(len(text), 1) for text in texts]
     total = sum(lengths)
     raw = [(length / total) * total_duration for length in lengths]
-    minimum = 1.2
+    minimum = 0.8
     adjusted = [max(duration, minimum) for duration in raw]
     scale = total_duration / sum(adjusted)
     return [duration * scale for duration in adjusted]
@@ -2044,6 +2220,7 @@ def render_video(
     bg_video_path: str | None = None,
     bg_video_paths: Optional[List[Optional[str]]] = None,
     bg_image_paths: Optional[List[Optional[str]]] = None,
+    caption_texts: Optional[List[str]] = None,
 ) -> str:
     """
     TTS + 자막 + 에셋 스티커 + 배경영상(or 정적 이미지)으로 숏츠 영상 생성.
@@ -2057,6 +2234,7 @@ def render_video(
     if audio_clip.duration > max_duration:
         audio_clip = audio_clip.subclip(0, max_duration)
     durations = _estimate_durations(texts, audio_clip.duration)
+    caption_texts = caption_texts or texts
     clips = []
 
     # 경로 → VideoFileClip 캐시 (같은 파일 중복 오픈 방지)
@@ -2081,40 +2259,57 @@ def render_video(
             if caption_styles and index < len(caption_styles)
             else "default"
         )
+        cap_text = caption_texts[index] if index < len(caption_texts) else text
 
         # 세그먼트별 영상 우선, 없으면 전역 fallback
         seg_path = (bg_video_paths[index] if bg_video_paths and index < len(bg_video_paths) else None)
         bg_vid = _get_vid(seg_path) or global_bg_vid
+
+        # 클로저 캡처 (Python for-loop 캡처 이슈 방지)
+        _cap = cap_text
+        _asset = asset_path
+        _font = config.font_path
+        _style = style
+        _overlay_mode = overlay_mode
+        _hold_ratio = float(getattr(config, "caption_hold_ratio", 1.0) or 1.0)
+        _use_template = bool(getattr(config, "use_korean_template", False))
+
+        def _render_frame(get_frame, t, __cap=_cap, __asset=_asset, __font=_font, __style=_style, __overlay=_overlay_mode, __dur=dur):
+            frame = get_frame(t)
+            img = Image.fromarray(frame).convert("RGB")
+            if _use_template:
+                img = _apply_korean_template(img, W, H)
+            img = _draw_subtitle(
+                img,
+                __cap,
+                __font,
+                W,
+                H,
+                style=__style,
+                t=t,
+                duration=__dur,
+                hold_ratio=_hold_ratio,
+            )
+            img = _maybe_overlay_sticker(img, __asset, W, H, mode=__overlay, size=260)
+            return np.array(img)
 
         if bg_vid is not None:
             # 배경 영상에서 랜덤 오프셋 구간 추출
             max_start = max(bg_vid.duration - dur - 0.1, 0)
             seg_start = random.uniform(0, max_start) if max_start > 0 else 0
             seg = bg_vid.subclip(seg_start, seg_start + dur)
-
-            # 클로저 캡처 (Python for-loop 캡처 이슈 방지)
-            _text = text
-            _asset = asset_path
-            _font = config.font_path
-            _style = style
-            _overlay_mode = overlay_mode
-
-            def _make_frame(frame, __text=_text, __asset=_asset, __font=_font, __style=_style, __overlay=_overlay_mode):
-                img = Image.fromarray(frame).convert("RGB")
-                img = _draw_subtitle(img, __text, __font, W, H, style=__style)
-                img = _maybe_overlay_sticker(img, __asset, W, H, mode=__overlay, size=260)
-                return np.array(img)
-
-            clip = seg.fl_image(_make_frame).set_duration(dur)
+            clip = seg.fl(_render_frame).set_duration(dur)
         else:
-            # fallback: 정적 이미지 배경
+            # fallback: 정적 이미지 배경 (대본 키워드 이미지)
             bg_img_path = (
                 bg_image_paths[index]
                 if bg_image_paths and index < len(bg_image_paths) and bg_image_paths[index]
                 else asset_path
             )
-            frame_img = _compose_frame(bg_img_path, text, (W, H), config.font_path, style=style, overlay_mode=overlay_mode)
-            clip = ImageClip(np.array(frame_img)).set_duration(dur)
+            bg_img = Image.open(bg_img_path).convert("RGB")
+            bg_img = _fit_image_to_canvas(bg_img, (W, H))
+            base_clip = ImageClip(np.array(bg_img)).set_duration(dur)
+            clip = base_clip.fl(_render_frame)
             clip = clip.fx(vfx.resize, lambda t, d=dur: 1 + 0.02 * (t / max(d, 0.1)))
 
         clips.append(clip)
@@ -2958,6 +3153,7 @@ def _auto_jp_flow(config: AppConfig, progress, status_box, extra_hint: str = "")
     visual_keywords = _script_to_visual_keywords(script)
     roles = _script_to_roles(script)
     caption_styles = _build_caption_styles(roles, len(texts))
+    caption_texts = _build_caption_texts(texts, config.caption_max_chars)
 
     st.info(f"제목: **{video_title}** | 무드: **{mood}**")
 
@@ -3013,9 +3209,17 @@ def _auto_jp_flow(config: AppConfig, progress, status_box, extra_hint: str = "")
         else:
             st.warning("배경 영상 다운로드 실패 — 정적 이미지 배경으로 대체")
             _telemetry_log("배경 영상 다운로드 실패 — 정적 이미지로 대체", config)
+        if any(p is None for p in bg_image_paths):
+            placeholder = _ensure_placeholder_image(config)
+            bg_image_paths = [p or placeholder for p in bg_image_paths]
+    elif config.pixabay_api_key or config.pexels_api_key:
+        bg_video_paths = [None] * len(texts)
+        bg_image_paths = fetch_segment_images(config, visual_keywords)
+        _telemetry_log("키워드 이미지 수집 완료", config)
     else:
         bg_video_paths = [None] * len(texts)
-        bg_image_paths = [None] * len(texts)
+        placeholder = _ensure_placeholder_image(config)
+        bg_image_paths = [placeholder] * len(texts)
 
     # ── 에셋 선택 ─────────────────────────────────────────
     mood_to_cat = {
@@ -3127,6 +3331,7 @@ def _auto_jp_flow(config: AppConfig, progress, status_box, extra_hint: str = "")
             bg_image_paths=bg_image_paths,
             caption_styles=caption_styles,
             overlay_mode=config.asset_overlay_mode,
+            caption_texts=caption_texts,
         )
         _telemetry_log("영상 렌더링 완료", config)
     except Exception as render_err:
@@ -3226,6 +3431,8 @@ def run_streamlit_app() -> None:
         st.sidebar.write("Pixabay BGM: 미설정")
     st.sidebar.write(f"배경 영상 사용: {'예' if config.use_bg_videos else '아니오'}")
     st.sidebar.write(f"렌더 스레드: {config.render_threads}")
+    st.sidebar.write(f"템플릿: {'켜짐' if config.use_korean_template else '꺼짐'}")
+    st.sidebar.write(f"자막 길이: {config.caption_max_chars}자")
     if not MOVIEPY_AVAILABLE:
         st.sidebar.error(f"MoviePy 오류: {MOVIEPY_ERROR}")
 
@@ -3253,6 +3460,9 @@ def run_streamlit_app() -> None:
         "- `BGM_MODE`, `BGM_VOLUME` (배경음악)\n"
         "- `USE_BG_VIDEOS` (배경 영상 사용 여부)\n"
         "- `RENDER_THREADS` (렌더링 스레드 수)\n\n"
+        "- `USE_KOREAN_TEMPLATE` (한국형 템플릿 오버레이)\n"
+        "- `CAPTION_MAX_CHARS` (자막 최대 글자수)\n"
+        "- `CAPTION_HOLD_RATIO` (자막 표시 비율)\n\n"
         "**BGM 무드 폴더:** `assets/bgm/mystery_suspense/`, `assets/bgm/fast_exciting/`"
     )
     missing = _missing_required(config)
@@ -3359,133 +3569,147 @@ def run_streamlit_app() -> None:
                     st.error(f"MoviePy가 설치되지 않았습니다: {MOVIEPY_ERROR}")
                     return
                 if not manifest_items:
-                    st.error("에셋이 없습니다. 먼저 이미지를 추가하세요.")
-                else:
-                    # UI에서 편집한 텍스트로 texts 재구성
-                    texts = [l.strip() for l in body_val.split("\n") if l.strip()]
-                    if not texts:
-                        st.error("렌더링할 문장이 없습니다.")
-                    else:
-                        mood = _mood_val
-                        _status_update(progress, status_box, 0.15, f"BGM 매칭 중 ({mood})")
-                        bgm_path = match_bgm_by_mood(config, mood)
-                        if not bgm_path or not os.path.exists(bgm_path):
-                            st.warning(
-                                "BGM 파일을 찾지 못했습니다. "
-                                "assets/bgm/mystery_suspense 또는 assets/bgm/fast_exciting 폴더에 "
-                                "BGM 파일을 넣어주세요. (PIXABAY_API_KEY가 있으면 자동 다운로드 시도)"
-                            )
-                        roles = _script_to_roles(script)
-                        caption_styles = _build_caption_styles(roles, len(texts))
+                    st.warning("에셋이 없어도 배경 이미지로 렌더링을 진행합니다.")
 
-                        mood_to_cat = {
-                            "mystery_suspense": "shocking",
-                            "fast_exciting": "exciting",
-                            "mystery": "shocking",
-                            "suspense": "shocking",
-                            "exciting": "exciting",
-                            "informative": "humor",
-                            "emotional": "touching",
-                        }
-                        cat = mood_to_cat.get(mood, "exciting")
-                        assets = []
+                # UI에서 편집한 텍스트로 texts 재구성
+                texts = [l.strip() for l in body_val.split("\n") if l.strip()]
+                if not texts:
+                    st.error("렌더링할 문장이 없습니다.")
+                else:
+                    mood = _mood_val
+                    _status_update(progress, status_box, 0.15, f"BGM 매칭 중 ({mood})")
+                    bgm_path = match_bgm_by_mood(config, mood)
+                    if not bgm_path or not os.path.exists(bgm_path):
+                        st.warning(
+                            "BGM 파일을 찾지 못했습니다. "
+                            "assets/bgm/mystery_suspense 또는 assets/bgm/fast_exciting 폴더에 "
+                            "BGM 파일을 넣어주세요. (PIXABAY_API_KEY가 있으면 자동 다운로드 시도)"
+                        )
+                    roles = _script_to_roles(script)
+                    caption_styles = _build_caption_styles(roles, len(texts))
+                    caption_texts = _build_caption_texts(texts, config.caption_max_chars)
+
+                    mood_to_cat = {
+                        "mystery_suspense": "shocking",
+                        "fast_exciting": "exciting",
+                        "mystery": "shocking",
+                        "suspense": "shocking",
+                        "exciting": "exciting",
+                        "informative": "humor",
+                        "emotional": "touching",
+                    }
+                    cat = mood_to_cat.get(mood, "exciting")
+                    assets = []
+                    if manifest_items:
                         for _ in texts:
                             asset = pick_asset_by_category(manifest_items, cat)
                             if not asset:
                                 asset = random.choice(manifest_items)
                             assets.append(asset.path)
+                    else:
+                        placeholder = _ensure_placeholder_image(config)
+                        assets = [placeholder] * len(texts)
 
-                        # 세그먼트별 배경 영상 — Pixabay 우선, Pexels 폴백
-                        bg_vids_manual: List[Optional[str]] = [None] * len(texts)
-                        bg_imgs_manual: List[Optional[str]] = [None] * len(texts)
-                        gen_bg_manual = _get_generated_bg_paths(config, len(texts))
-                        if gen_bg_manual:
-                            bg_imgs_manual = gen_bg_manual
-                            _telemetry_log("수동 렌더링: 생성 배경 이미지 사용", config)
-                        elif (config.pixabay_api_key or config.pexels_api_key) and config.use_bg_videos:
-                            _status_update(progress, status_box, 0.25, "배경 영상 다운로드 중 (Pixabay 우선)")
-                            _kws_m = _script_to_visual_keywords(script)
-                            _unique_kws_m = list(dict.fromkeys(_kws_m))
-                            _kw_path_m: Dict[str, Optional[str]] = {}
-                            _kw_img_m: Dict[str, Optional[str]] = {}
-                            for _kw in _unique_kws_m:
-                                _p: Optional[str] = None
-                                if config.pixabay_api_key:
-                                    _p = fetch_pixabay_video(_kw, config.pixabay_api_key, config.width, config.height)
-                                if not _p and config.pexels_api_key:
-                                    _p = fetch_pexels_video(_kw, config.pexels_api_key, "/tmp/pexels_bg", config.width, config.height)
-                                _kw_path_m[_kw] = _p
-                                if not _p and config.pexels_api_key:
-                                    _kw_img_m[_kw] = fetch_pexels_image(_kw, config.pexels_api_key, "/tmp/pexels_bg_images")
-                                else:
-                                    _kw_img_m[_kw] = None
-                            bg_vids_manual = [_kw_path_m.get(_kws_m[i] if i < len(_kws_m) else "") for i in range(len(texts))]
-                            bg_imgs_manual = [_kw_img_m.get(_kws_m[i] if i < len(_kws_m) else "") for i in range(len(texts))]
-
-                        _status_update(progress, status_box, 0.3, "TTS 생성")
-                        now = datetime.utcnow().strftime("%Y%m%d_%H%M%S")
-                        audio_path = os.path.join(config.output_dir, f"tts_{now}.mp3")
-                        voice_id = pick_voice_id(config.openai_tts_voices, config.openai_tts_voice_preference)
-                        tts_openai(config, "。".join(texts), audio_path, voice=voice_id)
-                        _status_update(progress, status_box, 0.6, "영상 렌더링")
-                        output_path = os.path.join(config.output_dir, f"shorts_{now}.mp4")
-                        try:
-                            render_video(
-                                config=config,
-                                asset_paths=assets,
-                                texts=texts,
-                                tts_audio_path=audio_path,
-                                output_path=output_path,
-                                bgm_path=bgm_path,
-                                bgm_volume=config.bgm_volume,
-                                bg_video_paths=bg_vids_manual,
-                                bg_image_paths=bg_imgs_manual,
-                                caption_styles=caption_styles,
-                                overlay_mode=config.asset_overlay_mode,
-                            )
-                            _telemetry_log("수동 렌더링 완료", config)
-                        except Exception as render_err:
-                            _telemetry_log(f"수동 렌더링 실패: {render_err}", config)
-                            st.error(f"영상 렌더링 실패: {render_err}")
-                            return
-                        video_id = ""
-                        video_url = ""
-                        if config.enable_youtube_upload:
-                            _status_update(progress, status_box, 0.85, "유튜브 업로드")
-                            result = upload_video(
-                                config=config,
-                                file_path=output_path,
-                                title=video_title_val,
-                                description=pinned_val + "\n\n" + hashtags_val,
-                                tags=hashtags_val.split(),
-                            )
-                            video_id = result.get("video_id", "")
-                            video_url = result.get("video_url", "")
-                        else:
-                            _status_update(progress, status_box, 0.85, "유튜브 업로드(스킵)")
-                        log_row = {
-                            "date_jst": datetime.utcnow().strftime("%Y-%m-%d %H:%M:%S"),
-                            "title_ja": video_title_val,
-                            "topic_theme": video_title_val,
-                            "hashtags_ja": hashtags_val,
-                            "mood": mood,
-                            "pinned_comment": pinned_val,
-                            "voice_id": voice_id,
-                            "video_path": output_path,
-                            "youtube_video_id": video_id,
-                            "youtube_url": video_url,
-                            "status": "ok",
-                            "error": "",
-                        }
-                        try:
-                            append_publish_log(config, log_row)
-                        except Exception:
-                            pass
-                        _write_local_log(os.path.join(config.output_dir, "runs.jsonl"), log_row)
-                        _status_update(progress, status_box, 1.0, "완료")
-                        st.video(output_path)
-                        if video_url:
-                            st.success(video_url)
+                    # 세그먼트별 배경: 키워드 이미지 우선 (영상은 옵션)
+                    bg_vids_manual: List[Optional[str]] = [None] * len(texts)
+                    bg_imgs_manual: List[Optional[str]] = [None] * len(texts)
+                    gen_bg_manual = _get_generated_bg_paths(config, len(texts))
+                    if gen_bg_manual:
+                        bg_imgs_manual = gen_bg_manual
+                        _telemetry_log("수동 렌더링: 생성 배경 이미지 사용", config)
+                    elif (config.pixabay_api_key or config.pexels_api_key) and config.use_bg_videos:
+                        _status_update(progress, status_box, 0.25, "배경 영상 다운로드 중 (Pixabay 우선)")
+                        _kws_m = _script_to_visual_keywords(script)
+                        _unique_kws_m = list(dict.fromkeys(_kws_m))
+                        _kw_path_m: Dict[str, Optional[str]] = {}
+                        _kw_img_m: Dict[str, Optional[str]] = {}
+                        for _kw in _unique_kws_m:
+                            _p: Optional[str] = None
+                            if config.pixabay_api_key:
+                                _p = fetch_pixabay_video(_kw, config.pixabay_api_key, config.width, config.height)
+                            if not _p and config.pexels_api_key:
+                                _p = fetch_pexels_video(_kw, config.pexels_api_key, "/tmp/pexels_bg", config.width, config.height)
+                            _kw_path_m[_kw] = _p
+                            if not _p and config.pexels_api_key:
+                                _kw_img_m[_kw] = fetch_pexels_image(_kw, config.pexels_api_key, "/tmp/pexels_bg_images")
+                            else:
+                                _kw_img_m[_kw] = None
+                        bg_vids_manual = [_kw_path_m.get(_kws_m[i] if i < len(_kws_m) else "") for i in range(len(texts))]
+                        bg_imgs_manual = [_kw_img_m.get(_kws_m[i] if i < len(_kws_m) else "") for i in range(len(texts))]
+                        if any(p is None for p in bg_imgs_manual):
+                            placeholder = _ensure_placeholder_image(config)
+                            bg_imgs_manual = [p or placeholder for p in bg_imgs_manual]
+                    elif config.pixabay_api_key or config.pexels_api_key:
+                        _kws_m = _script_to_visual_keywords(script)
+                        bg_imgs_manual = fetch_segment_images(config, _kws_m)
+                    else:
+                        placeholder = _ensure_placeholder_image(config)
+                        bg_imgs_manual = [placeholder] * len(texts)
+                    _status_update(progress, status_box, 0.3, "TTS 생성")
+                    now = datetime.utcnow().strftime("%Y%m%d_%H%M%S")
+                    audio_path = os.path.join(config.output_dir, f"tts_{now}.mp3")
+                    voice_id = pick_voice_id(config.openai_tts_voices, config.openai_tts_voice_preference)
+                    tts_openai(config, "。".join(texts), audio_path, voice=voice_id)
+                    _status_update(progress, status_box, 0.6, "영상 렌더링")
+                    output_path = os.path.join(config.output_dir, f"shorts_{now}.mp4")
+                    try:
+                        render_video(
+                            config=config,
+                            asset_paths=assets,
+                            texts=texts,
+                            tts_audio_path=audio_path,
+                            output_path=output_path,
+                            bgm_path=bgm_path,
+                            bgm_volume=config.bgm_volume,
+                            bg_video_paths=bg_vids_manual,
+                            bg_image_paths=bg_imgs_manual,
+                            caption_styles=caption_styles,
+                            overlay_mode=config.asset_overlay_mode,
+                            caption_texts=caption_texts,
+                        )
+                        _telemetry_log("수동 렌더링 완료", config)
+                    except Exception as render_err:
+                        _telemetry_log(f"수동 렌더링 실패: {render_err}", config)
+                        st.error(f"영상 렌더링 실패: {render_err}")
+                        return
+                    video_id = ""
+                    video_url = ""
+                    if config.enable_youtube_upload:
+                        _status_update(progress, status_box, 0.85, "유튜브 업로드")
+                        result = upload_video(
+                            config=config,
+                            file_path=output_path,
+                            title=video_title_val,
+                            description=pinned_val + "\n\n" + hashtags_val,
+                            tags=hashtags_val.split(),
+                        )
+                        video_id = result.get("video_id", "")
+                        video_url = result.get("video_url", "")
+                    else:
+                        _status_update(progress, status_box, 0.85, "유튜브 업로드(스킵)")
+                    log_row = {
+                        "date_jst": datetime.utcnow().strftime("%Y-%m-%d %H:%M:%S"),
+                        "title_ja": video_title_val,
+                        "topic_theme": video_title_val,
+                        "hashtags_ja": hashtags_val,
+                        "mood": mood,
+                        "pinned_comment": pinned_val,
+                        "voice_id": voice_id,
+                        "video_path": output_path,
+                        "youtube_video_id": video_id,
+                        "youtube_url": video_url,
+                        "status": "ok",
+                        "error": "",
+                    }
+                    try:
+                        append_publish_log(config, log_row)
+                    except Exception:
+                        pass
+                    _write_local_log(os.path.join(config.output_dir, "runs.jsonl"), log_row)
+                    _status_update(progress, status_box, 1.0, "완료")
+                    st.video(output_path)
+                    if video_url:
+                        st.success(video_url)
 
     if page == "토큰":
         st.header("유튜브 리프레시 토큰 발급")
@@ -4054,6 +4278,7 @@ def run_batch(count: int, seed: str = "", beats: int = 7) -> None:
         visual_kws = _script_to_visual_keywords(script)
         roles = _script_to_roles(script)
         caption_styles = _build_caption_styles(roles, len(texts))
+        caption_texts = _build_caption_texts(texts, config.caption_max_chars)
         mood_to_cat = {
             "mystery_suspense": "shocking",
             "fast_exciting": "exciting",
@@ -4080,7 +4305,7 @@ def run_batch(count: int, seed: str = "", beats: int = 7) -> None:
         tts_openai(config, "。".join(texts), audio_path, voice=voice_id)
         output_path = os.path.join(config.output_dir, f"shorts_{now}_{index}.mp4")
         bgm_path = match_bgm_by_mood(config, mood)
-        # 세그먼트별 배경 영상 — Pixabay 우선, Pexels 폴백
+        # 세그먼트별 배경: 키워드 이미지 우선 (영상은 옵션)
         bg_vids_b: List[Optional[str]] = [None] * len(texts)
         bg_imgs_b: List[Optional[str]] = [None] * len(texts)
         gen_bg_b = _get_generated_bg_paths(config, len(texts))
@@ -4103,6 +4328,14 @@ def run_batch(count: int, seed: str = "", beats: int = 7) -> None:
                     _kw_img_b[kw] = None
             bg_vids_b = [_kw_path_b.get(visual_kws[i] if i < len(visual_kws) else "") for i in range(len(texts))]
             bg_imgs_b = [_kw_img_b.get(visual_kws[i] if i < len(visual_kws) else "") for i in range(len(texts))]
+            if any(p is None for p in bg_imgs_b):
+                placeholder = _ensure_placeholder_image(config)
+                bg_imgs_b = [p or placeholder for p in bg_imgs_b]
+        elif config.pixabay_api_key or config.pexels_api_key:
+            bg_imgs_b = fetch_segment_images(config, visual_kws)
+        else:
+            placeholder = _ensure_placeholder_image(config)
+            bg_imgs_b = [placeholder] * len(texts)
         render_video(
             config=config,
             asset_paths=assets,
@@ -4115,6 +4348,7 @@ def run_batch(count: int, seed: str = "", beats: int = 7) -> None:
             bg_image_paths=bg_imgs_b,
             caption_styles=caption_styles,
             overlay_mode=config.asset_overlay_mode,
+            caption_texts=caption_texts,
         )
         video_id = ""
         video_url = ""
