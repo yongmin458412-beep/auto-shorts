@@ -900,6 +900,7 @@ JP_SHORTS_SYSTEM_PROMPT: str = """당신은 유튜브 쇼츠에서 조회수를 
 - script_ja는 **짧고 임팩트 있게** (한 문장, 너무 길게 쓰지 말 것).
 - meta.hashtags는 4~6개. 감정/논란/검증을 자극하는 태그 혼합.
 - meta.pinned_comment는 시청자 반응을 유도하는 질문형 한 줄(일본어 반말).
+- meta.pinned_comment_ko는 위 문장의 한국어 번역.
 
 ### 3. 키워드 규칙
 visual_search_keyword는 Pexels에서 실제 영상을 찾을 수 있도록 **구체적인 명사(영어)** 위주로 작성.
@@ -912,6 +913,7 @@ visual_search_keyword는 Pexels에서 실제 영상을 찾을 수 있도록 **�
     "title_ja": "일본어 제목 (클릭 유도형)",
     "hashtags": ["#태그1", "#태그2", "#태그3"],
     "pinned_comment": "고정 댓글 (반응 유도 질문)",
+    "pinned_comment_ko": "고정 댓글 한국어 번역",
     "bgm_mood": "mystery_suspense" 또는 "fast_exciting"
   },
   "story_timeline": [
@@ -995,6 +997,8 @@ def generate_script_jp(
         meta["bgm_mood"] = "mystery_suspense"
     if not meta.get("pinned_comment"):
         meta["pinned_comment"] = "これ、信じる？それとも…？コメントで教えて。"
+    if not meta.get("pinned_comment_ko"):
+        meta["pinned_comment_ko"] = "이거 믿어? 댓글로 말해줘."
     # 해시태그 최소 4개 유지
     if isinstance(meta.get("hashtags"), list) and len(meta["hashtags"]) < 4:
         defaults = ["#衝撃", "#暴露", "#検証", "#裏話", "#都市伝説"]
@@ -2978,6 +2982,43 @@ def _format_hashtags(tags: List[str]) -> str:
     return " ".join(tags)
 
 
+def _normalize_ko_lines(texts_ko: List[str], texts_ja: List[str]) -> List[str]:
+    if not texts_ko:
+        return texts_ja
+    normalized: List[str] = []
+    for idx, ja in enumerate(texts_ja):
+        ko = texts_ko[idx] if idx < len(texts_ko) else ""
+        normalized.append(ko if ko else ja)
+    return normalized
+
+
+def _build_upload_report_ko(
+    title: str,
+    video_url: str,
+    hashtags: List[str],
+    pinned_comment_ko: str,
+    texts_ko: List[str],
+    mood: str = "",
+) -> str:
+    lines = [
+        "[업로드 완료] 유튜브 쇼츠",
+        f"제목: {title}",
+        f"URL: {video_url}",
+    ]
+    if mood:
+        lines.append(f"무드: {mood}")
+    if hashtags:
+        lines.append(f"해시태그: {_format_hashtags(hashtags)}")
+    lines.append(f"고정댓글(한글): {pinned_comment_ko}")
+    lines.append("")
+    lines.append("[대본(한글)]")
+    for idx, line in enumerate(texts_ko, start=1):
+        if not line:
+            continue
+        lines.append(f"{idx}. {line}")
+    return "\n".join(lines)
+
+
 def _read_json_file(path: str, default: Any) -> Any:
     if not path:
         return default
@@ -3147,6 +3188,7 @@ def _auto_jp_flow(config: AppConfig, progress, status_box, extra_hint: str = "")
     hashtags = meta.get("hashtags", script.get("hashtags", []))
     mood = meta.get("bgm_mood", script.get("mood", "mystery_suspense"))
     pinned = meta.get("pinned_comment", script.get("pinned_comment", ""))
+    pinned_ko = meta.get("pinned_comment_ko", pinned)
 
     texts = _script_to_beats(script)
     texts_ko = _script_to_beats_ko(script)
@@ -3154,6 +3196,7 @@ def _auto_jp_flow(config: AppConfig, progress, status_box, extra_hint: str = "")
     roles = _script_to_roles(script)
     caption_styles = _build_caption_styles(roles, len(texts))
     caption_texts = _build_caption_texts(texts, config.caption_max_chars)
+    texts_ko_norm = _normalize_ko_lines(texts_ko, texts)
 
     st.info(f"제목: **{video_title}** | 무드: **{mood}**")
 
@@ -3383,17 +3426,25 @@ def _auto_jp_flow(config: AppConfig, progress, status_box, extra_hint: str = "")
     _status_update(progress, status_box, 1.0, "완료")
     st.video(output_path)
 
-    summary_text = (
-        f"[완료] 일본인 타겟 숏츠\n"
-        f"제목: {video_title}\n"
-        f"무드: {mood}\n"
-        f"고정댓글: {pinned}\n"
-    )
     if video_url:
-        summary_text += f"유튜브: {video_url}"
+        report = _build_upload_report_ko(
+            title=video_title,
+            video_url=video_url,
+            hashtags=hashtags,
+            pinned_comment_ko=pinned_ko,
+            texts_ko=texts_ko_norm,
+            mood=mood,
+        )
+        send_telegram_message(config.telegram_bot_token, config.telegram_admin_chat_id, report)
     else:
-        summary_text += f"로컬: {output_path}"
-    send_telegram_message(config.telegram_bot_token, config.telegram_admin_chat_id, summary_text)
+        summary_text = (
+            f"[완료] 일본인 타겟 숏츠\n"
+            f"제목: {video_title}\n"
+            f"무드: {mood}\n"
+            f"고정댓글: {pinned}\n"
+            f"로컬: {output_path}"
+        )
+        send_telegram_message(config.telegram_bot_token, config.telegram_admin_chat_id, summary_text)
     return True
 
 
@@ -3588,6 +3639,8 @@ def run_streamlit_app() -> None:
                     roles = _script_to_roles(script)
                     caption_styles = _build_caption_styles(roles, len(texts))
                     caption_texts = _build_caption_texts(texts, config.caption_max_chars)
+                    texts_ko_norm = _normalize_ko_lines(_texts_ko, texts)
+                    pinned_ko = _meta.get("pinned_comment_ko", pinned_val)
 
                     mood_to_cat = {
                         "mystery_suspense": "shocking",
@@ -3687,6 +3740,16 @@ def run_streamlit_app() -> None:
                         video_url = result.get("video_url", "")
                     else:
                         _status_update(progress, status_box, 0.85, "유튜브 업로드(스킵)")
+                    if video_url:
+                        report = _build_upload_report_ko(
+                            title=video_title_val,
+                            video_url=video_url,
+                            hashtags=hashtags_val.split(),
+                            pinned_comment_ko=pinned_ko,
+                            texts_ko=texts_ko_norm,
+                            mood=mood,
+                        )
+                        send_telegram_message(config.telegram_bot_token, config.telegram_admin_chat_id, report)
                     log_row = {
                         "date_jst": datetime.utcnow().strftime("%Y-%m-%d %H:%M:%S"),
                         "title_ja": video_title_val,
