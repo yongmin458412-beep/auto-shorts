@@ -446,6 +446,7 @@ class AppConfig:
     telegram_admin_chat_id: str
     telegram_timeout_sec: int
     telegram_offset_path: str
+    telegram_debug_logs: bool
     approve_keywords: List[str]
     swap_keywords: List[str]
     pixabay_api_key: str
@@ -495,6 +496,7 @@ def load_config() -> AppConfig:
         telegram_admin_chat_id=_get_secret("TELEGRAM_ADMIN_CHAT_ID", "") or "",
         telegram_timeout_sec=int(_get_secret("TELEGRAM_TIMEOUT_SEC", "600") or 600),
         telegram_offset_path=telegram_offset_path,
+        telegram_debug_logs=_get_bool("TELEGRAM_DEBUG_LOGS", True),
         approve_keywords=_get_list("APPROVE_KEYWORDS") or ["승인", "approve", "ok", "yes"],
         swap_keywords=_get_list("SWAP_KEYWORDS") or ["교환", "swap", "change", "next"],
         pixabay_api_key=_get_secret("PIXABAY_API_KEY", "") or "",
@@ -2325,6 +2327,31 @@ def send_telegram_message(token: str, chat_id: str, text: str) -> bool:
     return success
 
 
+def _telemetry_log(message: str, config: Optional[AppConfig] = None) -> bool:
+    """
+    디버그용 텔레그램 로그 전송 (진행 상황/오류 추적용)
+    TELEGRAM_DEBUG_LOGS=1 일 때만 동작.
+    """
+    token = ""
+    chat_id = ""
+    enabled = False
+    if config:
+        token = config.telegram_bot_token
+        chat_id = config.telegram_admin_chat_id
+        enabled = bool(config.telegram_debug_logs)
+    else:
+        token = _get_secret("TELEGRAM_BOT_TOKEN", "") or ""
+        chat_id = _get_secret("TELEGRAM_ADMIN_CHAT_ID", "") or ""
+        enabled = _get_bool("TELEGRAM_DEBUG_LOGS", True)
+    if not enabled or not token or not chat_id:
+        return False
+    prefix = "[auto-shorts]"
+    try:
+        return send_telegram_message(token, chat_id, f"{prefix} {message}")
+    except Exception:
+        return False
+
+
 def send_telegram_approval_request(
     token: str,
     chat_id: str,
@@ -2646,10 +2673,13 @@ def _auto_jp_flow(config: AppConfig, progress, status_box, extra_hint: str = "")
         return
 
     # ── 대본 생성 ─────────────────────────────────────────
+    _telemetry_log("자동 생성 시작 — 대본 생성 단계 진입", config)
     _status_update(progress, status_box, 0.10, "AI 대본 생성 중 (주제 자동 선정)...")
     try:
         script = generate_script_jp(config, extra_hint=extra_hint)
+        _telemetry_log("대본 생성 완료", config)
     except Exception as exc:
+        _telemetry_log(f"대본 생성 실패: {exc}", config)
         st.error(f"대본 생성 실패: {exc}")
         return
 
@@ -2671,9 +2701,11 @@ def _auto_jp_flow(config: AppConfig, progress, status_box, extra_hint: str = "")
     st.info(f"제목: **{video_title}** | 무드: **{mood}**")
 
     # ── BGM 매칭 ─────────────────────────────────────────
+    _telemetry_log(f"BGM 매칭 시작 (mood={mood})", config)
     _status_update(progress, status_box, 0.18, f"BGM 매칭 중 (무드: {mood})")
     bgm_path = match_bgm_by_mood(config, mood)
     bgm_display = os.path.basename(bgm_path) if bgm_path else "자동생성(ambient)"
+    _telemetry_log(f"BGM 매칭 결과: {bgm_display}", config)
     if not bgm_path or not os.path.exists(bgm_path):
         st.warning(
             "BGM 파일을 찾지 못했습니다. "
@@ -2687,6 +2719,7 @@ def _auto_jp_flow(config: AppConfig, progress, status_box, extra_hint: str = "")
     unique_kws = list(dict.fromkeys(visual_keywords))
     bg_video_paths: List[Optional[str]] = []
     if config.pixabay_api_key or config.pexels_api_key:
+        _telemetry_log(f"배경 영상 다운로드 시작 ({len(unique_kws)}개 키워드)", config)
         _status_update(progress, status_box, 0.22, f"배경 영상 다운로드 중 ({len(unique_kws)}개 키워드, Pixabay 우선)")
         kw_to_path: Dict[str, Optional[str]] = {}
         for kw in unique_kws:
@@ -2703,8 +2736,10 @@ def _auto_jp_flow(config: AppConfig, progress, status_box, extra_hint: str = "")
         downloaded = sum(1 for p in bg_video_paths if p)
         if downloaded:
             st.info(f"배경 영상: {downloaded}/{len(texts)} 세그먼트 완료")
+            _telemetry_log(f"배경 영상 다운로드 완료 {downloaded}/{len(texts)}", config)
         else:
             st.warning("배경 영상 다운로드 실패 — 정적 이미지 배경으로 대체")
+            _telemetry_log("배경 영상 다운로드 실패 — 정적 이미지로 대체", config)
     else:
         bg_video_paths = [None] * len(texts)
 
@@ -2757,30 +2792,37 @@ def _auto_jp_flow(config: AppConfig, progress, status_box, extra_hint: str = "")
         except Exception:
             pass
 
+    _telemetry_log("텔레그램 승인 요청 전송", config)
     _status_update(progress, status_box, 0.30, "텔레그램 승인 요청 전송")
     approval_msg_id = send_telegram_approval_request(
         config.telegram_bot_token, config.telegram_admin_chat_id, request_text
     )
     decision = wait_for_approval(config, progress, status_box, approval_message_id=approval_msg_id)
     if decision == "swap":
+        _telemetry_log("승인 요청 결과: 교환", config)
         send_telegram_message(config.telegram_bot_token, config.telegram_admin_chat_id, "🔄 교환 처리됨. 새 주제로 다시 생성합니다.")
         _auto_jp_flow(config, progress, status_box, extra_hint=extra_hint)
         return
+    _telemetry_log(f"승인 요청 결과: {decision}", config)
 
     # ── TTS 생성 ─────────────────────────────────────────
     now = datetime.utcnow().strftime("%Y%m%d_%H%M%S")
     audio_path = os.path.join(config.output_dir, f"tts_{now}.mp3")
     voice_id = pick_voice_id(config.openai_tts_voices, config.openai_tts_voice_preference)
+    _telemetry_log("TTS 생성 시작", config)
     _status_update(progress, status_box, 0.50, "TTS 생성 중")
     try:
         tts_openai(config, "。".join(texts), audio_path, voice=voice_id)
+        _telemetry_log("TTS 생성 완료", config)
     except Exception as tts_err:
         err_msg = f"❌ TTS 생성 실패: {tts_err}"
+        _telemetry_log(err_msg, config)
         st.error(err_msg)
         send_telegram_message(config.telegram_bot_token, config.telegram_admin_chat_id, err_msg)
         return
 
     # ── 영상 렌더링 ───────────────────────────────────────
+    _telemetry_log("영상 렌더링 시작", config)
     _status_update(progress, status_box, 0.65, "영상 렌더링 중")
     output_path = os.path.join(config.output_dir, f"shorts_{now}.mp4")
     render_video(
@@ -2795,11 +2837,13 @@ def _auto_jp_flow(config: AppConfig, progress, status_box, extra_hint: str = "")
         caption_styles=caption_styles,
         overlay_mode=config.asset_overlay_mode,
     )
+    _telemetry_log("영상 렌더링 완료", config)
 
     # ── 유튜브 업로드 ─────────────────────────────────────
     video_id = ""
     video_url = ""
     if config.enable_youtube_upload:
+        _telemetry_log("유튜브 업로드 시작", config)
         _status_update(progress, status_box, 0.85, "유튜브 업로드")
         result = upload_video(
             config=config,
@@ -2810,8 +2854,10 @@ def _auto_jp_flow(config: AppConfig, progress, status_box, extra_hint: str = "")
         )
         video_id = result.get("video_id", "")
         video_url = result.get("video_url", "")
+        _telemetry_log(f"유튜브 업로드 완료: {video_id}", config)
     else:
         _status_update(progress, status_box, 0.85, "유튜브 업로드(스킵)")
+        _telemetry_log("유튜브 업로드 스킵", config)
 
     # ── 로그 기록 ─────────────────────────────────────────
     log_row = {
@@ -2851,8 +2897,10 @@ def _auto_jp_flow(config: AppConfig, progress, status_box, extra_hint: str = "")
 
 
 def run_streamlit_app() -> None:
+    _telemetry_log("앱 시작: run_streamlit_app()", None)
     st.set_page_config(page_title="숏츠 자동화 스튜디오", layout="wide")
     config = load_config()
+    _telemetry_log("앱 설정 로드 완료", config)
     ensure_dirs(
         [
             config.assets_dir,
@@ -3714,6 +3762,7 @@ def run_batch(count: int, seed: str = "", beats: int = 7) -> None:
 
 def _run_streamlit_app_safe() -> None:
     try:
+        _telemetry_log("앱 부팅 시작", None)
         run_streamlit_app()
     except Exception:
         import traceback
@@ -3727,6 +3776,10 @@ def _run_streamlit_app_safe() -> None:
         try:
             with open("/tmp/auto_shorts_error.log", "w", encoding="utf-8") as file:
                 file.write(err)
+        except Exception:
+            pass
+        try:
+            _telemetry_log(f"앱 크래시:\n{err[-3500:]}", None)
         except Exception:
             pass
 
