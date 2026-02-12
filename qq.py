@@ -1375,23 +1375,33 @@ def _draw_subtitle(
     canvas_width: int,
     canvas_height: int,
 ) -> Image.Image:
-    """화면 하단 자막 영역에 반투명 배경 + 흰색 테두리 텍스트를 그립니다."""
+    """자막을 YouTube Shorts 안전 영역(화면 60% 지점)에 렌더링.
+    모바일 Shorts 하단 UI(제목·좋아요·댓글 등)가 화면 하단 ~30%를 덮으므로
+    자막을 화면의 55~65% 구간에 고정해 가려지지 않도록 함.
+    """
     if not MOVIEPY_AVAILABLE:
         raise RuntimeError(f"MoviePy/PIL not available: {MOVIEPY_ERROR}")
-    font_size = max(48, canvas_width // 18)
+    # 폰트 크기: 1080px 기준 72px (가독성 향상)
+    font_size = max(52, canvas_width // 15)
     font = _load_font(font_path, font_size)
-    pad_x = int(canvas_width * 0.05)
+    pad_x = int(canvas_width * 0.06)
     max_text_w = canvas_width - pad_x * 2
     lines = _wrap_cjk_text(text, max_text_w, font_size)
-    line_h = font_size + 10
+    line_h = font_size + 12
     total_h = line_h * len(lines) + 20
-    box_y = canvas_height - total_h - 80
-    # 반투명 배경 박스
+    # ── Shorts 안전 영역: 화면 55% 지점을 자막 중앙으로 ──
+    # 하단 UI 안전선: canvas_height * 0.68 이하
+    safe_bottom = int(canvas_height * 0.68)
+    box_y = safe_bottom - total_h
+    box_y = max(int(canvas_height * 0.45), box_y)  # 최소 45% 아래 유지
+    # 반투명 배경 박스 (텍스트 크기에 맞게만, 화면 하단까지 늘리지 않음)
+    box_pad = 18
     overlay = Image.new("RGBA", image.size, (0, 0, 0, 0))
     box_draw = ImageDraw.Draw(overlay)
     box_draw.rectangle(
-        [pad_x - 20, box_y - 10, canvas_width - pad_x + 20, canvas_height - 60],
-        fill=(0, 0, 0, 160),
+        [pad_x - box_pad, box_y - box_pad,
+         canvas_width - pad_x + box_pad, box_y + total_h + box_pad],
+        fill=(0, 0, 0, 170),
     )
     image = Image.alpha_composite(image.convert("RGBA"), overlay).convert("RGB")
     draw = ImageDraw.Draw(image)
