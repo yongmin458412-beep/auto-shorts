@@ -762,6 +762,9 @@ def fetch_bgm_from_pixabay(
         _append_bgm_debug(message)
 
     try:
+        # 저장 경로가 쓰기 불가면 /tmp 폴백
+        output_dir = _ensure_writable_dir(output_dir, "/tmp/auto_shorts_bgm")
+        _bgm_log(f"Pixabay BGM 저장 경로: {output_dir}")
         # Pixabay music API endpoint
         music_params = {
             "key": api_key,
