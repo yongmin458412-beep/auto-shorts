@@ -464,6 +464,9 @@ class AppConfig:
     use_korean_template: bool
     caption_max_chars: int
     caption_hold_ratio: float
+    thumbnail_enabled: bool
+    thumbnail_use_hook: bool
+    thumbnail_max_chars: int
 
 
 def load_config() -> AppConfig:
@@ -533,6 +536,9 @@ def load_config() -> AppConfig:
         use_korean_template=_get_bool("USE_KOREAN_TEMPLATE", True),
         caption_max_chars=int(_get_secret("CAPTION_MAX_CHARS", "18") or 18),
         caption_hold_ratio=float(_get_secret("CAPTION_HOLD_RATIO", "0.8") or 0.8),
+        thumbnail_enabled=_get_bool("THUMBNAIL_ENABLED", True),
+        thumbnail_use_hook=_get_bool("THUMBNAIL_USE_HOOK", True),
+        thumbnail_max_chars=int(_get_secret("THUMBNAIL_MAX_CHARS", "22") or 22),
     )
 
 
@@ -621,6 +627,65 @@ def normalize_hashtags(tags: List[str]) -> List[str]:
             tag = f"#{tag}"
         cleaned.append(tag)
     return cleaned
+
+
+def _compress_to_four_act(items: List[Dict[str, Any]]) -> List[Dict[str, Any]]:
+    order = ["hook", "conflict", "twist", "reaction"]
+    picked: Dict[str, Dict[str, Any]] = {}
+    for item in items:
+        role = item.get("role")
+        if role in order and role not in picked:
+            picked[role] = item
+    if len(picked) == 4:
+        compressed = [picked[r] for r in order]
+        for idx, item in enumerate(compressed, start=1):
+            item["order"] = idx
+        return compressed
+    return items
+
+
+def _check_story_quality(items: List[Dict[str, Any]]) -> List[str]:
+    issues: List[str] = []
+    required = ["hook", "conflict", "twist", "reaction"]
+    roles = {item.get("role") for item in items}
+    missing = [r for r in required if r not in roles]
+    if missing:
+        issues.append(f"역할 누락: {', '.join(missing)}")
+        return issues
+
+    def _first_text(role: str) -> str:
+        for item in items:
+            if item.get("role") == role:
+                return str(item.get("script_ja", "")).strip()
+        return ""
+
+    hook = _first_text("hook")
+    conflict = _first_text("conflict")
+    twist = _first_text("twist")
+    reaction = _first_text("reaction")
+
+    def _len_bad(text: str) -> bool:
+        return len(text) < 8 or len(text) > 50
+
+    if _len_bad(hook):
+        issues.append("Hook 길이 부적절")
+    if _len_bad(conflict):
+        issues.append("Conflict 길이 부적절")
+    if _len_bad(twist):
+        issues.append("Twist 길이 부적절")
+    if _len_bad(reaction):
+        issues.append("Reaction 길이 부적절")
+
+    if not re.search(r"[?？]", hook):
+        issues.append("Hook에 질문/도발 부족")
+    if not re.search(r"(罠|トリック|ごまかし|操作|詐欺|欺|ハッタリ|インチキ)", conflict):
+        issues.append("Conflict에 구체적 속임수 표현 부족")
+    if not re.search(r"(しかし|だが|でも|ところが|実は)", twist):
+        issues.append("Twist에 반전 연결어 부족")
+    if not re.search(r"(はぁ|マジ|やば|草|w|笑|あー|え)", reaction):
+        issues.append("Reaction에 감정 리액션 부족")
+
+    return issues
 
 
 # ─────────────────────────────────────────────
@@ -883,6 +948,7 @@ JP_SHORTS_SYSTEM_PROMPT: str = """당신은 유튜브 쇼츠에서 조회수를 
 
 ### 1. 스토리텔링 4단계 공식 (엄격 준수)
 대본은 일본어 반말(친근하고 거친 구어체)로 작성해야 합니다.
+각 파트는 **짧고 임팩트 있게 1문장 (대략 10~25자)** 로 작성합니다.
 
 1) Hook (0~5초): 도발/무시
    - 시청자의 상식을 공격하세요. "아직도 이걸 믿어?", "당신은 속고 있습니다."
@@ -951,106 +1017,122 @@ def generate_script_jp(
     )
 
     client = OpenAI(api_key=config.openai_api_key)
-    response = client.responses.create(
-        model=config.openai_model,
-        input=[
-            {"role": "system", "content": JP_SHORTS_SYSTEM_PROMPT},
-            {"role": "user", "content": user_text},
-        ],
-    )
-    output_text = getattr(response, "output_text", "") or ""
-    result = extract_json(output_text)
-    if not result:
-        # 원문 일부 저장 + 텔레그램 디버그
-        try:
-            _telemetry_log(f"LLM JSON 파싱 실패. 원문 일부:\n{output_text[:1600]}", config)
-        except Exception:
-            pass
-        try:
-            with open("/tmp/auto_shorts_llm_output.log", "w", encoding="utf-8") as file:
-                file.write(output_text)
-        except Exception:
-            pass
-        raise RuntimeError("LLM JSON 파싱 실패 (원문: /tmp/auto_shorts_llm_output.log)")
-
-    # ── 새 스키마 (meta + story_timeline[]) 정규화 ───────────
-    meta = result.get("meta", {}) if isinstance(result.get("meta", {}), dict) else {}
-    story_list = result.get("story_timeline", None)
-    if not isinstance(story_list, list):
-        # 구 스키마 fallback
-        story_list = result.get("content", []) if isinstance(result.get("content"), list) else []
-
-    # meta 필드 검증
-    title_ja = meta.get("title_ja") or meta.get("title") or meta.get("video_title") or "ミステリーショーツ"
-    meta["title_ja"] = title_ja
-    meta["title"] = title_ja
-    if not meta.get("topic_en"):
-        meta["topic_en"] = ""
-    hashtags = meta.get("hashtags", [])
-    if isinstance(hashtags, str):
-        hashtags = [t for t in re.split(r"[,\s]+", hashtags) if t]
-    meta["hashtags"] = normalize_hashtags(hashtags if isinstance(hashtags, list) else [])
-    mood_raw = meta.get("bgm_mood", "")
-    if mood_raw in BGM_MOOD_ALIASES:
-        meta["bgm_mood"] = BGM_MOOD_ALIASES[mood_raw]
-    if meta.get("bgm_mood") not in BGM_MOOD_CATEGORIES:
-        meta["bgm_mood"] = "mystery_suspense"
-    if not meta.get("pinned_comment"):
-        meta["pinned_comment"] = "これ、信じる？それとも…？コメントで教えて。"
-    if not meta.get("pinned_comment_ko"):
-        meta["pinned_comment_ko"] = "이거 믿어? 댓글로 말해줘."
-    # 해시태그 최소 4개 유지
-    if isinstance(meta.get("hashtags"), list) and len(meta["hashtags"]) < 4:
-        defaults = ["#衝撃", "#暴露", "#検証", "#裏話", "#都市伝説"]
-        for tag in defaults:
-            if len(meta["hashtags"]) >= 4:
-                break
-            if tag not in meta["hashtags"]:
-                meta["hashtags"].append(tag)
-
-    # story_timeline 정렬 및 검증
-    normalized: List[Dict[str, Any]] = []
-    allowed_roles = {"hook", "conflict", "twist", "reaction"}
-    order_map = {"hook": 1, "conflict": 2, "twist": 3, "reaction": 4}
-    for idx, raw in enumerate(story_list or []):
-        if not isinstance(raw, dict):
-            continue
-        role = str(raw.get("role", "")).strip().lower()
-        if role not in allowed_roles:
-            if "reaction" in role or "outro" in role:
-                role = "reaction"
-            elif role.startswith("twist"):
-                role = "twist"
-            elif role == "hook":
-                role = "hook"
-            else:
-                role = "conflict" if idx > 0 else "hook"
-        order_val = raw.get("order")
-        if not isinstance(order_val, int):
-            order_val = order_map.get(role, idx + 1)
-        script_ja = str(raw.get("script_ja") or "").strip()
-        script_ko = str(raw.get("script_ko") or "").strip()
-        if not script_ko and script_ja:
-            script_ko = script_ja
-        visual_kw = raw.get("visual_search_keyword") or raw.get("visual_keyword_en") or ""
-        visual_kw = str(visual_kw).strip()
-        visual_kw = _refine_visual_keyword(visual_kw, meta.get("topic_en", ""), role, script_ja)
-        normalized.append(
-            {
-                "order": order_val,
-                "role": role,
-                "script_ja": script_ja,
-                "script_ko": script_ko,
-                "visual_search_keyword": visual_kw,
-            }
+    last_error = ""
+    feedback = ""
+    for attempt in range(3):
+        prompt = user_text
+        if feedback:
+            prompt += "\n\n[품질 피드백]\n" + feedback + "\n위 문제를 반드시 해결하고 JSON만 출력하세요."
+        response = client.responses.create(
+            model=config.openai_model,
+            input=[
+                {"role": "system", "content": JP_SHORTS_SYSTEM_PROMPT},
+                {"role": "user", "content": prompt},
+            ],
         )
+        output_text = getattr(response, "output_text", "") or ""
+        result = extract_json(output_text)
+        if not result:
+            last_error = "LLM JSON 파싱 실패"
+            try:
+                _telemetry_log(f"LLM JSON 파싱 실패. 원문 일부:\n{output_text[:1600]}", config)
+            except Exception:
+                pass
+            try:
+                with open("/tmp/auto_shorts_llm_output.log", "w", encoding="utf-8") as file:
+                    file.write(output_text)
+            except Exception:
+                pass
+            feedback = "JSON 형식 위반 또는 불완전한 출력"
+            continue
 
-    normalized = sorted(normalized, key=lambda x: x.get("order", 99))
-    result["meta"] = meta
-    result["story_timeline"] = normalized
-    # 하위 호환: UI/기존 로직에서 content를 참조하는 경우 대응
-    result["content"] = normalized
-    return result
+        # ── 새 스키마 (meta + story_timeline[]) 정규화 ───────────
+        meta = result.get("meta", {}) if isinstance(result.get("meta", {}), dict) else {}
+        story_list = result.get("story_timeline", None)
+        if not isinstance(story_list, list):
+            # 구 스키마 fallback
+            story_list = result.get("content", []) if isinstance(result.get("content"), list) else []
+
+        # meta 필드 검증
+        title_ja = meta.get("title_ja") or meta.get("title") or meta.get("video_title") or "ミステリーショーツ"
+        meta["title_ja"] = title_ja
+        meta["title"] = title_ja
+        if not meta.get("topic_en"):
+            meta["topic_en"] = ""
+        hashtags = meta.get("hashtags", [])
+        if isinstance(hashtags, str):
+            hashtags = [t for t in re.split(r"[,\s]+", hashtags) if t]
+        meta["hashtags"] = normalize_hashtags(hashtags if isinstance(hashtags, list) else [])
+        mood_raw = meta.get("bgm_mood", "")
+        if mood_raw in BGM_MOOD_ALIASES:
+            meta["bgm_mood"] = BGM_MOOD_ALIASES[mood_raw]
+        if meta.get("bgm_mood") not in BGM_MOOD_CATEGORIES:
+            meta["bgm_mood"] = "mystery_suspense"
+        if not meta.get("pinned_comment"):
+            meta["pinned_comment"] = "これ、信じる？それとも…？コメントで教えて。"
+        if not meta.get("pinned_comment_ko"):
+            meta["pinned_comment_ko"] = "이거 믿어? 댓글로 말해줘."
+        # 해시태그 최소 4개 유지
+        if isinstance(meta.get("hashtags"), list) and len(meta["hashtags"]) < 4:
+            defaults = ["#衝撃", "#暴露", "#検証", "#裏話", "#都市伝説"]
+            for tag in defaults:
+                if len(meta["hashtags"]) >= 4:
+                    break
+                if tag not in meta["hashtags"]:
+                    meta["hashtags"].append(tag)
+
+        # story_timeline 정렬 및 검증
+        normalized: List[Dict[str, Any]] = []
+        allowed_roles = {"hook", "conflict", "twist", "reaction"}
+        order_map = {"hook": 1, "conflict": 2, "twist": 3, "reaction": 4}
+        for idx, raw in enumerate(story_list or []):
+            if not isinstance(raw, dict):
+                continue
+            role = str(raw.get("role", "")).strip().lower()
+            if role not in allowed_roles:
+                if "reaction" in role or "outro" in role:
+                    role = "reaction"
+                elif role.startswith("twist"):
+                    role = "twist"
+                elif role == "hook":
+                    role = "hook"
+                else:
+                    role = "conflict" if idx > 0 else "hook"
+            order_val = raw.get("order")
+            if not isinstance(order_val, int):
+                order_val = order_map.get(role, idx + 1)
+            script_ja = str(raw.get("script_ja") or "").strip()
+            script_ko = str(raw.get("script_ko") or "").strip()
+            if not script_ko and script_ja:
+                script_ko = script_ja
+            visual_kw = raw.get("visual_search_keyword") or raw.get("visual_keyword_en") or ""
+            visual_kw = str(visual_kw).strip()
+            visual_kw = _refine_visual_keyword(visual_kw, meta.get("topic_en", ""), role, script_ja)
+            normalized.append(
+                {
+                    "order": order_val,
+                    "role": role,
+                    "script_ja": script_ja,
+                    "script_ko": script_ko,
+                    "visual_search_keyword": visual_kw,
+                }
+            )
+
+        normalized = sorted(normalized, key=lambda x: x.get("order", 99))
+        normalized = _compress_to_four_act(normalized)
+        issues = _check_story_quality(normalized)
+        if issues:
+            feedback = " / ".join(issues)
+            last_error = "스토리 구조 품질 미달"
+            continue
+
+        result["meta"] = meta
+        result["story_timeline"] = normalized
+        # 하위 호환: UI/기존 로직에서 content를 참조하는 경우 대응
+        result["content"] = normalized
+        return result
+
+    raise RuntimeError(last_error or "LLM 스토리 생성 실패")
 
 
 def _get_story_timeline(script: Dict[str, Any]) -> List[Dict[str, Any]]:
@@ -1694,6 +1776,63 @@ def _apply_korean_template(image: Image.Image, canvas_width: int, canvas_height:
         width=2,
     )
     return Image.alpha_composite(image.convert("RGBA"), overlay).convert("RGB")
+
+
+def generate_thumbnail_image(
+    config: AppConfig,
+    bg_image_path: str,
+    title_text: str,
+    hook_text: str,
+    output_path: str,
+) -> str:
+    if not MOVIEPY_AVAILABLE:
+        raise RuntimeError(f"MoviePy/PIL not available: {MOVIEPY_ERROR}")
+    W, H = 1280, 720
+    base = Image.open(bg_image_path).convert("RGB")
+    base = _fit_image_to_canvas(base, (W, H))
+    if config.use_korean_template:
+        base = _apply_korean_template(base, W, H)
+
+    main_text = hook_text if config.thumbnail_use_hook else title_text
+    main_text = _shorten_caption_text(main_text, max_chars=config.thumbnail_max_chars)
+    sub_text = ""
+    if main_text != title_text and title_text:
+        sub_text = _shorten_caption_text(title_text, max_chars=max(14, config.thumbnail_max_chars))
+
+    # 텍스트 배경 박스
+    overlay = Image.new("RGBA", (W, H), (0, 0, 0, 0))
+    draw = ImageDraw.Draw(overlay)
+    pad = 30
+    box_h = int(H * 0.32)
+    draw.rectangle([0, H - box_h, W, H], fill=(0, 0, 0, 160))
+
+    # 텍스트 렌더링
+    font_main = _load_font(config.font_path, int(W * 0.08))
+    font_sub = _load_font(config.font_path, int(W * 0.045))
+    lines = _wrap_cjk_text(main_text, W - pad * 2, int(W * 0.08))
+    y = H - box_h + pad
+    for line in lines:
+        try:
+            lw = font_main.getbbox(line)[2]
+        except Exception:
+            lw = len(line) * int(W * 0.08)
+        x = max(pad, (W - lw) // 2)
+        draw.text((x, y), line, font=font_main, fill=(255, 255, 255), stroke_width=5, stroke_fill=(0, 0, 0))
+        y += int(W * 0.09)
+
+    if sub_text:
+        y += int(W * 0.02)
+        try:
+            lw = font_sub.getbbox(sub_text)[2]
+        except Exception:
+            lw = len(sub_text) * int(W * 0.045)
+        x = max(pad, (W - lw) // 2)
+        draw.text((x, y), sub_text, font=font_sub, fill=(255, 220, 120), stroke_width=3, stroke_fill=(0, 0, 0))
+
+    thumb = Image.alpha_composite(base.convert("RGBA"), overlay).convert("RGB")
+    os.makedirs(os.path.dirname(output_path) or ".", exist_ok=True)
+    thumb.save(output_path, "JPEG", quality=92, optimize=True)
+    return output_path
 
 
 def _draw_subtitle(
@@ -2507,6 +2646,29 @@ def upload_video(
     response = request.execute()
     video_id = response.get("id", "")
     return {"video_id": video_id, "video_url": f"https://www.youtube.com/watch?v={video_id}"}
+
+
+def set_video_thumbnail(config: AppConfig, video_id: str, thumbnail_path: str) -> bool:
+    if not video_id or not thumbnail_path or not os.path.exists(thumbnail_path):
+        return False
+    if not config.youtube_client_id or not config.youtube_client_secret or not config.youtube_refresh_token:
+        return False
+    try:
+        credentials = Credentials(
+            token=None,
+            refresh_token=config.youtube_refresh_token,
+            token_uri="https://oauth2.googleapis.com/token",
+            client_id=config.youtube_client_id,
+            client_secret=config.youtube_client_secret,
+            scopes=["https://www.googleapis.com/auth/youtube.upload"],
+        )
+        youtube = build("youtube", "v3", credentials=credentials)
+        media = MediaFileUpload(thumbnail_path, mimetype="image/jpeg")
+        request = youtube.thumbnails().set(videoId=video_id, media_body=media)
+        request.execute()
+        return True
+    except Exception:
+        return False
 
 
 def build_google_oauth_url(
@@ -3382,6 +3544,27 @@ def _auto_jp_flow(config: AppConfig, progress, status_box, extra_hint: str = "")
         st.error(f"영상 렌더링 실패: {render_err}")
         return False
 
+    # ── 썸네일 생성 ───────────────────────────────────────
+    thumb_path = ""
+    if config.thumbnail_enabled:
+        try:
+            thumb_src = next((p for p in bg_image_paths if p), None)
+            if not thumb_src and assets:
+                thumb_src = assets[0]
+            if not thumb_src:
+                thumb_src = _ensure_placeholder_image(config)
+            thumb_path = os.path.join(config.output_dir, f"thumb_{now}.jpg")
+            generate_thumbnail_image(
+                config=config,
+                bg_image_path=thumb_src,
+                title_text=video_title,
+                hook_text=texts[0] if texts else video_title,
+                output_path=thumb_path,
+            )
+            _telemetry_log(f"썸네일 생성 완료: {os.path.basename(thumb_path)}", config)
+        except Exception as thumb_err:
+            _telemetry_log(f"썸네일 생성 실패: {thumb_err}", config)
+
     # ── 유튜브 업로드 ─────────────────────────────────────
     video_id = ""
     video_url = ""
@@ -3398,6 +3581,11 @@ def _auto_jp_flow(config: AppConfig, progress, status_box, extra_hint: str = "")
         video_id = result.get("video_id", "")
         video_url = result.get("video_url", "")
         _telemetry_log(f"유튜브 업로드 완료: {video_id}", config)
+        if thumb_path and video_id:
+            if set_video_thumbnail(config, video_id, thumb_path):
+                _telemetry_log("썸네일 업로드 완료", config)
+            else:
+                _telemetry_log("썸네일 업로드 실패", config)
     else:
         _status_update(progress, status_box, 0.85, "유튜브 업로드(스킵)")
         _telemetry_log("유튜브 업로드 스킵", config)
@@ -3484,6 +3672,7 @@ def run_streamlit_app() -> None:
     st.sidebar.write(f"렌더 스레드: {config.render_threads}")
     st.sidebar.write(f"템플릿: {'켜짐' if config.use_korean_template else '꺼짐'}")
     st.sidebar.write(f"자막 길이: {config.caption_max_chars}자")
+    st.sidebar.write(f"썸네일: {'켜짐' if config.thumbnail_enabled else '꺼짐'}")
     if not MOVIEPY_AVAILABLE:
         st.sidebar.error(f"MoviePy 오류: {MOVIEPY_ERROR}")
 
@@ -3514,6 +3703,9 @@ def run_streamlit_app() -> None:
         "- `USE_KOREAN_TEMPLATE` (한국형 템플릿 오버레이)\n"
         "- `CAPTION_MAX_CHARS` (자막 최대 글자수)\n"
         "- `CAPTION_HOLD_RATIO` (자막 표시 비율)\n\n"
+        "- `THUMBNAIL_ENABLED` (썸네일 자동 생성)\n"
+        "- `THUMBNAIL_USE_HOOK` (썸네일에 훅 문장 사용)\n"
+        "- `THUMBNAIL_MAX_CHARS` (썸네일 문장 길이)\n\n"
         "**BGM 무드 폴더:** `assets/bgm/mystery_suspense/`, `assets/bgm/fast_exciting/`"
     )
     missing = _missing_required(config)
@@ -3725,6 +3917,25 @@ def run_streamlit_app() -> None:
                         _telemetry_log(f"수동 렌더링 실패: {render_err}", config)
                         st.error(f"영상 렌더링 실패: {render_err}")
                         return
+                    # 썸네일 생성
+                    thumb_path = ""
+                    if config.thumbnail_enabled:
+                        try:
+                            thumb_src = next((p for p in bg_imgs_manual if p), None)
+                            if not thumb_src and assets:
+                                thumb_src = assets[0]
+                            if not thumb_src:
+                                thumb_src = _ensure_placeholder_image(config)
+                            thumb_path = os.path.join(config.output_dir, f"thumb_{now}.jpg")
+                            generate_thumbnail_image(
+                                config=config,
+                                bg_image_path=thumb_src,
+                                title_text=video_title_val,
+                                hook_text=texts[0] if texts else video_title_val,
+                                output_path=thumb_path,
+                            )
+                        except Exception as thumb_err:
+                            _telemetry_log(f"수동 썸네일 생성 실패: {thumb_err}", config)
                     video_id = ""
                     video_url = ""
                     if config.enable_youtube_upload:
@@ -3738,6 +3949,11 @@ def run_streamlit_app() -> None:
                         )
                         video_id = result.get("video_id", "")
                         video_url = result.get("video_url", "")
+                        if thumb_path and video_id:
+                            if set_video_thumbnail(config, video_id, thumb_path):
+                                _telemetry_log("수동 썸네일 업로드 완료", config)
+                            else:
+                                _telemetry_log("수동 썸네일 업로드 실패", config)
                     else:
                         _status_update(progress, status_box, 0.85, "유튜브 업로드(스킵)")
                     if video_url:
@@ -4413,6 +4629,24 @@ def run_batch(count: int, seed: str = "", beats: int = 7) -> None:
             overlay_mode=config.asset_overlay_mode,
             caption_texts=caption_texts,
         )
+        thumb_path = ""
+        if config.thumbnail_enabled:
+            try:
+                thumb_src = next((p for p in bg_imgs_b if p), None)
+                if not thumb_src and assets:
+                    thumb_src = assets[0]
+                if not thumb_src:
+                    thumb_src = _ensure_placeholder_image(config)
+                thumb_path = os.path.join(config.output_dir, f"thumb_{now}_{index}.jpg")
+                generate_thumbnail_image(
+                    config=config,
+                    bg_image_path=thumb_src,
+                    title_text=_meta_b.get("title_ja", _meta_b.get("title", "")),
+                    hook_text=texts[0] if texts else _meta_b.get("title_ja", ""),
+                    output_path=thumb_path,
+                )
+            except Exception:
+                thumb_path = ""
         video_id = ""
         video_url = ""
         _title_b = _meta_b.get("title_ja", _meta_b.get("title", script.get("video_title", "")))
@@ -4428,6 +4662,8 @@ def run_batch(count: int, seed: str = "", beats: int = 7) -> None:
             )
             video_id = result.get("video_id", "")
             video_url = result.get("video_url", "")
+            if thumb_path and video_id:
+                set_video_thumbnail(config, video_id, thumb_path)
         log_row = {
             "date_jst": datetime.utcnow().strftime("%Y-%m-%d %H:%M:%S"),
             "title_ja": _title_b,
