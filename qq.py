@@ -389,11 +389,8 @@ class AppConfig:
     openai_api_key: str
     openai_model: str
     openai_vision_model: str
-    elevenlabs_api_key: str
-    elevenlabs_voice_ids: List[str]
-    elevenlabs_model: str
-    elevenlabs_stability: float
-    elevenlabs_similarity: float
+    openai_tts_voices: List[str]
+    openai_tts_model: str
     sheet_id: str
     google_service_account_json: Optional[Dict[str, Any]]
     assets_dir: str
@@ -435,13 +432,9 @@ def load_config() -> AppConfig:
         openai_api_key=_get_secret("OPENAI_API_KEY", "") or "",
         openai_model=_get_secret("OPENAI_MODEL", "gpt-4.1-mini") or "gpt-4.1-mini",
         openai_vision_model=_get_secret("OPENAI_VISION_MODEL", "") or "",
-        elevenlabs_api_key=_get_secret("ELEVENLABS_API_KEY", "") or "",
-        elevenlabs_voice_ids=_get_list("ELEVENLABS_VOICE_IDS")
-        or ([voice for voice in [_get_secret("ELEVENLABS_VOICE_ID", "")] if voice]),
-        elevenlabs_model=_get_secret("ELEVENLABS_MODEL", "eleven_multilingual_v2")
-        or "eleven_multilingual_v2",
-        elevenlabs_stability=float(_get_secret("ELEVENLABS_STABILITY", "0.5") or 0.5),
-        elevenlabs_similarity=float(_get_secret("ELEVENLABS_SIMILARITY", "0.8") or 0.8),
+        openai_tts_voices=_get_list("OPENAI_TTS_VOICES")
+        or ([v for v in [_get_secret("OPENAI_TTS_VOICE", "alloy")] if v]),
+        openai_tts_model=_get_secret("OPENAI_TTS_MODEL", "tts-1") or "tts-1",
         sheet_id=_get_secret("SHEET_ID", "") or "",
         google_service_account_json=_get_json("GOOGLE_SERVICE_ACCOUNT_JSON"),
         assets_dir=assets_dir,
@@ -998,31 +991,31 @@ def analyze_image_content_category(
     return "humor"
 
 
-def tts_elevenlabs(
+def tts_openai(
     config: AppConfig,
     text: str,
     output_path: str,
-    voice_id: str,
+    voice: str,
 ) -> str:
-    if not config.elevenlabs_api_key:
-        raise RuntimeError("ELEVENLABS_API_KEY가 없습니다.")
-    if not voice_id:
-        raise RuntimeError("ELEVENLABS_VOICE_ID가 없습니다.")
-    url = f"https://api.elevenlabs.io/v1/text-to-speech/{voice_id}"
+    if not config.openai_api_key:
+        raise RuntimeError("OPENAI_API_KEY가 없습니다.")
+    if not voice:
+        voice = "alloy"
     headers = {
-        "xi-api-key": config.elevenlabs_api_key,
-        "accept": "audio/mpeg",
+        "Authorization": f"Bearer {config.openai_api_key}",
         "Content-Type": "application/json",
     }
     payload = {
-        "text": text,
-        "model_id": config.elevenlabs_model,
-        "voice_settings": {
-            "stability": config.elevenlabs_stability,
-            "similarity_boost": config.elevenlabs_similarity,
-        },
+        "model": config.openai_tts_model,
+        "input": text,
+        "voice": voice,
     }
-    response = requests.post(url, json=payload, headers=headers, timeout=120)
+    response = requests.post(
+        "https://api.openai.com/v1/audio/speech",
+        json=payload,
+        headers=headers,
+        timeout=120,
+    )
     response.raise_for_status()
     os.makedirs(os.path.dirname(output_path), exist_ok=True)
     with open(output_path, "wb") as file:
@@ -2610,10 +2603,8 @@ def _missing_required(config: AppConfig) -> List[str]:
     missing = []
     if not config.openai_api_key:
         missing.append("OPENAI_API_KEY")
-    if not config.elevenlabs_api_key:
-        missing.append("ELEVENLABS_API_KEY")
-    if not config.elevenlabs_voice_ids:
-        missing.append("ELEVENLABS_VOICE_ID 또는 ELEVENLABS_VOICE_IDS")
+    if not config.openai_tts_voices:
+        missing.append("OPENAI_TTS_VOICE 또는 OPENAI_TTS_VOICES")
     if not config.sheet_id:
         missing.append("SHEET_ID")
     if not config.google_service_account_json:
@@ -2793,11 +2784,11 @@ def _auto_bboom_flow(config: AppConfig, progress, status_box) -> None:
             continue
         now = datetime.utcnow().strftime("%Y%m%d_%H%M%S")
         audio_path = os.path.join(config.output_dir, f"tts_{now}.mp3")
-        voice_id = pick_voice_id(config.elevenlabs_voice_ids)
+        voice_id = pick_voice_id(config.openai_tts_voices)
         try:
-            tts_elevenlabs(config, "。".join(texts), audio_path, voice_id=voice_id)
+            tts_openai(config, "。".join(texts), audio_path, voice=voice_id)
         except Exception as tts_err:
-            err_msg = f"❌ TTS 생성 실패: {tts_err}\n\nElevenLabs API 크레딧이 부족하거나 Voice ID가 잘못되었을 수 있습니다."
+            err_msg = f"❌ TTS 생성 실패: {tts_err}\n\nOpenAI API 키가 잘못되었거나 크레딧이 부족할 수 있습니다."
             st.error(err_msg)
             send_telegram_message(config.telegram_bot_token, config.telegram_admin_chat_id, err_msg)
             _mark_used_link(config.used_links_path, url, "error", post.get("title", ""))
@@ -3029,11 +3020,11 @@ def _auto_content_flow(config: AppConfig, progress, status_box, selected_sources
 
         now = datetime.utcnow().strftime("%Y%m%d_%H%M%S")
         audio_path = os.path.join(config.output_dir, f"tts_{now}.mp3")
-        voice_id = pick_voice_id(config.elevenlabs_voice_ids)
+        voice_id = pick_voice_id(config.openai_tts_voices)
         try:
-            tts_elevenlabs(config, "。".join(texts), audio_path, voice_id=voice_id)
+            tts_openai(config, "。".join(texts), audio_path, voice=voice_id)
         except Exception as tts_err:
-            err_msg = f"❌ TTS 생성 실패: {tts_err}\n\nElevenLabs API 크레딧이 부족하거나 Voice ID가 잘못되었을 수 있습니다."
+            err_msg = f"❌ TTS 생성 실패: {tts_err}\n\nOpenAI API 키가 잘못되었거나 크레딧이 부족할 수 있습니다."
             st.error(err_msg)
             send_telegram_message(config.telegram_bot_token, config.telegram_admin_chat_id, err_msg)
             _mark_used_link(config.used_links_path, url, "error", post.get("title", ""))
@@ -3279,8 +3270,8 @@ def run_streamlit_app() -> None:
                         _status_update(progress, status_box, 0.3, "TTS 생성")
                         now = datetime.utcnow().strftime("%Y%m%d_%H%M%S")
                         audio_path = os.path.join(config.output_dir, f"tts_{now}.mp3")
-                        voice_id = pick_voice_id(config.elevenlabs_voice_ids)
-                        tts_elevenlabs(config, "。".join(texts), audio_path, voice_id=voice_id)
+                        voice_id = pick_voice_id(config.openai_tts_voices)
+                        tts_openai(config, "。".join(texts), audio_path, voice=voice_id)
                         _status_update(progress, status_box, 0.6, "영상 렌더링")
                         output_path = os.path.join(config.output_dir, f"shorts_{now}.mp4")
                         render_video(
@@ -3875,8 +3866,8 @@ def run_batch(count: int, seed: str, beats: int) -> None:
                 assets.append(asset.path)
         now = datetime.utcnow().strftime("%Y%m%d_%H%M%S")
         audio_path = os.path.join(config.output_dir, f"tts_{now}_{index}.mp3")
-        voice_id = pick_voice_id(config.elevenlabs_voice_ids)
-        tts_elevenlabs(config, "。".join(texts), audio_path, voice_id=voice_id)
+        voice_id = pick_voice_id(config.openai_tts_voices)
+        tts_openai(config, "。".join(texts), audio_path, voice=voice_id)
         output_path = os.path.join(config.output_dir, f"shorts_{now}_{index}.mp4")
         bgm_path = get_or_download_bgm(config, content_category)
         if not bgm_path:
