@@ -941,12 +941,12 @@ def match_bgm_by_mood(config: AppConfig, mood: str) -> Optional[str]:
     if existing_any:
         return existing_any
 
-    # 최후 fallback: numpy로 ambient BGM 자동 생성 (저작권 없음)
-    fallback_path = os.path.join(bgm_dir, f"generated_{mood}.wav")
+    # 최후 fallback: sine wave ambient BGM 자동 생성 (/tmp/ → read-only 레포 우회)
+    fallback_path = os.path.join("/tmp", f"bgm_generated_{mood}.wav")
     if not os.path.exists(fallback_path):
         try:
             _generate_bgm_fallback(fallback_path, duration=15.0, mood=mood)
-        except Exception:
+        except Exception as _e:
             return None
     return fallback_path if os.path.exists(fallback_path) else None
 
@@ -1449,6 +1449,16 @@ def _compose_frame(
     return composed
 
 
+# 한국 관련 Pexels 검색 보강 접미사 (결과가 0일 때 순서대로 fallback)
+_KOREA_BG_FALLBACK_QUERIES = [
+    "seoul korea street",
+    "busan korea night",
+    "korea food market",
+    "seoul city korea",
+    "korean street walking",
+]
+
+
 def fetch_pexels_video(
     query: str,
     api_key: str,
@@ -1456,45 +1466,66 @@ def fetch_pexels_video(
     canvas_w: int = 1080,
     canvas_h: int = 1920,
 ) -> Optional[str]:
-    """Pexels에서 세로형(portrait) royalty-free 영상을 검색·다운로드."""
+    """Pexels에서 세로형(portrait) royalty-free 한국 배경 영상을 검색·다운로드.
+    - 결과가 없으면 _KOREA_BG_FALLBACK_QUERIES 순서로 자동 재시도.
+    - 저장 위치: /tmp/ (Streamlit Cloud read-only 레포 우회).
+    """
     if not api_key:
         return None
-    os.makedirs(output_dir, exist_ok=True)
-    try:
-        headers = {"Authorization": api_key}
-        params = {"query": query, "per_page": 15, "orientation": "portrait"}
-        resp = requests.get(
-            "https://api.pexels.com/videos/search",
-            headers=headers,
-            params=params,
-            timeout=30,
-        )
-        resp.raise_for_status()
-        videos = resp.json().get("videos", [])
-        random.shuffle(videos)
-        for video in videos[:8]:
-            files = sorted(
-                video.get("video_files", []),
-                key=lambda f: abs(f.get("width", 0) - canvas_w),
+    # 저장은 항상 /tmp/ 에 (레포 내부는 read-only일 수 있음)
+    save_dir = "/tmp/pexels_bg"
+    os.makedirs(save_dir, exist_ok=True)
+
+    def _try_query(q: str) -> Optional[str]:
+        try:
+            headers = {"Authorization": api_key}
+            params = {"query": q, "per_page": 15, "orientation": "portrait"}
+            resp = requests.get(
+                "https://api.pexels.com/videos/search",
+                headers=headers,
+                params=params,
+                timeout=30,
             )
-            for vf in files:
-                link = vf.get("link", "")
-                if not link:
-                    continue
-                try:
-                    vresp = requests.get(link, stream=True, timeout=120)
-                    vresp.raise_for_status()
-                    fname = f"bg_{random.randint(100000, 999999)}.mp4"
-                    fpath = os.path.join(output_dir, fname)
-                    with open(fpath, "wb") as vf_out:
-                        for chunk in vresp.iter_content(chunk_size=65536):
-                            vf_out.write(chunk)
-                    return fpath
-                except Exception:
-                    continue
-    except Exception:
-        pass
+            resp.raise_for_status()
+            videos = resp.json().get("videos", [])
+            if not videos:
+                return None
+            random.shuffle(videos)
+            for video in videos[:8]:
+                files = sorted(
+                    video.get("video_files", []),
+                    key=lambda f: abs(f.get("width", 0) - canvas_w),
+                )
+                for vf in files:
+                    link = vf.get("link", "")
+                    if not link:
+                        continue
+                    try:
+                        vresp = requests.get(link, stream=True, timeout=120)
+                        vresp.raise_for_status()
+                        fname = f"bg_{random.randint(100000, 999999)}.mp4"
+                        fpath = os.path.join(save_dir, fname)
+                        with open(fpath, "wb") as vf_out:
+                            for chunk in vresp.iter_content(chunk_size=65536):
+                                vf_out.write(chunk)
+                        return fpath
+                    except Exception:
+                        continue
+        except Exception:
+            pass
+        return None
+
+    # 1차: 요청된 쿼리
+    result = _try_query(query)
+    if result:
+        return result
+    # 2차~: 한국 특화 fallback 쿼리 순서대로 재시도
+    for fallback_q in _KOREA_BG_FALLBACK_QUERIES:
+        result = _try_query(fallback_q)
+        if result:
+            return result
     return None
+
 
 
 def _generate_bgm_fallback(output_path: str, duration: float, mood: str) -> str:
