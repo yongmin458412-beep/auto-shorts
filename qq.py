@@ -452,6 +452,7 @@ class AppConfig:
     auto_run_tz: str
     auto_run_state_path: str
     auto_run_lock_path: str
+    used_topics_path: str
     generated_bg_dir: str
     telegram_bot_token: str
     telegram_admin_chat_id: str
@@ -518,6 +519,11 @@ def load_config() -> AppConfig:
         or "data/state/auto_run.lock",
         "/tmp/auto_shorts_state/auto_run.lock",
     )
+    used_topics_path = _ensure_writable_file(
+        _get_secret("USED_TOPICS_PATH", "data/state/used_topics.json")
+        or "data/state/used_topics.json",
+        "/tmp/auto_shorts_state/used_topics.json",
+    )
     pending_uploads_path = _ensure_writable_file(
         _get_secret("PENDING_UPLOADS_PATH", "data/state/pending_uploads.json")
         or "data/state/pending_uploads.json",
@@ -566,6 +572,7 @@ def load_config() -> AppConfig:
         auto_run_tz=_get_secret("AUTO_RUN_TZ", "Asia/Seoul") or "Asia/Seoul",
         auto_run_state_path=auto_run_state_path,
         auto_run_lock_path=auto_run_lock_path,
+        used_topics_path=used_topics_path,
         generated_bg_dir=_get_secret("GENERATED_BG_DIR", "data/assets/generated_bg") or "data/assets/generated_bg",
         telegram_bot_token=_get_secret("TELEGRAM_BOT_TOKEN", "") or "",
         telegram_admin_chat_id=_get_secret("TELEGRAM_ADMIN_CHAT_ID", "") or "",
@@ -4325,6 +4332,41 @@ def _mark_used_link(path: str, url: str, status: str, title: str = "") -> None:
     _write_json_file(path, used_data)
 
 
+def _load_used_topics(path: str) -> Dict[str, Any]:
+    return _read_json_file(path, {"topics": []})
+
+
+def _is_used_topic(used_data: Dict[str, Any], topic: str) -> bool:
+    topics = used_data.get("topics", [])
+    topic_key = topic.strip().lower()
+    return any(str(item.get("key", "")).lower() == topic_key for item in topics)
+
+
+def _mark_used_topic(path: str, topic: str, title: str = "") -> None:
+    if not topic:
+        return
+    used_data = _load_used_topics(path)
+    topics = used_data.get("topics", [])
+    topics.append(
+        {
+            "key": topic.strip().lower(),
+            "topic": topic,
+            "title": title,
+            "ts": datetime.utcnow().strftime("%Y-%m-%d %H:%M:%S"),
+        }
+    )
+    used_data["topics"] = topics
+    _write_json_file(path, used_data)
+
+
+def _pick_topic_key(meta: Dict[str, Any]) -> str:
+    for key in ("topic_en", "topic", "title_ja", "title"):
+        value = meta.get(key)
+        if isinstance(value, str) and value.strip():
+            return value.strip()
+    return ""
+
+
 def _load_offset(path: str) -> int:
     data = _read_json_file(path, {"offset": 0})
     return int(data.get("offset", 0))
@@ -4456,18 +4498,39 @@ def _auto_jp_flow(
         _try_upload_pending(config, use_streamlit=use_streamlit, max_items=1)
     _telemetry_log("자동 생성 시작 — 대본 생성 단계 진입", config)
     _status_update(progress, status_box, 0.10, "AI 대본 생성 중 (주제 자동 선정)...")
-    try:
-        script = generate_script_jp(config, extra_hint=extra_hint)
-        _telemetry_log("대본 생성 완료", config)
-    except Exception as exc:
-        _telemetry_log(f"대본 생성 실패: {exc}", config)
-        _ui_error(f"대본 생성 실패: {exc}", use_streamlit)
-        return False
+    script = None
+    meta = {}
+    content_list = []
+    topic_key = ""
+    for attempt in range(3):
+        try:
+            script = generate_script_jp(config, extra_hint=extra_hint)
+            _telemetry_log("대본 생성 완료", config)
+        except Exception as exc:
+            _telemetry_log(f"대본 생성 실패: {exc}", config)
+            _ui_error(f"대본 생성 실패: {exc}", use_streamlit)
+            return False
+        meta = script.get("meta", {})
+        content_list = _get_story_timeline(script)
+        topic_key = _pick_topic_key(meta)
+        if topic_key:
+            used_topics = _load_used_topics(config.used_topics_path)
+            if _is_used_topic(used_topics, topic_key):
+                _telemetry_log(f"중복 주제 감지 → 재생성: {topic_key}", config)
+                extra_hint = (extra_hint + f"\n이전 주제는 제외: {topic_key}").strip()
+                continue
+        break
+    if topic_key:
+        used_topics = _load_used_topics(config.used_topics_path)
+        if _is_used_topic(used_topics, topic_key):
+            msg = f"이미 사용한 주제입니다. 이번 작업을 중단합니다: {topic_key}"
+            _telemetry_log(msg, config)
+            _ui_warning(msg, use_streamlit)
+            send_telegram_message(config.telegram_bot_token, config.telegram_admin_chat_id, msg)
+            return False
 
     # ── 새 스키마 필드 추출 ───────────────────────────────
-    meta = script.get("meta", {})
-    content_list = _get_story_timeline(script)
-
+    meta = meta or {}
     video_title = meta.get("title_ja", meta.get("title", script.get("video_title", "ミステリーショーツ")))
     hashtags = meta.get("hashtags", script.get("hashtags", []))
     mood = meta.get("bgm_mood", script.get("mood", "mystery_suspense"))
@@ -4894,6 +4957,8 @@ def _auto_jp_flow(
             f"로컬: {output_path}"
         )
         send_telegram_message(config.telegram_bot_token, config.telegram_admin_chat_id, summary_text)
+    if topic_key:
+        _mark_used_topic(config.used_topics_path, topic_key, title=video_title)
     _maybe_send_ab_report(config, use_streamlit=use_streamlit)
     return True
 
@@ -4983,6 +5048,7 @@ def run_streamlit_app() -> None:
         "- `YOUTUBE_API_KEY` (A/B 리포트 통계용)\n"
         "- `AB_REPORT_ENABLED`, `AB_REPORT_HOUR`, `AB_REPORT_DAYS`\n\n"
         "- `JP_YOUTUBE_ONLY` (일본 쇼츠 유튜브 전용)\n\n"
+        "- `USED_TOPICS_PATH` (중복 주제 저장 경로)\n\n"
         "**BGM 무드 폴더:** `assets/bgm/mystery_suspense/`, `assets/bgm/fast_exciting/`"
     )
     missing = _missing_required(config)
@@ -5110,6 +5176,10 @@ def run_streamlit_app() -> None:
                     st.error("렌더링할 문장이 없습니다.")
                 else:
                     mood = _mood_val
+                    topic_key = _pick_topic_key(_meta)
+                    if topic_key and _is_used_topic(_load_used_topics(config.used_topics_path), topic_key):
+                        st.warning(f"이미 사용한 주제입니다. 다른 주제를 사용하세요: {topic_key}")
+                        return
                     _status_update(progress, status_box, 0.15, f"BGM 매칭 중 ({mood})")
                     bgm_path = match_bgm_by_mood(config, mood)
                     if not bgm_path or not os.path.exists(bgm_path):
@@ -5385,6 +5455,9 @@ def run_streamlit_app() -> None:
                             "youtube_url": video_url,
                         },
                     )
+                    topic_key = _pick_topic_key(_meta)
+                    if topic_key:
+                        _mark_used_topic(config.used_topics_path, topic_key, title=video_title_val)
                     _status_update(progress, status_box, 1.0, "완료")
                     st.video(output_path)
                     if video_url:
@@ -5950,7 +6023,17 @@ def run_batch(count: int, seed: str = "", beats: int = 7) -> None:
     config = load_config()
     manifest_items = load_manifest(config.manifest_path)
     for index in range(count):
-        script = generate_script_jp(config, extra_hint=seed)
+        script = None
+        topic_key = ""
+        for attempt in range(3):
+            script = generate_script_jp(config, extra_hint=seed)
+            _meta_tmp = script.get("meta", {})
+            topic_key = _pick_topic_key(_meta_tmp)
+            if topic_key and _is_used_topic(_load_used_topics(config.used_topics_path), topic_key):
+                continue
+            break
+        if topic_key and _is_used_topic(_load_used_topics(config.used_topics_path), topic_key):
+            continue
         _meta_b = script.get("meta", {})
         mood = _meta_b.get("bgm_mood", script.get("mood", "mystery_suspense"))
         texts = _script_to_beats(script)
@@ -6191,6 +6274,8 @@ def run_batch(count: int, seed: str = "", beats: int = 7) -> None:
                 "youtube_url": video_url,
             },
         )
+        if topic_key:
+            _mark_used_topic(config.used_topics_path, topic_key, title=_title_b)
 
 
 def _run_streamlit_app_safe() -> None:
