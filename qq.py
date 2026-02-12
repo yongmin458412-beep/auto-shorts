@@ -2043,6 +2043,20 @@ def _list_image_files(path: str) -> List[str]:
     return sorted(items)
 
 
+def _ensure_placeholder_image(config: AppConfig) -> str:
+    path = os.path.join("/tmp", "auto_shorts_placeholder.jpg")
+    if os.path.exists(path):
+        return path
+    if not MOVIEPY_AVAILABLE:
+        return path
+    try:
+        img = Image.new("RGB", (config.width, config.height), color=(20, 20, 20))
+        img.save(path, "JPEG")
+    except Exception:
+        pass
+    return path
+
+
 def _get_generated_bg_paths(config: AppConfig, count: int) -> List[Optional[str]]:
     if count <= 0:
         return []
@@ -2755,9 +2769,6 @@ def _auto_jp_flow(config: AppConfig, progress, status_box, extra_hint: str = "")
         st.error("승인 모드에서는 텔레그램 봇 설정이 필요합니다. TELEGRAM_BOT_TOKEN, TELEGRAM_ADMIN_CHAT_ID를 확인하세요.")
         return False
     manifest_items = load_manifest(config.manifest_path)
-    if not manifest_items:
-        st.error("에셋이 없습니다. 먼저 이미지를 추가하세요.")
-        return False
 
     # ── 대본 생성 ─────────────────────────────────────────
     _telemetry_log("자동 생성 시작 — 대본 생성 단계 진입", config)
@@ -2855,11 +2866,16 @@ def _auto_jp_flow(config: AppConfig, progress, status_box, extra_hint: str = "")
     }
     content_category = mood_to_cat.get(mood, "exciting")
     assets: List[str] = []
-    for _ in texts:
-        asset = pick_asset_by_category(manifest_items, content_category)
-        if not asset:
-            asset = random.choice(manifest_items)
-        assets.append(asset.path)
+    if manifest_items:
+        for _ in texts:
+            asset = pick_asset_by_category(manifest_items, content_category)
+            if not asset:
+                asset = random.choice(manifest_items)
+            assets.append(asset.path)
+    else:
+        # 에셋이 없어도 배경 이미지/영상만으로 렌더링 가능하도록 플레이스홀더 사용
+        placeholder = _ensure_placeholder_image(config)
+        assets = [placeholder] * len(texts)
 
     # ── YouTube 설명 텍스트 ───────────────────────────────
     description_lines = [pinned, "", " ".join(hashtags)]
@@ -3410,6 +3426,26 @@ def run_streamlit_app() -> None:
                     out_file.write(file.getbuffer())
             st.success("BGM이 저장되었습니다.")
 
+        st.subheader("Whisk/AI 배경 이미지 업로드")
+        st.caption("Whisk에서 생성한 이미지나 AI 배경을 업로드하면, 대사 전환마다 자동으로 배경이 바뀝니다.")
+        bg_files = st.file_uploader(
+            "배경 이미지 업로드",
+            type=["jpg", "jpeg", "png", "webp"],
+            accept_multiple_files=True,
+            key="bg_upload",
+        )
+        if st.button("배경 이미지 저장") and bg_files:
+            os.makedirs(config.generated_bg_dir, exist_ok=True)
+            for file in bg_files:
+                save_path = os.path.join(config.generated_bg_dir, file.name)
+                with open(save_path, "wb") as out_file:
+                    out_file.write(file.getbuffer())
+            st.success("배경 이미지가 저장되었습니다.")
+            previews = _list_image_files(config.generated_bg_dir)[:6]
+            if previews:
+                st.caption("미리보기 (최대 6장)")
+                st.image(previews, width=120)
+
         st.subheader("AI 이미지 수집(SerpAPI)")
         collect_query = st.text_input("검색어")
         collect_count = st.slider("수집 개수", 4, 20, 8)
@@ -3795,8 +3831,6 @@ def run_streamlit_app() -> None:
 def run_batch(count: int, seed: str = "", beats: int = 7) -> None:
     config = load_config()
     manifest_items = load_manifest(config.manifest_path)
-    if not manifest_items:
-        raise RuntimeError("에셋이 없습니다. 먼저 이미지를 추가하세요.")
     for index in range(count):
         script = generate_script_jp(config, extra_hint=seed)
         _meta_b = script.get("meta", {})
@@ -3815,12 +3849,16 @@ def run_batch(count: int, seed: str = "", beats: int = 7) -> None:
             "emotional": "touching",
         }
         cat = mood_to_cat.get(mood, "exciting")
-        assets = []
-        for _ in texts:
-            asset = pick_asset_by_category(manifest_items, cat)
-            if not asset:
-                asset = random.choice(manifest_items)
-            assets.append(asset.path)
+        assets: List[str] = []
+        if manifest_items:
+            for _ in texts:
+                asset = pick_asset_by_category(manifest_items, cat)
+                if not asset:
+                    asset = random.choice(manifest_items)
+                assets.append(asset.path)
+        else:
+            placeholder = _ensure_placeholder_image(config)
+            assets = [placeholder] * len(texts)
         now = datetime.utcnow().strftime("%Y%m%d_%H%M%S")
         audio_path = os.path.join(config.output_dir, f"tts_{now}_{index}.mp3")
         voice_id = pick_voice_id(config.openai_tts_voices, config.openai_tts_voice_preference)
