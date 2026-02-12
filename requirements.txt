@@ -3,6 +3,7 @@ openai
 requests
 moviepy==1.0.3
 imageio-ffmpeg
+audioop-lts
 Pillow
 numpy
 pandas
