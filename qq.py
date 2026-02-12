@@ -29,6 +29,10 @@ MOVIEPY_AVAILABLE = True
 MOVIEPY_ERROR = ""
 try:
     import numpy as np
+    from PIL import Image, ImageDraw, ImageFilter, ImageFont
+    # Pillow 10.0+에서 ANTIALIAS 제거됨 → MoviePy 내부 호환성 패치
+    if not hasattr(Image, "ANTIALIAS"):
+        Image.ANTIALIAS = Image.LANCZOS
     from moviepy.editor import (
         AudioFileClip,
         CompositeAudioClip,
@@ -36,7 +40,6 @@ try:
         concatenate_videoclips,
         vfx,
     )
-    from PIL import Image, ImageDraw, ImageFilter, ImageFont
 except Exception as exc:
     MOVIEPY_AVAILABLE = False
     MOVIEPY_ERROR = str(exc)
@@ -1956,30 +1959,67 @@ NEWS_SKIP_KEYWORDS = [
     "대통령", "국회", "여당", "야당", "민주당", "국민의힘", "대선", "총선", "탄핵",
     "내각", "장관", "의원", "정치", "헌재", "헌법재판", "법원", "검찰", "수사",
     "선거", "투표", "의석", "국정", "외교", "정부", "청와대", "용산",
+    "계엄", "특검", "공수처", "의회", "입법",
     # 경제/날씨/주식
     "코스피", "코스닥", "주가", "환율", "금리", "증시", "주식", "경제지표",
     "날씨", "미세먼지", "태풍", "폭설", "황사", "기온", "강수",
-    # 기타 딱딱한 것들
-    "GDP", "CPI", "무역수지", "수출입", "통계청",
+    "GDP", "CPI", "무역수지", "수출입", "통계청", "물가", "기준금리",
+    # 부동산/건설
+    "아파트값", "집값", "전셋값", "분양", "재건축", "재개발",
+    # 군사/외교
+    "북한", "핵", "미사일", "국방", "전쟁", "군사", "병역",
+    # 기업/산업 딱딱한 것
+    "삼성전자", "반도체", "배터리", "수주", "실적발표", "영업이익",
 ]
 
-# 뉴스 통과: 제목에 이 키워드가 있으면 우선순위 상승 (핫한 이슈들)
+# K-POP/한류 팬이라면 관심 가질만한 필수 키워드 화이트리스트
+# 제목에 하나라도 포함되어야 통과 (없으면 전량 스킵)
+NEWS_MUST_KEYWORDS = [
+    # K-POP / 아이돌
+    "아이돌", "걸그룹", "보이그룹", "케이팝", "K-POP", "KPOP", "한류",
+    "BTS", "방탄", "블랙핑크", "BLACKPINK", "뉴진스", "NewJeans",
+    "에스파", "aespa", "트와이스", "TWICE", "세븐틴", "SEVENTEEN",
+    "스트레이키즈", "Stray Kids", "NCT", "IVE", "아이브",
+    "르세라핌", "LE SSERAFIM", "엑소", "EXO", "빅뱅", "BIGBANG",
+    "샤이니", "SHINee", "2NE1", "소녀시대", "SNSD",
+    "제니", "리사", "로제", "지수", "지민", "뷔", "정국", "슈가", "RM", "진", "제이홉",
+    "카리나", "윈터", "닝닝", "지젤",
+    "하이브", "HYBE", "SM엔터", "JYP", "YG엔터", "빅히트",
+    # K-드라마 / 한국 영상
+    "K드라마", "넷플릭스", "오징어게임", "무궁화꽃",
+    # 한국 연예 일반
+    "연예인", "배우", "가수", "아이돌", "예능", "드라마", "뮤직비디오", "컴백",
+    "데뷔", "콘서트", "팬미팅", "월드투어", "빌보드", "그래미",
+    # 한국 문화 / 음식 / 뷰티 (외국인 관심)
+    "한국 음식", "한식", "K뷰티", "K패션", "한복",
+    # 바이럴 / SNS 화제
+    "해외반응", "외국인 반응", "유튜브 화제", "틱톡 화제", "SNS 화제",
+    "세계", "글로벌", "월드", "해외",
+]
+
+# 뉴스 통과: 제목에 이 키워드가 있으면 우선순위 상승
 NEWS_HOT_KEYWORDS = [
-    "올림픽", "금메달", "충격", "논란", "폭로", "사망", "체포", "구속",
-    "연예", "아이돌", "배우", "가수", "드라마", "예능", "결혼", "이혼",
-    "사건", "사고", "화재", "폭행", "갑질", "탈세", "불륜",
-    "유튜브", "틱톡", "SNS", "화제", "난리", "역대급", "최초", "최고",
-    "한국인", "외국인", "일본", "중국", "미국", "세계", "글로벌",
-    "가격", "음식", "맛집", "여행", "쇼핑", "패션", "뷰티",
-    "AI", "기술", "신기", "놀라운", "반전", "반박",
+    # K-POP 최고 우선
+    "빌보드", "그래미", "월드투어", "컴백", "신곡", "뮤직비디오",
+    "역대급", "최초", "최고", "1위",
+    # 화제성
+    "충격", "논란", "폭로", "화제", "난리", "반전",
+    # 글로벌 관심
+    "해외반응", "외국인 반응", "세계", "글로벌",
+    # 연애/스캔들 (팬들 관심)
+    "열애", "결혼", "이혼", "열애설", "불륜", "스캔들",
+    # 사건
+    "사망", "체포", "갑질", "탈세",
+    # SNS 바이럴
+    "유튜브", "틱톡", "SNS",
 ]
 
 
 def fetch_natenews_list(max_fetch: int = 30) -> List[Dict[str, str]]:
-    """네이트뉴스 실시간 인기 뉴스 수집 (정치/날씨 필터링 포함)."""
+    """네이트뉴스 실시간 인기 뉴스 수집 (K-POP/한류/연예 화이트리스트 필터링)."""
     list_urls = [
+        "https://news.nate.com/rank/interest?sc=en",    # 연예 (최우선)
         "https://news.nate.com/rank/interest",          # 전체 인기
-        "https://news.nate.com/rank/interest?sc=en",    # 연예
         "https://news.nate.com/rank/interest?sc=sp",    # 스포츠
         "https://news.nate.com/rank/interest?sc=so",    # 사회
         "https://news.nate.com/rank/interest?sc=it",    # IT/과학
@@ -2016,8 +2056,11 @@ def fetch_natenews_list(max_fetch: int = 30) -> List[Dict[str, str]]:
                 full_url = full_url.split("?")[0]
                 if full_url in seen or not title or len(title) < 10:
                     continue
-                # 정치/날씨 등 필터링
+                # 1차: 정치/경제 등 하드 블록
                 if any(kw in title for kw in NEWS_SKIP_KEYWORDS):
+                    continue
+                # 2차: K-POP/한류/연예 화이트리스트 — 하나도 없으면 스킵
+                if not any(kw in title for kw in NEWS_MUST_KEYWORDS):
                     continue
                 seen.add(full_url)
                 # 핫 키워드 포함 여부로 점수 매기기
@@ -3128,8 +3171,7 @@ def run_streamlit_app() -> None:
     st.sidebar.subheader("필수 API/설정")
     st.sidebar.markdown(
         "- `OPENAI_API_KEY`\n"
-        "- `ELEVENLABS_API_KEY`\n"
-        "- `ELEVENLABS_VOICE_ID` 또는 `ELEVENLABS_VOICE_IDS`\n"
+        "- `OPENAI_TTS_VOICE` 또는 `OPENAI_TTS_VOICES`\n"
         "- `SHEET_ID`\n"
         "- `GOOGLE_SERVICE_ACCOUNT_JSON`\n"
         "- `FONT_PATH`"
@@ -3174,7 +3216,7 @@ def run_streamlit_app() -> None:
             "수집할 소스 선택 (복수 선택 가능)",
             options=all_sources,
             default=default_sources,
-            help="네이트뉴스: 정치/날씨 제외 핫한 이슈 자동 필터링\n커뮤니티: 네이트판/에펨코리아/DC/보배드림 유머글",
+            help="네이트뉴스: K-POP/한류/연예 화이트리스트 필터 적용 (정치·경제·날씨 자동 제외)\n커뮤니티: 네이트판/에펨코리아/DC/보배드림 유머글",
         )
         auto_button = st.button("자동 생성 시작", type="primary")
         if auto_button:
