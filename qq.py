@@ -675,7 +675,7 @@ def get_or_download_bgm(
 # 일본인 타겟 숏츠 대본 생성 시스템
 # ─────────────────────────────────────────────
 
-# BGM 무드 카테고리 (mystery / exciting / informative)
+# BGM 무드 카테고리 (mystery / exciting / emotional)
 BGM_MOOD_CATEGORIES: Dict[str, Dict[str, Any]] = {
     "mystery": {
         "description": "미스터리/긴장감 — 충격 폭로, 이면 폭로, 공포 계열",
@@ -700,101 +700,57 @@ BGM_MOOD_CATEGORIES: Dict[str, Dict[str, Any]] = {
     "emotional": {
         "description": "감성/감동 — 스토리텔링, 반전, 뭉클한 계열",
         "pixabay_queries": ["emotional piano", "sad beautiful acoustic", "cinematic emotional"],
-        "folder": "informative",
+        "folder": "emotional",
     },
 }
 
 # 롤렛 주제 풀 — LLM이 이 리스트를 참고해 매번 새 주제 생성
 JP_CONTENT_THEMES: List[str] = [
-    "한국 여행 꿀팁 / 가성비 맛집 랭킹",
-    "일본인이 놀라는 한국 문화 충격",
-    "한국 편의점 신상품 리뷰",
-    "서울/부산/제주 숨겨진 명소",
-    "한국인만 아는 초가성비 맛집",
-    "한국 최근 논란·핫이슈",
-    "K-뷰티 꿀팁·추천 아이템",
-    "한국 길거리 음식 BEST",
-    "한국과 일본의 문화 차이",
-    "한국 여행에서 절대 하면 안 되는 실수",
+    "코카콜라 초기 레시피에 실제로 코카인 성분이 있었던 시절",
+    "맥도날드 형제와 레이 크록의 계약 배신",
+    "타이레놀 청산가리 사건과 브랜드 위기관리",
+    "DB 쿠퍼 항공기 납치 미제 사건",
+    "아폴로 13호 산소탱크 폭발과 기적의 귀환",
+    "폭스바겐 디젤게이트 조작 스캔들",
+    "펩시 챌린지 블라인드 테스트의 반전 결과",
+    "에베레스트 1996 참사와 잘못된 판단들",
+    "보스턴 당밀 대홍수(1919)의 의외의 참사",
+    "메리 셀레스트호 유령선 미스터리",
 ]
 
 # 시스템 프롬프트 (LLM에 직접 전달)
-JP_SHORTS_SYSTEM_PROMPT: str = """あなたは今から「일본인을 타겟으로 한 한국 숏츠 채널」의 **총괄 PD**입니다.
-목표: **조회수 폭발**과 **알고리즘 점령**. 점잖은 말투 절대 금지.
-교과서 일본어 절대 금지. Twitter/TikTok에서 자란 짧고 강한 구어체(반말)로 쓰세요.
+JP_SHORTS_SYSTEM_PROMPT: str = """당신은 유튜브 알고리즘을 장악한 '글로벌 미스터리 & 비하인드 스토리 전문 작가'입니다.
+전 세계적으로 유명하거나 흥미로운 소재(브랜드 탄생 비화, 역사적 아이러니, 미제 사건 등)를 발굴하여, 일본인 시청자가 1초도 눈을 뗄 수 없는 몰입감 100%의 대본을 작성하세요.
 
-채널 컨셉: 일본인 시청자에게 '한국 여행·맛집·문화·이슈'를 폭로하듯 파헤치는 숏츠.
-목표: 3초 안에 시청자를 붙잡고, 끝까지 못 참게 만들고, 구독을 강요하라.
+[작성 규칙]
+1. 소재: 검증된 실화 바탕의 글로벌 이슈 (예: 코카콜라의 마약 성분, 맥도날드 형제의 비극 등).
+2. 구조: 
+   - Hook (0~5초): 상식을 깨는 질문이나 충격적 결말 제시.
+   - Conflict (5~25초): 위기 상황이나 미스터리 심화.
+   - Twist (25~45초): 반전 해결이나 충격적 진실.
+   - Reaction (45~55초): 제3자의 입장에서 던지는 현실적인 리액션 (반말/구어체).
+3. 언어: 자연스러운 일본어 구어체(반말).
 
-[페르소나]
-- "ヤバい", "神レベル", "閲覧注意", "沼にハマる", "やめて、もう無理", "これ反則だろ" 등 적극 활용
-- script_ko: "미친 맛", "사장님이 미쳤어요", "악마의 레시피", "이거 실화냐" 스타일 구어체
-- 모든 문장 짧고 강하게. 긴 설명 금지.
-
-[콘텐츠 전략]
-- 타겟: 한국 문화에 관심 있는 일본인 (2030 여성 위주)
-- hook(order=1): 무조건 부정적 경고 또는 강한 의문문으로 시작
-  예) "これ知らないと韓国旅行で絶対後悔する…", "日本人の99%が騙されてる韓国グルメの真実"
-- body: 단순 설명 금지. 먹은 순간의 감정·충격을 묘사.
-  예) "口の中で爆発する旨味、マジで泣きそうになった"
-- outro_loop(order=99): 마지막 멘트가 자연스럽게 첫 문장으로 이어지도록 끊어라.
-  예) "…でも実は一番ヤバいのは、これ全部ひとつの路地に集まってるって話で——"
-  → 이 문장 뒤에 order=1이 연결되면 자연스럽게 루프되어야 함.
-- pinned_comment: 시청자끼리 논쟁하거나 밸런스 게임을 하게 만드는 질문
-- bgm_mood: "suspense" | "exciting" | "emotional" 중 내용에 맞게 선택
-
-[visual_keyword_en 규칙]
-- 각 세그먼트마다 반드시 영어로 구체적인 Pexels/Pixabay 검색 키워드를 작성.
-- 반드시 한국 관련 키워드 포함. (예: "busan night market" O, "tokyo street" X)
-- 구체적일수록 좋음: "tteokbokki spicy sauce close up" > "korean food"
-
-[출력 형식 — 반드시 순수 JSON만 출력, 마크다운 금지]
+[JSON 출력 포맷 (엄격 준수)]
 {
   "meta": {
-    "title": "일본어 제목 (클릭 유발, 공포·FOMO 극대화)",
-    "hashtags": ["#태그1","#태그2","#태그3","#태그4","#태그5"],
-    "bgm_mood": "suspense 또는 exciting 또는 emotional",
-    "pinned_comment": "논쟁·밸런스게임 유도 일본어 질문"
+    "topic_en": "주제 키워드 (영어)",
+    "title_ja": "일본어 제목 (클릭 유도형)",
+    "hashtags": ["#태그1", "#태그2", "#태그3"],
+    "bgm_mood": "mystery" 또는 "exciting" 또는 "emotional" 
   },
-  "content": [
+  "story_timeline": [
     {
       "order": 1,
       "role": "hook",
-      "script_ja": "일본어 훅 (부정적 경고 or 강한 의문문, 3초)",
-      "script_ko": "한국어 훅",
-      "visual_keyword_en": "korea specific pexels search keyword"
+      "script_ja": "일본어 대본 (강렬한 첫 문장)",
+      "script_ko": "한국어 번역 (확인용)",
+      "visual_search_keyword": "구체적인 영어 검색어 (예: shocked face close up)"
     },
-    {
-      "order": 2,
-      "role": "body",
-      "script_ja": "본문 일본어 1 (감정·충격 묘사)",
-      "script_ko": "본문 한국어 1",
-      "visual_keyword_en": "korea specific keyword"
-    },
-    {
-      "order": 3, "role": "body",
-      "script_ja": "본문 일본어 2", "script_ko": "본문 한국어 2",
-      "visual_keyword_en": "korea specific keyword"
-    },
-    {
-      "order": 4, "role": "body",
-      "script_ja": "본문 일본어 3", "script_ko": "본문 한국어 3",
-      "visual_keyword_en": "korea specific keyword"
-    },
-    {
-      "order": 5, "role": "body",
-      "script_ja": "본문 일본어 4", "script_ko": "본문 한국어 4",
-      "visual_keyword_en": "korea specific keyword"
-    },
-    {
-      "order": 99,
-      "role": "outro_loop",
-      "script_ja": "루프 연결 마지막 멘트 (첫 문장으로 자연스럽게 이어지는 의문·반전)",
-      "script_ko": "루프 마지막 멘트 한국어",
-      "visual_keyword_en": "korea subscribe button question mark"
-    }
+    ... (이하 Conflict, Twist, Reaction 순서대로 작성) ...
   ]
-}"""
+}
+"""
 
 
 def generate_script_jp(
@@ -810,10 +766,11 @@ def generate_script_jp(
 
     theme_pool = "\n".join(f"- {t}" for t in JP_CONTENT_THEMES)
     user_text = (
-        "아래 주제 풀에서 영감을 받아, 오늘 가장 조회수가 터질 것 같은 주제를 스스로 선택하거나 새로 창작하세요.\n\n"
+        "아래 주제 풀에서 영감을 받아, 전 세계적으로 검증된 미스터리/브랜드 비화/기이한 사건을 선택하거나 새로 발굴하세요.\n"
+        "반드시 Hook → Conflict → Twist → Reaction의 4단 구조를 지키고, 순수 JSON만 출력하세요.\n\n"
         f"[주제 풀 예시]\n{theme_pool}\n\n"
         + (f"[추가 힌트]\n{extra_hint}\n\n" if extra_hint else "")
-        + "위 시스템 프롬프트의 규칙을 완벽히 지켜 JSON만 출력하세요."
+        + "위 시스템 프롬프트의 규칙과 JSON 포맷을 완벽히 지켜 순수 JSON만 출력하세요."
     )
 
     client = OpenAI(api_key=config.openai_api_key)
@@ -829,41 +786,85 @@ def generate_script_jp(
     if not result:
         raise RuntimeError("LLM JSON 파싱 실패")
 
-    # ── 새 스키마 (meta + content[]) 정규화 ──────────────────
-    meta = result.get("meta", {})
-    content_list = result.get("content", [])
+    # ── 새 스키마 (meta + story_timeline[]) 정규화 ───────────
+    meta = result.get("meta", {}) if isinstance(result.get("meta", {}), dict) else {}
+    story_list = result.get("story_timeline", None)
+    if not isinstance(story_list, list):
+        # 구 스키마 fallback
+        story_list = result.get("content", []) if isinstance(result.get("content"), list) else []
 
     # meta 필드 검증
-    if not meta.get("title"):
-        meta["title"] = meta.get("video_title", "한국 숏츠")
-    meta["hashtags"] = normalize_hashtags(meta.get("hashtags", []))
+    title_ja = meta.get("title_ja") or meta.get("title") or meta.get("video_title") or "ミステリーショーツ"
+    meta["title_ja"] = title_ja
+    meta["title"] = title_ja
+    if not meta.get("topic_en"):
+        meta["topic_en"] = ""
+    hashtags = meta.get("hashtags", [])
+    if isinstance(hashtags, str):
+        hashtags = [t for t in re.split(r"[,\s]+", hashtags) if t]
+    meta["hashtags"] = normalize_hashtags(hashtags if isinstance(hashtags, list) else [])
     if meta.get("bgm_mood") not in BGM_MOOD_CATEGORIES:
-        meta["bgm_mood"] = "exciting"
+        meta["bgm_mood"] = "mystery"
     if not meta.get("pinned_comment"):
         meta["pinned_comment"] = ""
 
-    # content[] 정렬 및 검증
-    if isinstance(content_list, list):
-        content_list = sorted(content_list, key=lambda x: x.get("order", 99))
-    else:
-        content_list = []
+    # story_timeline 정렬 및 검증
+    normalized: List[Dict[str, Any]] = []
+    allowed_roles = {"hook", "conflict", "twist", "reaction"}
+    order_map = {"hook": 1, "conflict": 2, "twist": 3, "reaction": 4}
+    for idx, raw in enumerate(story_list or []):
+        if not isinstance(raw, dict):
+            continue
+        role = str(raw.get("role", "")).strip().lower()
+        if role not in allowed_roles:
+            if role in {"outro", "outro_loop"}:
+                role = "reaction"
+            elif role == "hook":
+                role = "hook"
+            else:
+                role = "conflict" if idx > 0 else "hook"
+        order_val = raw.get("order")
+        if not isinstance(order_val, int):
+            order_val = order_map.get(role, idx + 1)
+        script_ja = str(raw.get("script_ja") or "").strip()
+        script_ko = str(raw.get("script_ko") or "").strip()
+        if not script_ko and script_ja:
+            script_ko = script_ja
+        visual_kw = raw.get("visual_search_keyword") or raw.get("visual_keyword_en") or ""
+        visual_kw = str(visual_kw).strip() or "mystery case files close up"
+        normalized.append(
+            {
+                "order": order_val,
+                "role": role,
+                "script_ja": script_ja,
+                "script_ko": script_ko,
+                "visual_search_keyword": visual_kw,
+            }
+        )
 
-    # visual_keyword_en 한국 키워드 강제
-    for item in content_list:
-        kw = item.get("visual_keyword_en", "korea street")
-        if not any(k in kw.lower() for k in ("korea", "seoul", "busan", "jeju", "korean")):
-            item["visual_keyword_en"] = f"korea {kw}"
-
+    normalized = sorted(normalized, key=lambda x: x.get("order", 99))
     result["meta"] = meta
-    result["content"] = content_list
+    result["story_timeline"] = normalized
+    # 하위 호환: UI/기존 로직에서 content를 참조하는 경우 대응
+    result["content"] = normalized
     return result
+
+
+def _get_story_timeline(script: Dict[str, Any]) -> List[Dict[str, Any]]:
+    timeline = script.get("story_timeline")
+    if isinstance(timeline, list):
+        return timeline
+    content_list = script.get("content")
+    if isinstance(content_list, list):
+        return content_list
+    return []
 
 
 def _script_to_beats(script: Dict[str, Any]) -> List[str]:
     """generate_script_jp 결과(새 스키마)를 TTS/영상용 텍스트 리스트로 변환."""
-    content_list = script.get("content", [])
-    if content_list:
-        return [item["script_ja"] for item in content_list if item.get("script_ja")]
+    timeline = _get_story_timeline(script)
+    if timeline:
+        return [item.get("script_ja", "") for item in timeline if item.get("script_ja")]
     # 구 스키마 fallback (하위 호환)
     texts: List[str] = []
     hook = script.get("hook_3_sec", "")
@@ -880,9 +881,9 @@ def _script_to_beats(script: Dict[str, Any]) -> List[str]:
 
 def _script_to_beats_ko(script: Dict[str, Any]) -> List[str]:
     """generate_script_jp 결과에서 한국어 텍스트 리스트를 반환 (참고용)."""
-    content_list = script.get("content", [])
-    if content_list:
-        return [item.get("script_ko", item.get("script_ja", "")) for item in content_list]
+    timeline = _get_story_timeline(script)
+    if timeline:
+        return [item.get("script_ko", item.get("script_ja", "")) for item in timeline]
     texts_ko: List[str] = []
     hook_ko = script.get("hook_3_sec_ko", script.get("hook_3_sec", ""))
     if hook_ko:
@@ -897,19 +898,54 @@ def _script_to_beats_ko(script: Dict[str, Any]) -> List[str]:
 
 
 def _script_to_visual_keywords(script: Dict[str, Any]) -> List[str]:
-    """각 세그먼트의 visual_keyword_en 리스트 반환."""
-    content_list = script.get("content", [])
-    if content_list:
-        return [item.get("visual_keyword_en", "korea street") for item in content_list]
+    """각 세그먼트의 visual_search_keyword 리스트 반환."""
+    timeline = _get_story_timeline(script)
+    if timeline:
+        return [
+            item.get("visual_search_keyword")
+            or item.get("visual_keyword_en")
+            or "mystery case files close up"
+            for item in timeline
+        ]
     # 구 스키마 fallback — 전체 공통 키워드 반복
-    default_kw = script.get("bg_search_query", "korea street city")
+    default_kw = script.get("bg_search_query", "mystery case files close up")
     texts = _script_to_beats(script)
     return [default_kw] * len(texts)
 
 
+def _script_to_roles(script: Dict[str, Any]) -> List[str]:
+    """각 세그먼트의 role 리스트 반환."""
+    timeline = _get_story_timeline(script)
+    if timeline:
+        roles: List[str] = []
+        for item in timeline:
+            role = str(item.get("role", "")).strip().lower()
+            roles.append(role or "conflict")
+        return roles
+    # 구 스키마 fallback
+    texts = _script_to_beats(script)
+    if not texts:
+        return []
+    if len(texts) == 1:
+        return ["hook"]
+    return ["hook"] + ["body"] * (len(texts) - 2) + ["outro"]
+
+
+def _build_caption_styles(roles: List[str], count: int) -> List[str]:
+    if count <= 0:
+        return []
+    if not roles:
+        return ["default"] * count
+    styles: List[str] = []
+    for i in range(count):
+        role = roles[i] if i < len(roles) else ""
+        styles.append("reaction" if role == "reaction" else "default")
+    return styles
+
+
 def match_bgm_by_mood(config: AppConfig, mood: str) -> Optional[str]:
     """
-    mood(mystery/exciting/informative)에 맞는 BGM 파일 반환.
+    mood(mystery/exciting/emotional)에 맞는 BGM 파일 반환.
     1) assets/bgm/{mood}/ 폴더에서 랜덤 선택
     2) 없으면 Pixabay에서 다운로드 시도
     3) 그래도 없으면 기존 pick_bgm_path() fallback
@@ -1374,6 +1410,7 @@ def _draw_subtitle(
     font_path: str,
     canvas_width: int,
     canvas_height: int,
+    style: str = "default",
 ) -> Image.Image:
     """자막을 YouTube Shorts 안전 영역(화면 60% 지점)에 렌더링.
     모바일 Shorts 하단 UI(제목·좋아요·댓글 등)가 화면 하단 ~30%를 덮으므로
@@ -1394,15 +1431,50 @@ def _draw_subtitle(
     safe_bottom = int(canvas_height * 0.68)
     box_y = safe_bottom - total_h
     box_y = max(int(canvas_height * 0.45), box_y)  # 최소 45% 아래 유지
+    # 스타일 결정 (reaction은 말풍선 느낌)
+    style_key = (style or "").strip().lower()
+    is_reaction = style_key in {"reaction", "outro", "outro_loop"}
+    if is_reaction:
+        box_fill = (255, 232, 92, 220)
+        text_fill = (25, 20, 0)
+        stroke_fill = (0, 0, 0)
+        stroke_width = 2
+    else:
+        box_fill = (0, 0, 0, 170)
+        text_fill = (255, 255, 255)
+        stroke_fill = (0, 0, 0)
+        stroke_width = 3
+
     # 반투명 배경 박스 (텍스트 크기에 맞게만, 화면 하단까지 늘리지 않음)
     box_pad = 18
     overlay = Image.new("RGBA", image.size, (0, 0, 0, 0))
     box_draw = ImageDraw.Draw(overlay)
-    box_draw.rectangle(
-        [pad_x - box_pad, box_y - box_pad,
-         canvas_width - pad_x + box_pad, box_y + total_h + box_pad],
-        fill=(0, 0, 0, 170),
-    )
+    box_rect = [
+        pad_x - box_pad,
+        box_y - box_pad,
+        canvas_width - pad_x + box_pad,
+        box_y + total_h + box_pad,
+    ]
+    if hasattr(box_draw, "rounded_rectangle") and is_reaction:
+        box_draw.rounded_rectangle(box_rect, radius=24, fill=box_fill)
+    else:
+        box_draw.rectangle(box_rect, fill=box_fill)
+
+    # 말풍선 꼬리 (reaction 전용)
+    if is_reaction:
+        tail_w = max(26, int(canvas_width * 0.05))
+        tail_h = max(16, int(canvas_width * 0.03))
+        tail_x = canvas_width // 2
+        tail_y = box_rect[3]
+        if tail_y + tail_h < canvas_height * 0.85:
+            box_draw.polygon(
+                [
+                    (tail_x - tail_w // 2, tail_y),
+                    (tail_x + tail_w // 2, tail_y),
+                    (tail_x, tail_y + tail_h),
+                ],
+                fill=box_fill,
+            )
     image = Image.alpha_composite(image.convert("RGBA"), overlay).convert("RGB")
     draw = ImageDraw.Draw(image)
     y = box_y
@@ -1412,8 +1484,14 @@ def _draw_subtitle(
         except Exception:
             lw = len(line) * font_size
         lx = max(pad_x, (canvas_width - lw) // 2)
-        draw.text((lx, y), line, font=font, fill=(255, 255, 255),
-                  stroke_width=3, stroke_fill=(0, 0, 0))
+        draw.text(
+            (lx, y),
+            line,
+            font=font,
+            fill=text_fill,
+            stroke_width=stroke_width,
+            stroke_fill=stroke_fill,
+        )
         y += line_h
     return image
 
@@ -1446,6 +1524,7 @@ def _compose_frame(
     text: str,
     size: Tuple[int, int],
     font_path: str,
+    style: str = "default",
 ) -> Image.Image:
     """정적 이미지 배경 프레임 생성 (배경영상 없을 때 fallback)."""
     if not MOVIEPY_AVAILABLE:
@@ -1454,7 +1533,7 @@ def _compose_frame(
     background = _make_background(base, size)
     composed = background.copy()
     width, height = size
-    composed = _draw_subtitle(composed, text, font_path, width, height)
+    composed = _draw_subtitle(composed, text, font_path, width, height, style=style)
     composed = _overlay_sticker(composed, asset_path, width, height, size=200)
     return composed
 
@@ -1635,6 +1714,7 @@ def _generate_bgm_fallback(output_path: str, duration: float, mood: str) -> str:
         "mystery":     [110.0, 146.8, 164.8],   # Am chord drone
         "exciting":    [220.0, 277.2, 329.6],   # C major bright
         "informative": [196.0, 246.9, 293.7],   # G major mellow
+        "emotional":   [174.6, 220.0, 261.6],   # F major warm
     }
     freqs = mood_chords.get(mood, mood_chords["exciting"])
     samples: List[int] = []
@@ -1687,6 +1767,7 @@ def render_video(
     output_path: str,
     bgm_path: str | None = None,
     bgm_volume: float = 0.08,
+    caption_styles: Optional[List[str]] = None,
     bg_video_path: str | None = None,
     bg_video_paths: Optional[List[Optional[str]]] = None,
 ) -> str:
@@ -1718,6 +1799,11 @@ def render_video(
     for index, text in enumerate(texts):
         asset_path = asset_paths[min(index, len(asset_paths) - 1)]
         dur = durations[index]
+        style = (
+            caption_styles[index]
+            if caption_styles and index < len(caption_styles)
+            else "default"
+        )
 
         # 세그먼트별 영상 우선, 없으면 전역 fallback
         seg_path = (bg_video_paths[index] if bg_video_paths and index < len(bg_video_paths) else None)
@@ -1733,17 +1819,18 @@ def render_video(
             _text = text
             _asset = asset_path
             _font = config.font_path
+            _style = style
 
-            def _make_frame(frame, __text=_text, __asset=_asset, __font=_font):
+            def _make_frame(frame, __text=_text, __asset=_asset, __font=_font, __style=_style):
                 img = Image.fromarray(frame).convert("RGB")
-                img = _draw_subtitle(img, __text, __font, W, H)
+                img = _draw_subtitle(img, __text, __font, W, H, style=__style)
                 img = _overlay_sticker(img, __asset, W, H, size=320)
                 return np.array(img)
 
             clip = seg.fl_image(_make_frame).set_duration(dur)
         else:
             # fallback: 정적 이미지 배경
-            frame_img = _compose_frame(asset_path, text, (W, H), config.font_path)
+            frame_img = _compose_frame(asset_path, text, (W, H), config.font_path, style=style)
             clip = ImageClip(np.array(frame_img)).set_duration(dur)
             clip = clip.fx(vfx.resize, lambda t, d=dur: 1 + 0.02 * (t / max(d, 0.1)))
 
@@ -2412,8 +2499,8 @@ def _script_plan_text(script: Dict[str, Any]) -> str:
     texts = _script_to_beats(script)
     middle = texts[1] if len(texts) > 1 else (texts[0] if texts else "")
     return (
-        f"제목: {_meta.get('title', script.get('video_title',''))}\n"
-        f"무드: {_meta.get('bgm_mood', script.get('mood',''))}\n"
+        f"제목: {_meta.get('title_ja', _meta.get('title', script.get('video_title','')))}\n"
+        f"무드: {_meta.get('bgm_mood', script.get('mood','mystery'))}\n"
         f"훅: {texts[0] if texts else ''}\n"
         f"전개: {middle}\n"
         f"구독유도: {texts[-1] if texts else ''}\n"
@@ -2444,16 +2531,18 @@ def _auto_jp_flow(config: AppConfig, progress, status_box, extra_hint: str = "")
 
     # ── 새 스키마 필드 추출 ───────────────────────────────
     meta = script.get("meta", {})
-    content_list = script.get("content", [])
+    content_list = _get_story_timeline(script)
 
-    video_title = meta.get("title", script.get("video_title", "한국 숏츠"))
+    video_title = meta.get("title_ja", meta.get("title", script.get("video_title", "ミステリーショーツ")))
     hashtags = meta.get("hashtags", script.get("hashtags", []))
-    mood = meta.get("bgm_mood", script.get("mood", "exciting"))
+    mood = meta.get("bgm_mood", script.get("mood", "mystery"))
     pinned = meta.get("pinned_comment", script.get("pinned_comment", ""))
 
     texts = _script_to_beats(script)
     texts_ko = _script_to_beats_ko(script)
     visual_keywords = _script_to_visual_keywords(script)
+    roles = _script_to_roles(script)
+    caption_styles = _build_caption_styles(roles, len(texts))
 
     st.info(f"제목: **{video_title}** | 무드: **{mood}**")
 
@@ -2491,7 +2580,7 @@ def _auto_jp_flow(config: AppConfig, progress, status_box, extra_hint: str = "")
 
     # ── 에셋 선택 ─────────────────────────────────────────
     mood_to_cat = {"mystery": "shocking", "suspense": "shocking", "exciting": "exciting",
-                   "informative": "humor", "emotional": "humor"}
+                   "informative": "humor", "emotional": "touching"}
     content_category = mood_to_cat.get(mood, "exciting")
     assets: List[str] = []
     for _ in texts:
@@ -2573,6 +2662,7 @@ def _auto_jp_flow(config: AppConfig, progress, status_box, extra_hint: str = "")
         bgm_path=bgm_path,
         bgm_volume=config.bgm_volume,
         bg_video_paths=bg_video_paths,
+        caption_styles=caption_styles,
     )
 
     # ── 유튜브 업로드 ─────────────────────────────────────
@@ -2639,7 +2729,7 @@ def run_streamlit_app() -> None:
             os.path.join(config.assets_dir, "inbox"),
             os.path.join(config.assets_dir, "bgm"),
             os.path.join(config.assets_dir, "bgm", "trending"),
-            # 무드별 BGM 디렉토리 (mystery / exciting / informative)
+            # 무드별 BGM 디렉토리 (mystery / exciting / emotional)
             *[os.path.join(config.assets_dir, "bgm", mood) for mood in BGM_MOOD_CATEGORIES],
             os.path.join(config.assets_dir, "sfx"),
             os.path.join(config.assets_dir, "bg_videos"),
@@ -2679,7 +2769,7 @@ def run_streamlit_app() -> None:
         "- `SERPAPI_API_KEY` (트렌드 수집)\n"
         "- `OPENAI_VISION_MODEL` (이미지 태그 분석)\n"
         "- `BGM_MODE`, `BGM_VOLUME` (배경음악)\n\n"
-        "**BGM 무드 폴더:** `assets/bgm/mystery/`, `assets/bgm/exciting/`, `assets/bgm/informative/`"
+        "**BGM 무드 폴더:** `assets/bgm/mystery/`, `assets/bgm/exciting/`, `assets/bgm/emotional/`"
     )
     missing = _missing_required(config)
     if missing:
@@ -2698,7 +2788,7 @@ def run_streamlit_app() -> None:
         status_box = st.empty()
 
         st.subheader("일본인 타겟 숏츠 자동 생성 (AI 주제 자동 선정)")
-        st.caption("크롤링 없이 LLM이 매번 새로운 주제를 선정합니다. 무드(mystery/exciting/informative)에 맞게 BGM도 자동 매칭됩니다.")
+        st.caption("크롤링 없이 LLM이 매번 새로운 주제를 선정합니다. 무드(mystery/exciting/emotional)에 맞게 BGM도 자동 매칭됩니다.")
 
         extra_hint = st.text_input(
             "주제 힌트 (선택)",
@@ -2727,10 +2817,13 @@ def run_streamlit_app() -> None:
         if script:
             st.subheader("생성된 대본")
             _meta = script.get("meta", {})
-            _content = script.get("content", [])
-            _mood_val = _meta.get("bgm_mood", script.get("mood", "exciting"))
+            _content = _get_story_timeline(script)
+            _mood_val = _meta.get("bgm_mood", script.get("mood", "mystery"))
             st.caption(f"무드: **{_mood_val}**")
-            video_title_val = st.text_input("유튜브 제목", value=_meta.get("title", script.get("video_title", "")))
+            video_title_val = st.text_input(
+                "유튜브 제목",
+                value=_meta.get("title_ja", _meta.get("title", script.get("video_title", ""))),
+            )
             hashtags_val = st.text_input(
                 "해시태그(공백 구분)",
                 value=" ".join(_meta.get("hashtags", script.get("hashtags", []))),
@@ -2787,9 +2880,11 @@ def run_streamlit_app() -> None:
                         mood = _mood_val
                         _status_update(progress, status_box, 0.15, f"BGM 매칭 중 ({mood})")
                         bgm_path = match_bgm_by_mood(config, mood)
+                        roles = _script_to_roles(script)
+                        caption_styles = _build_caption_styles(roles, len(texts))
 
                         mood_to_cat = {"mystery": "shocking", "suspense": "shocking",
-                                       "exciting": "exciting", "informative": "humor", "emotional": "humor"}
+                                       "exciting": "exciting", "informative": "humor", "emotional": "touching"}
                         cat = mood_to_cat.get(mood, "exciting")
                         assets = []
                         for _ in texts:
@@ -2830,6 +2925,7 @@ def run_streamlit_app() -> None:
                             bgm_path=bgm_path,
                             bgm_volume=config.bgm_volume,
                             bg_video_paths=bg_vids_manual,
+                            caption_styles=caption_styles,
                         )
                         video_id = ""
                         video_url = ""
@@ -3397,11 +3493,13 @@ def run_batch(count: int, seed: str = "", beats: int = 7) -> None:
     for index in range(count):
         script = generate_script_jp(config, extra_hint=seed)
         _meta_b = script.get("meta", {})
-        mood = _meta_b.get("bgm_mood", script.get("mood", "exciting"))
+        mood = _meta_b.get("bgm_mood", script.get("mood", "mystery"))
         texts = _script_to_beats(script)
         visual_kws = _script_to_visual_keywords(script)
+        roles = _script_to_roles(script)
+        caption_styles = _build_caption_styles(roles, len(texts))
         mood_to_cat = {"mystery": "shocking", "suspense": "shocking",
-                       "exciting": "exciting", "informative": "humor", "emotional": "humor"}
+                       "exciting": "exciting", "informative": "humor", "emotional": "touching"}
         cat = mood_to_cat.get(mood, "exciting")
         assets = []
         for _ in texts:
@@ -3437,10 +3535,11 @@ def run_batch(count: int, seed: str = "", beats: int = 7) -> None:
             bgm_path=bgm_path,
             bgm_volume=config.bgm_volume,
             bg_video_paths=bg_vids_b,
+            caption_styles=caption_styles,
         )
         video_id = ""
         video_url = ""
-        _title_b = _meta_b.get("title", script.get("video_title", ""))
+        _title_b = _meta_b.get("title_ja", _meta_b.get("title", script.get("video_title", "")))
         _hashtags_b = _meta_b.get("hashtags", script.get("hashtags", []))
         _pinned_b = _meta_b.get("pinned_comment", script.get("pinned_comment", ""))
         if config.enable_youtube_upload:
