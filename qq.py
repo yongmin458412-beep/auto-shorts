@@ -487,6 +487,7 @@ class AppConfig:
     ab_report_days: int
     ab_report_max_items: int
     ab_report_state_path: str
+    jp_youtube_only: bool
     # 플랫폼: instagram(기본), youtube, tiktok(준비)
     upload_platform: str
     enable_instagram_upload: bool
@@ -600,11 +601,12 @@ def load_config() -> AppConfig:
         ab_report_days=int(_get_secret("AB_REPORT_DAYS", "7") or 7),
         ab_report_max_items=int(_get_secret("AB_REPORT_MAX_ITEMS", "20") or 20),
         ab_report_state_path=ab_report_state_path,
-        upload_platform=(_get_secret("UPLOAD_PLATFORM", "instagram") or "instagram").strip().lower(),
-        enable_instagram_upload=_get_bool("ENABLE_INSTAGRAM_UPLOAD", True),
+        upload_platform=(_get_secret("UPLOAD_PLATFORM", "youtube") or "youtube").strip().lower(),
+        enable_instagram_upload=_get_bool("ENABLE_INSTAGRAM_UPLOAD", False),
         instagram_access_token=(_get_secret("INSTAGRAM_ACCESS_TOKEN", "") or "").strip(),
         instagram_user_id=(_get_secret("INSTAGRAM_USER_ID", "") or "").strip(),
         instagram_use_popular_audio=_get_bool("INSTAGRAM_USE_POPULAR_AUDIO", True),
+        jp_youtube_only=_get_bool("JP_YOUTUBE_ONLY", True),
     )
 
 
@@ -4364,7 +4366,7 @@ def _missing_required(config: AppConfig) -> List[str]:
         missing.append("GOOGLE_SERVICE_ACCOUNT_JSON")
     if not config.font_path:
         missing.append("FONT_PATH")
-    if getattr(config, "enable_instagram_upload", False):
+    if getattr(config, "enable_instagram_upload", False) and not getattr(config, "jp_youtube_only", False):
         if not getattr(config, "instagram_access_token", ""):
             missing.append("INSTAGRAM_ACCESS_TOKEN")
         if not getattr(config, "instagram_user_id", ""):
@@ -4738,7 +4740,13 @@ def _auto_jp_flow(
     video_url = ""
     upload_error = ""
     upload_reason = ""
-    if getattr(config, "enable_instagram_upload", False) and config.instagram_access_token and config.instagram_user_id:
+    use_instagram = (
+        getattr(config, "enable_instagram_upload", False)
+        and not getattr(config, "jp_youtube_only", False)
+        and config.instagram_access_token
+        and config.instagram_user_id
+    )
+    if use_instagram:
         _telemetry_log("인스타그램 릴스 업로드 시작", config)
         _status_update(progress, status_box, 0.85, "인스타그램 릴스 업로드")
         try:
@@ -4838,8 +4846,8 @@ def _auto_jp_flow(
         "video_path": output_path,
         "youtube_video_id": video_id,
         "youtube_url": video_url,
-        "instagram_media_id": video_id if getattr(config, "enable_instagram_upload", False) else "",
-        "platform": "instagram" if getattr(config, "enable_instagram_upload", False) else "youtube",
+        "instagram_media_id": video_id if use_instagram else "",
+        "platform": "instagram" if use_instagram else "youtube",
         "caption_variant": caption_variant,
         "bgm_file": os.path.basename(bgm_path) if bgm_path else "",
         "status": "ok" if not upload_error else "error",
@@ -4917,7 +4925,8 @@ def run_streamlit_app() -> None:
 
     st.sidebar.title("숏츠 자동화 스튜디오")
     st.sidebar.subheader("상태")
-    st.sidebar.write(f"인스타그램 업로드: {'켜짐' if getattr(config, 'enable_instagram_upload', False) else '꺼짐'}")
+    use_instagram_ui = getattr(config, "enable_instagram_upload", False) and not getattr(config, "jp_youtube_only", False)
+    st.sidebar.write(f"인스타그램 업로드: {'켜짐' if use_instagram_ui else '꺼짐'}")
     st.sidebar.write(f"유튜브 업로드: {'켜짐' if config.enable_youtube_upload else '꺼짐'}")
     st.sidebar.write(f"MoviePy 사용 가능: {'예' if MOVIEPY_AVAILABLE else '아니오'}")
     st.sidebar.write(f"BGM 모드: {config.bgm_mode or 'off'}")
@@ -4973,6 +4982,7 @@ def run_streamlit_app() -> None:
         "- `AUTO_RUN_LOCK_PATH` (중복 실행 방지)\n"
         "- `YOUTUBE_API_KEY` (A/B 리포트 통계용)\n"
         "- `AB_REPORT_ENABLED`, `AB_REPORT_HOUR`, `AB_REPORT_DAYS`\n\n"
+        "- `JP_YOUTUBE_ONLY` (일본 쇼츠 유튜브 전용)\n\n"
         "**BGM 무드 폴더:** `assets/bgm/mystery_suspense/`, `assets/bgm/fast_exciting/`"
     )
     missing = _missing_required(config)
@@ -5257,7 +5267,13 @@ def run_streamlit_app() -> None:
                     video_url = ""
                     upload_error = ""
                     upload_reason = ""
-                    if getattr(config, "enable_instagram_upload", False) and config.instagram_access_token and config.instagram_user_id:
+                    use_instagram = (
+                        getattr(config, "enable_instagram_upload", False)
+                        and not getattr(config, "jp_youtube_only", False)
+                        and config.instagram_access_token
+                        and config.instagram_user_id
+                    )
+                    if use_instagram:
                         _status_update(progress, status_box, 0.85, "인스타그램 릴스 업로드")
                         try:
                             from platforms.instagram import add_instagram_comment, upload_instagram_reel
@@ -6074,7 +6090,13 @@ def run_batch(count: int, seed: str = "", beats: int = 7) -> None:
         _pinned_b = _meta_b.get("pinned_comment", script.get("pinned_comment", ""))
         upload_error = ""
         upload_reason = ""
-        if getattr(config, "enable_instagram_upload", False) and config.instagram_access_token and config.instagram_user_id:
+        use_instagram = (
+            getattr(config, "enable_instagram_upload", False)
+            and not getattr(config, "jp_youtube_only", False)
+            and config.instagram_access_token
+            and config.instagram_user_id
+        )
+        if use_instagram:
             try:
                 from platforms.instagram import add_instagram_comment, upload_instagram_reel
                 cap_b = f"{_title_b}\n\n{_pinned_b}\n\n" + " ".join(_hashtags_b)
