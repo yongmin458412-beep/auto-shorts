@@ -1171,7 +1171,13 @@ def generate_script_jp(
         if issues:
             feedback = " / ".join(issues)
             last_error = "스토리 구조 품질 미달"
-            continue
+            if attempt < 2:
+                continue
+            # 마지막 시도면 경고 로그만 남기고 진행 (파이프라인 중단 방지)
+            try:
+                _telemetry_log(f"스토리 품질 경고(통과 처리): {feedback}", config)
+            except Exception:
+                pass
 
         result["meta"] = meta
         result["story_timeline"] = normalized
