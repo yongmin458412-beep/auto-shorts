@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import json
+import ast
 import base64
 import mimetypes
 import os
@@ -529,21 +530,77 @@ def load_config() -> AppConfig:
     )
 
 
+def _strip_code_fences(text: str) -> str:
+    if "```" not in text:
+        return text
+    blocks = re.findall(r"```(?:json)?\\s*([\\s\\S]*?)```", text, flags=re.IGNORECASE)
+    if blocks:
+        return blocks[0].strip()
+    return text
+
+
+def _extract_first_json_object(text: str) -> str:
+    start = text.find("{")
+    if start == -1:
+        return ""
+    depth = 0
+    in_string = False
+    escape = False
+    for idx in range(start, len(text)):
+        ch = text[idx]
+        if ch == "\\" and in_string:
+            escape = not escape
+            continue
+        if ch == '"' and not escape:
+            in_string = not in_string
+        if in_string:
+            escape = False
+            continue
+        if ch == "{":
+            depth += 1
+        elif ch == "}":
+            depth -= 1
+            if depth == 0:
+                return text[start : idx + 1]
+        escape = False
+    return ""
+
+
 def extract_json(text: str) -> Dict[str, Any]:
     if not text:
         return {}
-    try:
-        return json.loads(text)
-    except Exception:
-        pass
-    start = text.find("{")
-    end = text.rfind("}")
-    if start == -1 or end == -1:
-        return {}
-    try:
-        return json.loads(text[start : end + 1])
-    except Exception:
-        return {}
+    raw = text.strip()
+    raw = _strip_code_fences(raw)
+    candidates: List[str] = []
+    if raw:
+        candidates.append(raw)
+    extracted = _extract_first_json_object(raw)
+    if extracted and extracted not in candidates:
+        candidates.append(extracted)
+    for candidate in candidates:
+        cand = candidate.strip()
+        if not cand:
+            continue
+        # 흔한 JSON 오류 보정: trailing comma 제거
+        cand = re.sub(r",\\s*([}\\]])", r"\\1", cand)
+        try:
+            parsed = json.loads(cand)
+            if isinstance(parsed, dict):
+                return parsed
+            if isinstance(parsed, list):
+                return {"story_timeline": parsed}
+        except Exception:
+            pass
+        # single-quote dict 등 파이썬 literal fallback
+        try:
+            parsed = ast.literal_eval(cand)
+            if isinstance(parsed, dict):
+                return parsed
+            if isinstance(parsed, list):
+                return {"story_timeline": parsed}
+        except Exception:
+            pass
+    return {}
 
 
 def normalize_hashtags(tags: List[str]) -> List[str]:
@@ -887,7 +944,17 @@ def generate_script_jp(
     output_text = getattr(response, "output_text", "") or ""
     result = extract_json(output_text)
     if not result:
-        raise RuntimeError("LLM JSON 파싱 실패")
+        # 원문 일부 저장 + 텔레그램 디버그
+        try:
+            _telemetry_log(f"LLM JSON 파싱 실패. 원문 일부:\n{output_text[:1600]}", config)
+        except Exception:
+            pass
+        try:
+            with open("/tmp/auto_shorts_llm_output.log", "w", encoding="utf-8") as file:
+                file.write(output_text)
+        except Exception:
+            pass
+        raise RuntimeError("LLM JSON 파싱 실패 (원문: /tmp/auto_shorts_llm_output.log)")
 
     # ── 새 스키마 (meta + story_timeline[]) 정규화 ───────────
     meta = result.get("meta", {}) if isinstance(result.get("meta", {}), dict) else {}
@@ -3944,7 +4011,11 @@ def run_streamlit_app() -> None:
         st.divider()
 
         st.subheader("최근 에러 로그")
-        err_paths = ["/tmp/auto_shorts_error.log", "/tmp/auto_shorts_render_error.log"]
+        err_paths = [
+            "/tmp/auto_shorts_error.log",
+            "/tmp/auto_shorts_render_error.log",
+            "/tmp/auto_shorts_llm_output.log",
+        ]
         shown = False
         for ep in err_paths:
             if os.path.exists(ep):
