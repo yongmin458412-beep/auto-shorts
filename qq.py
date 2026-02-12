@@ -12,6 +12,7 @@ from html import unescape
 from urllib.parse import urljoin, urlencode, urlparse
 from dataclasses import dataclass
 from datetime import datetime
+from zoneinfo import ZoneInfo
 from typing import Any, Dict, List, Optional, Tuple
 
 import pandas as pd
@@ -442,6 +443,13 @@ class AppConfig:
     bgm_mode: str
     bgm_volume: float
     asset_overlay_mode: str
+    max_video_duration_sec: float
+    require_approval: bool
+    auto_run_daily: bool
+    auto_run_hour: int
+    auto_run_tz: str
+    auto_run_state_path: str
+    generated_bg_dir: str
     telegram_bot_token: str
     telegram_admin_chat_id: str
     telegram_timeout_sec: int
@@ -463,6 +471,11 @@ def load_config() -> AppConfig:
         _get_secret("TELEGRAM_OFFSET_PATH", "data/state/telegram_offset.json")
         or "data/state/telegram_offset.json",
         "/tmp/auto_shorts_state/telegram_offset.json",
+    )
+    auto_run_state_path = _ensure_writable_file(
+        _get_secret("AUTO_RUN_STATE_PATH", "data/state/auto_run_state.json")
+        or "data/state/auto_run_state.json",
+        "/tmp/auto_shorts_state/auto_run_state.json",
     )
     return AppConfig(
         openai_api_key=_get_secret("OPENAI_API_KEY", "") or "",
@@ -492,6 +505,13 @@ def load_config() -> AppConfig:
         bgm_mode=_get_secret("BGM_MODE", "off") or "off",
         bgm_volume=float(_get_secret("BGM_VOLUME", "0.12") or 0.12),
         asset_overlay_mode=_get_secret("ASSET_OVERLAY_MODE", "off") or "off",
+        max_video_duration_sec=float(_get_secret("MAX_VIDEO_DURATION_SEC", "59") or 59),
+        require_approval=_get_bool("REQUIRE_APPROVAL", False),
+        auto_run_daily=_get_bool("AUTO_RUN_DAILY", True),
+        auto_run_hour=int(_get_secret("AUTO_RUN_HOUR", "18") or 18),
+        auto_run_tz=_get_secret("AUTO_RUN_TZ", "Asia/Seoul") or "Asia/Seoul",
+        auto_run_state_path=auto_run_state_path,
+        generated_bg_dir=_get_secret("GENERATED_BG_DIR", "data/assets/generated_bg") or "data/assets/generated_bg",
         telegram_bot_token=_get_secret("TELEGRAM_BOT_TOKEN", "") or "",
         telegram_admin_chat_id=_get_secret("TELEGRAM_ADMIN_CHAT_ID", "") or "",
         telegram_timeout_sec=int(_get_secret("TELEGRAM_TIMEOUT_SEC", "600") or 600),
@@ -714,33 +734,24 @@ def get_or_download_bgm(
 # 일본인 타겟 숏츠 대본 생성 시스템
 # ─────────────────────────────────────────────
 
-# BGM 무드 카테고리 (mystery / exciting / emotional)
+# BGM 무드 카테고리 (mystery_suspense / fast_exciting)
 BGM_MOOD_CATEGORIES: Dict[str, Dict[str, Any]] = {
-    "mystery": {
-        "description": "미스터리/긴장감 — 충격 폭로, 이면 폭로, 공포 계열",
-        "pixabay_queries": ["suspense dramatic", "mystery tension", "thriller cinematic"],
-        "folder": "mystery",
+    "mystery_suspense": {
+        "description": "폭로/고발/긴장감 — 미스터리, 조작, 충격 계열",
+        "folder": "mystery_suspense",
     },
-    "suspense": {
-        "description": "서스펜스 — mystery와 동일 폴더 공유",
-        "pixabay_queries": ["suspense dramatic", "mystery tension", "dark cinematic"],
-        "folder": "mystery",
+    "fast_exciting": {
+        "description": "반전/속도감 — 에너지 높은 비트",
+        "folder": "fast_exciting",
     },
-    "exciting": {
-        "description": "템포 빠른 신나는 비트 — 맛집, 여행, 랭킹, 에너지",
-        "pixabay_queries": ["energetic upbeat", "hype electronic", "fun pop beat"],
-        "folder": "exciting",
-    },
-    "informative": {
-        "description": "감성 브이로그 톤 — 정보/팁, 일상, 가이드 계열",
-        "pixabay_queries": ["chill lofi", "acoustic vlog", "soft background"],
-        "folder": "informative",
-    },
-    "emotional": {
-        "description": "감성/감동 — 스토리텔링, 반전, 뭉클한 계열",
-        "pixabay_queries": ["emotional piano", "sad beautiful acoustic", "cinematic emotional"],
-        "folder": "emotional",
-    },
+}
+
+BGM_MOOD_ALIASES: Dict[str, str] = {
+    "mystery": "mystery_suspense",
+    "suspense": "mystery_suspense",
+    "exciting": "fast_exciting",
+    "emotional": "mystery_suspense",
+    "informative": "mystery_suspense",
 }
 
 # 롤렛 주제 풀 — LLM이 이 리스트를 참고해 매번 새 주제 생성
@@ -758,38 +769,45 @@ JP_CONTENT_THEMES: List[str] = [
 ]
 
 # 시스템 프롬프트 (LLM에 직접 전달)
-JP_SHORTS_SYSTEM_PROMPT: str = """당신은 유튜브 알고리즘을 장악한 '글로벌 미스터리 & 비하인드 스토리 전문 작가'입니다.
-전 세계적으로 유명하거나 흥미로운 소재(브랜드 탄생 비화, 역사적 아이러니, 미제 사건 등)를 발굴하여, 일본인 시청자가 1초도 눈을 뗄 수 없는 몰입감 100%의 대본을 작성하세요.
+JP_SHORTS_SYSTEM_PROMPT: str = """당신은 유튜브 쇼츠에서 조회수를 쓸어담는 '폭로 및 고발 전문 스토리텔러'입니다.
+주어진 주제에 대해 교과서적인 설명은 집어치우고, "대중이 속았다", "충격적인 사기극이었다"는 프레임으로 대본을 재구성하세요.
 
-[작성 규칙]
-1. 소재: 검증된 실화 바탕의 글로벌 이슈 (예: 코카콜라의 마약 성분, 맥도날드 형제의 비극 등).
-2. 구조: 
-   - Hook (0~5초): 상식을 깨는 질문이나 충격적 결말 제시.
-   - Conflict (5~25초): 위기 상황이나 미스터리 심화.
-   - Twist (25~45초): 반전 해결이나 충격적 진실.
-   - Reaction (45~55초): 제3자의 입장에서 던지는 현실적인 리액션 (반말/구어체).
-3. 언어: 자연스러운 일본어 구어체(반말).
-4. visual_search_keyword: 배경영상이 **사건/브랜드/현장과 직접 관련된 실제 영상**이 되도록
-   구체적이고 현실적인 키워드를 작성하세요. "calm, relaxing, nature" 같은
-   평범한 풍경 키워드는 금지. 가능하면 고유명사/연도/장소/사물 포함.
+### 1. 스토리텔링 4단계 공식 (엄격 준수)
+대본은 일본어 반말(친근하고 거친 구어체)로 작성해야 합니다.
 
-[JSON 출력 포맷 (엄격 준수)]
+1) Hook (0~5초): 도발/무시
+   - 시청자의 상식을 공격하세요. "아직도 이걸 믿어?", "당신은 속고 있습니다."
+   - Visual: 충격받은 얼굴, X표시, 경고장
+2) Conflict (5~20초): 사기 수법 공개
+   - 기업/인물이 대중을 어떻게 속였는지 '트릭'을 묘사. "꼼수", "함정" 같은 단어 사용.
+   - Visual: 돈 다발, 사악한 웃음, 조작된 그래프
+3) Twist (20~45초): 진실의 반전
+   - "하지만 진실은 정반대였음." 결정적 증거 제시.
+   - Visual: 깨지는 유리, 반전되는 화면, 진짜 데이터
+4) Reaction Outro (45~60초): 1인칭 혼잣말
+   - 촬영 끄기 직전에 혼자 중얼거리는 느낌. "구독해주세요" 금지.
+
+### 2. 키워드 규칙
+visual_search_keyword는 Pexels에서 실제 영상을 찾을 수 있도록 **구체적인 명사(영어)** 위주로 작성.
+추상적 표현 금지. 가능하면 고유명사/장소/연도/사물 포함.
+
+### 3. JSON 출력 형식 (엄격 준수)
 {
   "meta": {
     "topic_en": "주제 키워드 (영어)",
     "title_ja": "일본어 제목 (클릭 유도형)",
     "hashtags": ["#태그1", "#태그2", "#태그3"],
-    "bgm_mood": "mystery" 또는 "exciting" 또는 "emotional" 
+    "bgm_mood": "mystery_suspense" 또는 "fast_exciting"
   },
   "story_timeline": [
     {
       "order": 1,
       "role": "hook",
-      "script_ja": "일본어 대본 (강렬한 첫 문장)",
+      "script_ja": "일본어 대본 (도발)",
       "script_ko": "한국어 번역 (확인용)",
-      "visual_search_keyword": "구체적인 영어 검색어 (예: shocked face close up)"
+      "visual_search_keyword": "구체적인 영어 검색어"
     },
-    ... (이하 Conflict, Twist, Reaction 순서대로 작성) ...
+    ... (Conflict, Twist, Reaction 순서대로 작성) ...
   ]
 }
 """
@@ -845,8 +863,11 @@ def generate_script_jp(
     if isinstance(hashtags, str):
         hashtags = [t for t in re.split(r"[,\s]+", hashtags) if t]
     meta["hashtags"] = normalize_hashtags(hashtags if isinstance(hashtags, list) else [])
+    mood_raw = meta.get("bgm_mood", "")
+    if mood_raw in BGM_MOOD_ALIASES:
+        meta["bgm_mood"] = BGM_MOOD_ALIASES[mood_raw]
     if meta.get("bgm_mood") not in BGM_MOOD_CATEGORIES:
-        meta["bgm_mood"] = "mystery"
+        meta["bgm_mood"] = "mystery_suspense"
     if not meta.get("pinned_comment"):
         meta["pinned_comment"] = ""
 
@@ -859,8 +880,10 @@ def generate_script_jp(
             continue
         role = str(raw.get("role", "")).strip().lower()
         if role not in allowed_roles:
-            if role in {"outro", "outro_loop"}:
+            if "reaction" in role or "outro" in role:
                 role = "reaction"
+            elif role.startswith("twist"):
+                role = "twist"
             elif role == "hook":
                 role = "hook"
             else:
@@ -963,6 +986,10 @@ def _script_to_roles(script: Dict[str, Any]) -> List[str]:
         roles: List[str] = []
         for item in timeline:
             role = str(item.get("role", "")).strip().lower()
+            if "reaction" in role or "outro" in role:
+                role = "reaction"
+            elif role.startswith("twist"):
+                role = "twist"
             roles.append(role or "conflict")
         return roles
     # 구 스키마 fallback
@@ -1015,12 +1042,13 @@ def _refine_visual_keyword(keyword: str, topic_en: str, role: str, script_ja: st
 
 def match_bgm_by_mood(config: AppConfig, mood: str) -> Optional[str]:
     """
-    mood(mystery/exciting/emotional)에 맞는 BGM 파일 반환.
+    mood(mystery_suspense/fast_exciting)에 맞는 BGM 파일 반환.
     1) assets/bgm/{mood}/ 폴더에서 랜덤 선택
-    2) 없으면 Pixabay에서 다운로드 시도
-    3) 그래도 없으면 기존 pick_bgm_path() fallback
+    2) 없으면 None 반환 (자동 수집/다운로드 비활성화)
     """
-    mood_info = BGM_MOOD_CATEGORIES.get(mood, BGM_MOOD_CATEGORIES["exciting"])
+    if mood in BGM_MOOD_ALIASES:
+        mood = BGM_MOOD_ALIASES[mood]
+    mood_info = BGM_MOOD_CATEGORIES.get(mood, BGM_MOOD_CATEGORIES["mystery_suspense"])
     folder_name = mood_info["folder"]
     bgm_dir = os.path.join(config.assets_dir, "bgm", folder_name)
     os.makedirs(bgm_dir, exist_ok=True)
@@ -1034,27 +1062,12 @@ def match_bgm_by_mood(config: AppConfig, mood: str) -> Optional[str]:
     if existing:
         return random.choice(existing)
 
-    # Pixabay 다운로드 시도
-    if config.pixabay_api_key:
-        queries = mood_info.get("pixabay_queries", [])
-        query = random.choice(queries) if queries else folder_name
-        path = fetch_bgm_from_pixabay(config.pixabay_api_key, mood, bgm_dir, custom_query=query)
-        if path:
-            return path
-
-    # fallback: pick_bgm_path (기존 폴더)
-    existing_any = pick_bgm_path(config)
-    if existing_any:
-        return existing_any
-
-    # 최후 fallback: sine wave ambient BGM 자동 생성 (/tmp/ → read-only 레포 우회)
-    fallback_path = os.path.join("/tmp", f"bgm_generated_{mood}.wav")
-    if not os.path.exists(fallback_path):
-        try:
-            _generate_bgm_fallback(fallback_path, duration=15.0, mood=mood)
-        except Exception as _e:
-            return None
-    return fallback_path if os.path.exists(fallback_path) else None
+    # 로컬 저장소만 사용 (자동 수집/다운로드 비활성화)
+    fallback_dir = os.path.join(config.assets_dir, "bgm")
+    fallback_files = _list_audio_files(fallback_dir)
+    if fallback_files:
+        return random.choice(fallback_files)
+    return None
 
 
 ENERGETIC_VOICE_ORDER = ["nova", "alloy", "shimmer", "echo", "fable", "onyx"]
@@ -1840,7 +1853,7 @@ def _generate_bgm_fallback(output_path: str, duration: float, mood: str) -> str:
         "informative": [196.0, 246.9, 293.7],   # G major mellow
         "emotional":   [174.6, 220.0, 261.6],   # F major warm
     }
-    freqs = mood_chords.get(mood, mood_chords["exciting"])
+    freqs = mood_chords.get(mood, mood_chords.get("exciting", [220.0, 277.2, 329.6]))
     samples: List[int] = []
     for i in range(n):
         t = i / sample_rate
@@ -1895,6 +1908,7 @@ def render_video(
     overlay_mode: str = "off",
     bg_video_path: str | None = None,
     bg_video_paths: Optional[List[Optional[str]]] = None,
+    bg_image_paths: Optional[List[Optional[str]]] = None,
 ) -> str:
     """
     TTS + 자막 + 에셋 스티커 + 배경영상(or 정적 이미지)으로 숏츠 영상 생성.
@@ -1904,6 +1918,9 @@ def render_video(
         raise RuntimeError(f"MoviePy/PIL not available: {MOVIEPY_ERROR}")
     W, H = config.width, config.height
     audio_clip = AudioFileClip(tts_audio_path)
+    max_duration = max(5.0, float(getattr(config, "max_video_duration_sec", 59.0)))
+    if audio_clip.duration > max_duration:
+        audio_clip = audio_clip.subclip(0, max_duration)
     durations = _estimate_durations(texts, audio_clip.duration)
     clips = []
 
@@ -1956,7 +1973,12 @@ def render_video(
             clip = seg.fl_image(_make_frame).set_duration(dur)
         else:
             # fallback: 정적 이미지 배경
-            frame_img = _compose_frame(asset_path, text, (W, H), config.font_path, style=style, overlay_mode=overlay_mode)
+            bg_img_path = (
+                bg_image_paths[index]
+                if bg_image_paths and index < len(bg_image_paths) and bg_image_paths[index]
+                else asset_path
+            )
+            frame_img = _compose_frame(bg_img_path, text, (W, H), config.font_path, style=style, overlay_mode=overlay_mode)
             clip = ImageClip(np.array(frame_img)).set_duration(dur)
             clip = clip.fx(vfx.resize, lambda t, d=dur: 1 + 0.02 * (t / max(d, 0.1)))
 
@@ -2009,6 +2031,33 @@ def _list_audio_files(path: str) -> List[str]:
         if name.lower().endswith((".mp3", ".wav", ".m4a", ".aac", ".ogg")):
             items.append(os.path.join(path, name))
     return items
+
+
+def _list_image_files(path: str) -> List[str]:
+    if not os.path.exists(path):
+        return []
+    items = []
+    for name in os.listdir(path):
+        if name.lower().endswith((".jpg", ".jpeg", ".png", ".webp")):
+            items.append(os.path.join(path, name))
+    return sorted(items)
+
+
+def _get_generated_bg_paths(config: AppConfig, count: int) -> List[Optional[str]]:
+    if count <= 0:
+        return []
+    files = _list_image_files(config.generated_bg_dir)
+    if not files:
+        return []
+    if len(files) >= count:
+        return files[:count]
+    # 부족하면 반복
+    repeated: List[Optional[str]] = []
+    idx = 0
+    while len(repeated) < count:
+        repeated.append(files[idx % len(files)])
+        idx += 1
+    return repeated
 
 
 def pick_bgm_path(config: AppConfig) -> Optional[str]:
@@ -2269,6 +2318,20 @@ def collect_images_pexels(
         except Exception:
             continue
     return downloaded
+
+
+def fetch_pexels_image(query: str, api_key: str, output_dir: str) -> Optional[str]:
+    try:
+        images = collect_images_pexels(
+            query=query,
+            api_key=api_key,
+            output_dir=output_dir,
+            limit=1,
+            locale="en-US",
+        )
+        return images[0] if images else None
+    except Exception:
+        return None
 
 
 def collect_images_auto_trend(
@@ -2563,6 +2626,30 @@ def _write_json_file(path: str, data: Any) -> None:
         json.dump(data, file, ensure_ascii=False, indent=2)
 
 
+def _get_local_now(config: AppConfig) -> datetime:
+    tz_name = (config.auto_run_tz or "Asia/Seoul").strip()
+    try:
+        return datetime.now(ZoneInfo(tz_name))
+    except Exception:
+        return datetime.utcnow()
+
+
+def _should_auto_run(config: AppConfig) -> bool:
+    if not config.auto_run_daily:
+        return False
+    now = _get_local_now(config)
+    if now.hour < int(config.auto_run_hour):
+        return False
+    state = _read_json_file(config.auto_run_state_path, {"last_run_date": ""})
+    last_date = state.get("last_run_date", "")
+    return last_date != now.date().isoformat()
+
+
+def _mark_auto_run_done(config: AppConfig) -> None:
+    now = _get_local_now(config)
+    _write_json_file(config.auto_run_state_path, {"last_run_date": now.date().isoformat()})
+
+
 def _load_used_links(path: str) -> Dict[str, Any]:
     return _read_json_file(path, {"used": []})
 
@@ -2651,7 +2738,7 @@ def _script_plan_text(script: Dict[str, Any]) -> str:
     middle = texts[1] if len(texts) > 1 else (texts[0] if texts else "")
     return (
         f"제목: {_meta.get('title_ja', _meta.get('title', script.get('video_title','')))}\n"
-        f"무드: {_meta.get('bgm_mood', script.get('mood','mystery'))}\n"
+        f"무드: {_meta.get('bgm_mood', script.get('mood','mystery_suspense'))}\n"
         f"훅: {texts[0] if texts else ''}\n"
         f"전개: {middle}\n"
         f"구독유도: {texts[-1] if texts else ''}\n"
@@ -2659,18 +2746,18 @@ def _script_plan_text(script: Dict[str, Any]) -> str:
     )
 
 
-def _auto_jp_flow(config: AppConfig, progress, status_box, extra_hint: str = "") -> None:
+def _auto_jp_flow(config: AppConfig, progress, status_box, extra_hint: str = "") -> bool:
     """
     크롤링 없이 LLM이 주제를 자동 선정해 일본인 타겟 숏츠를 생성하는 메인 플로우.
     텔레그램 승인 → TTS → 영상 렌더링 → 유튜브 업로드.
     """
-    if not config.telegram_bot_token or not config.telegram_admin_chat_id:
-        st.error("텔레그램 봇 설정이 필요합니다. TELEGRAM_BOT_TOKEN, TELEGRAM_ADMIN_CHAT_ID를 확인하세요.")
-        return
+    if config.require_approval and (not config.telegram_bot_token or not config.telegram_admin_chat_id):
+        st.error("승인 모드에서는 텔레그램 봇 설정이 필요합니다. TELEGRAM_BOT_TOKEN, TELEGRAM_ADMIN_CHAT_ID를 확인하세요.")
+        return False
     manifest_items = load_manifest(config.manifest_path)
     if not manifest_items:
         st.error("에셋이 없습니다. 먼저 이미지를 추가하세요.")
-        return
+        return False
 
     # ── 대본 생성 ─────────────────────────────────────────
     _telemetry_log("자동 생성 시작 — 대본 생성 단계 진입", config)
@@ -2681,7 +2768,7 @@ def _auto_jp_flow(config: AppConfig, progress, status_box, extra_hint: str = "")
     except Exception as exc:
         _telemetry_log(f"대본 생성 실패: {exc}", config)
         st.error(f"대본 생성 실패: {exc}")
-        return
+        return False
 
     # ── 새 스키마 필드 추출 ───────────────────────────────
     meta = script.get("meta", {})
@@ -2689,7 +2776,7 @@ def _auto_jp_flow(config: AppConfig, progress, status_box, extra_hint: str = "")
 
     video_title = meta.get("title_ja", meta.get("title", script.get("video_title", "ミステリーショーツ")))
     hashtags = meta.get("hashtags", script.get("hashtags", []))
-    mood = meta.get("bgm_mood", script.get("mood", "mystery"))
+    mood = meta.get("bgm_mood", script.get("mood", "mystery_suspense"))
     pinned = meta.get("pinned_comment", script.get("pinned_comment", ""))
 
     texts = _script_to_beats(script)
@@ -2704,24 +2791,31 @@ def _auto_jp_flow(config: AppConfig, progress, status_box, extra_hint: str = "")
     _telemetry_log(f"BGM 매칭 시작 (mood={mood})", config)
     _status_update(progress, status_box, 0.18, f"BGM 매칭 중 (무드: {mood})")
     bgm_path = match_bgm_by_mood(config, mood)
-    bgm_display = os.path.basename(bgm_path) if bgm_path else "자동생성(ambient)"
+    bgm_display = os.path.basename(bgm_path) if bgm_path else "없음"
     _telemetry_log(f"BGM 매칭 결과: {bgm_display}", config)
     if not bgm_path or not os.path.exists(bgm_path):
         st.warning(
             "BGM 파일을 찾지 못했습니다. "
-            "assets/bgm/mystery|exciting|emotional 폴더에 음원을 넣거나 "
-            "PIXABAY_API_KEY를 설정하면 자동으로 매칭됩니다."
+            "assets/bgm/mystery_suspense 또는 assets/bgm/fast_exciting 폴더에 "
+            "BGM 파일을 넣어주세요."
         )
 
     # ── 배경 영상 — Pixabay 우선, Pexels 폴백 ─────────────
     # Pixabay: 한국 여행 영상 풍부 + 이미 BGM에 사용 중인 API key
     # Pexels: portrait 한국 영상 부족 → 폴백으로만 사용
+    generated_bg_paths = _get_generated_bg_paths(config, len(texts))
     unique_kws = list(dict.fromkeys(visual_keywords))
     bg_video_paths: List[Optional[str]] = []
-    if config.pixabay_api_key or config.pexels_api_key:
+    bg_image_paths: List[Optional[str]] = []
+    if generated_bg_paths:
+        bg_video_paths = [None] * len(texts)
+        bg_image_paths = generated_bg_paths
+        _telemetry_log("생성 배경 이미지 사용", config)
+    elif config.pixabay_api_key or config.pexels_api_key:
         _telemetry_log(f"배경 영상 다운로드 시작 ({len(unique_kws)}개 키워드)", config)
         _status_update(progress, status_box, 0.22, f"배경 영상 다운로드 중 ({len(unique_kws)}개 키워드, Pixabay 우선)")
         kw_to_path: Dict[str, Optional[str]] = {}
+        kw_to_image: Dict[str, Optional[str]] = {}
         for kw in unique_kws:
             path: Optional[str] = None
             # 1순위: Pixabay Videos
@@ -2731,8 +2825,13 @@ def _auto_jp_flow(config: AppConfig, progress, status_box, extra_hint: str = "")
             if not path and config.pexels_api_key:
                 path = fetch_pexels_video(kw, config.pexels_api_key, "/tmp/pexels_bg", config.width, config.height)
             kw_to_path[kw] = path
+            if not path and config.pexels_api_key:
+                kw_to_image[kw] = fetch_pexels_image(kw, config.pexels_api_key, "/tmp/pexels_bg_images")
+            else:
+                kw_to_image[kw] = None
         for kw in visual_keywords:
             bg_video_paths.append(kw_to_path.get(kw))
+            bg_image_paths.append(kw_to_image.get(kw))
         downloaded = sum(1 for p in bg_video_paths if p)
         if downloaded:
             st.info(f"배경 영상: {downloaded}/{len(texts)} 세그먼트 완료")
@@ -2742,10 +2841,18 @@ def _auto_jp_flow(config: AppConfig, progress, status_box, extra_hint: str = "")
             _telemetry_log("배경 영상 다운로드 실패 — 정적 이미지로 대체", config)
     else:
         bg_video_paths = [None] * len(texts)
+        bg_image_paths = [None] * len(texts)
 
     # ── 에셋 선택 ─────────────────────────────────────────
-    mood_to_cat = {"mystery": "shocking", "suspense": "shocking", "exciting": "exciting",
-                   "informative": "humor", "emotional": "touching"}
+    mood_to_cat = {
+        "mystery_suspense": "shocking",
+        "fast_exciting": "exciting",
+        "mystery": "shocking",
+        "suspense": "shocking",
+        "exciting": "exciting",
+        "informative": "humor",
+        "emotional": "touching",
+    }
     content_category = mood_to_cat.get(mood, "exciting")
     assets: List[str] = []
     for _ in texts:
@@ -2792,18 +2899,21 @@ def _auto_jp_flow(config: AppConfig, progress, status_box, extra_hint: str = "")
         except Exception:
             pass
 
-    _telemetry_log("텔레그램 승인 요청 전송", config)
-    _status_update(progress, status_box, 0.30, "텔레그램 승인 요청 전송")
-    approval_msg_id = send_telegram_approval_request(
-        config.telegram_bot_token, config.telegram_admin_chat_id, request_text
-    )
-    decision = wait_for_approval(config, progress, status_box, approval_message_id=approval_msg_id)
-    if decision == "swap":
-        _telemetry_log("승인 요청 결과: 교환", config)
-        send_telegram_message(config.telegram_bot_token, config.telegram_admin_chat_id, "🔄 교환 처리됨. 새 주제로 다시 생성합니다.")
-        _auto_jp_flow(config, progress, status_box, extra_hint=extra_hint)
-        return
-    _telemetry_log(f"승인 요청 결과: {decision}", config)
+    if config.require_approval:
+        _telemetry_log("텔레그램 승인 요청 전송", config)
+        _status_update(progress, status_box, 0.30, "텔레그램 승인 요청 전송")
+        approval_msg_id = send_telegram_approval_request(
+            config.telegram_bot_token, config.telegram_admin_chat_id, request_text
+        )
+        decision = wait_for_approval(config, progress, status_box, approval_message_id=approval_msg_id)
+        if decision == "swap":
+            _telemetry_log("승인 요청 결과: 교환", config)
+            send_telegram_message(config.telegram_bot_token, config.telegram_admin_chat_id, "🔄 교환 처리됨. 새 주제로 다시 생성합니다.")
+            _auto_jp_flow(config, progress, status_box, extra_hint=extra_hint)
+            return False
+        _telemetry_log(f"승인 요청 결과: {decision}", config)
+    else:
+        _telemetry_log("승인 단계 생략 (자동 진행)", config)
 
     # ── TTS 생성 ─────────────────────────────────────────
     now = datetime.utcnow().strftime("%Y%m%d_%H%M%S")
@@ -2819,25 +2929,31 @@ def _auto_jp_flow(config: AppConfig, progress, status_box, extra_hint: str = "")
         _telemetry_log(err_msg, config)
         st.error(err_msg)
         send_telegram_message(config.telegram_bot_token, config.telegram_admin_chat_id, err_msg)
-        return
+        return False
 
     # ── 영상 렌더링 ───────────────────────────────────────
     _telemetry_log("영상 렌더링 시작", config)
     _status_update(progress, status_box, 0.65, "영상 렌더링 중")
     output_path = os.path.join(config.output_dir, f"shorts_{now}.mp4")
-    render_video(
-        config=config,
-        asset_paths=assets,
-        texts=texts,
-        tts_audio_path=audio_path,
-        output_path=output_path,
-        bgm_path=bgm_path,
-        bgm_volume=config.bgm_volume,
-        bg_video_paths=bg_video_paths,
-        caption_styles=caption_styles,
-        overlay_mode=config.asset_overlay_mode,
-    )
-    _telemetry_log("영상 렌더링 완료", config)
+    try:
+        render_video(
+            config=config,
+            asset_paths=assets,
+            texts=texts,
+            tts_audio_path=audio_path,
+            output_path=output_path,
+            bgm_path=bgm_path,
+            bgm_volume=config.bgm_volume,
+            bg_video_paths=bg_video_paths,
+            bg_image_paths=bg_image_paths,
+            caption_styles=caption_styles,
+            overlay_mode=config.asset_overlay_mode,
+        )
+        _telemetry_log("영상 렌더링 완료", config)
+    except Exception as render_err:
+        _telemetry_log(f"영상 렌더링 실패: {render_err}", config)
+        st.error(f"영상 렌더링 실패: {render_err}")
+        return False
 
     # ── 유튜브 업로드 ─────────────────────────────────────
     video_id = ""
@@ -2894,6 +3010,7 @@ def _auto_jp_flow(config: AppConfig, progress, status_box, extra_hint: str = "")
     else:
         summary_text += f"로컬: {output_path}"
     send_telegram_message(config.telegram_bot_token, config.telegram_admin_chat_id, summary_text)
+    return True
 
 
 def run_streamlit_app() -> None:
@@ -2908,10 +3025,11 @@ def run_streamlit_app() -> None:
             os.path.join(config.assets_dir, "inbox"),
             os.path.join(config.assets_dir, "bgm"),
             os.path.join(config.assets_dir, "bgm", "trending"),
-            # 무드별 BGM 디렉토리 (mystery / exciting / emotional)
+            # 무드별 BGM 디렉토리 (mystery_suspense / fast_exciting)
             *[os.path.join(config.assets_dir, "bgm", mood) for mood in BGM_MOOD_CATEGORIES],
             os.path.join(config.assets_dir, "sfx"),
             os.path.join(config.assets_dir, "bg_videos"),
+            config.generated_bg_dir,
             os.path.dirname(config.manifest_path),
             config.output_dir,
         ]
@@ -2948,7 +3066,7 @@ def run_streamlit_app() -> None:
         "- `SERPAPI_API_KEY` (트렌드 수집)\n"
         "- `OPENAI_VISION_MODEL` (이미지 태그 분석)\n"
         "- `BGM_MODE`, `BGM_VOLUME` (배경음악)\n\n"
-        "**BGM 무드 폴더:** `assets/bgm/mystery/`, `assets/bgm/exciting/`, `assets/bgm/emotional/`"
+        "**BGM 무드 폴더:** `assets/bgm/mystery_suspense/`, `assets/bgm/fast_exciting/`"
     )
     missing = _missing_required(config)
     if missing:
@@ -2967,7 +3085,12 @@ def run_streamlit_app() -> None:
         status_box = st.empty()
 
         st.subheader("일본인 타겟 숏츠 자동 생성 (AI 주제 자동 선정)")
-        st.caption("크롤링 없이 LLM이 매번 새로운 주제를 선정합니다. 무드(mystery/exciting/emotional)에 맞게 BGM도 자동 매칭됩니다.")
+        st.caption("크롤링 없이 LLM이 매번 새로운 주제를 선정합니다. 무드(mystery_suspense/fast_exciting)에 맞게 BGM을 사용합니다.")
+
+        if _should_auto_run(config):
+            _telemetry_log("자동 스케줄 실행 트리거", config)
+            if _auto_jp_flow(config, progress, status_box, extra_hint=""):
+                _mark_auto_run_done(config)
 
         extra_hint = st.text_input(
             "주제 힌트 (선택)",
@@ -2997,7 +3120,7 @@ def run_streamlit_app() -> None:
             st.subheader("생성된 대본")
             _meta = script.get("meta", {})
             _content = _get_story_timeline(script)
-            _mood_val = _meta.get("bgm_mood", script.get("mood", "mystery"))
+            _mood_val = _meta.get("bgm_mood", script.get("mood", "mystery_suspense"))
             st.caption(f"무드: **{_mood_val}**")
             video_title_val = st.text_input(
                 "유튜브 제목",
@@ -3062,14 +3185,21 @@ def run_streamlit_app() -> None:
                         if not bgm_path or not os.path.exists(bgm_path):
                             st.warning(
                                 "BGM 파일을 찾지 못했습니다. "
-                                "assets/bgm/mystery|exciting|emotional 폴더에 음원을 넣거나 "
-                                "PIXABAY_API_KEY를 설정하면 자동으로 매칭됩니다."
+                                "assets/bgm/mystery_suspense 또는 assets/bgm/fast_exciting 폴더에 "
+                                "BGM 파일을 넣어주세요."
                             )
                         roles = _script_to_roles(script)
                         caption_styles = _build_caption_styles(roles, len(texts))
 
-                        mood_to_cat = {"mystery": "shocking", "suspense": "shocking",
-                                       "exciting": "exciting", "informative": "humor", "emotional": "touching"}
+                        mood_to_cat = {
+                            "mystery_suspense": "shocking",
+                            "fast_exciting": "exciting",
+                            "mystery": "shocking",
+                            "suspense": "shocking",
+                            "exciting": "exciting",
+                            "informative": "humor",
+                            "emotional": "touching",
+                        }
                         cat = mood_to_cat.get(mood, "exciting")
                         assets = []
                         for _ in texts:
@@ -3080,11 +3210,17 @@ def run_streamlit_app() -> None:
 
                         # 세그먼트별 배경 영상 — Pixabay 우선, Pexels 폴백
                         bg_vids_manual: List[Optional[str]] = [None] * len(texts)
-                        if config.pixabay_api_key or config.pexels_api_key:
+                        bg_imgs_manual: List[Optional[str]] = [None] * len(texts)
+                        gen_bg_manual = _get_generated_bg_paths(config, len(texts))
+                        if gen_bg_manual:
+                            bg_imgs_manual = gen_bg_manual
+                            _telemetry_log("수동 렌더링: 생성 배경 이미지 사용", config)
+                        elif config.pixabay_api_key or config.pexels_api_key:
                             _status_update(progress, status_box, 0.25, "배경 영상 다운로드 중 (Pixabay 우선)")
                             _kws_m = _script_to_visual_keywords(script)
                             _unique_kws_m = list(dict.fromkeys(_kws_m))
                             _kw_path_m: Dict[str, Optional[str]] = {}
+                            _kw_img_m: Dict[str, Optional[str]] = {}
                             for _kw in _unique_kws_m:
                                 _p: Optional[str] = None
                                 if config.pixabay_api_key:
@@ -3092,7 +3228,12 @@ def run_streamlit_app() -> None:
                                 if not _p and config.pexels_api_key:
                                     _p = fetch_pexels_video(_kw, config.pexels_api_key, "/tmp/pexels_bg", config.width, config.height)
                                 _kw_path_m[_kw] = _p
+                                if not _p and config.pexels_api_key:
+                                    _kw_img_m[_kw] = fetch_pexels_image(_kw, config.pexels_api_key, "/tmp/pexels_bg_images")
+                                else:
+                                    _kw_img_m[_kw] = None
                             bg_vids_manual = [_kw_path_m.get(_kws_m[i] if i < len(_kws_m) else "") for i in range(len(texts))]
+                            bg_imgs_manual = [_kw_img_m.get(_kws_m[i] if i < len(_kws_m) else "") for i in range(len(texts))]
 
                         _status_update(progress, status_box, 0.3, "TTS 생성")
                         now = datetime.utcnow().strftime("%Y%m%d_%H%M%S")
@@ -3101,18 +3242,25 @@ def run_streamlit_app() -> None:
                         tts_openai(config, "。".join(texts), audio_path, voice=voice_id)
                         _status_update(progress, status_box, 0.6, "영상 렌더링")
                         output_path = os.path.join(config.output_dir, f"shorts_{now}.mp4")
-                        render_video(
-                            config=config,
-                            asset_paths=assets,
-                            texts=texts,
-                            tts_audio_path=audio_path,
-                            output_path=output_path,
-                            bgm_path=bgm_path,
-                            bgm_volume=config.bgm_volume,
-                            bg_video_paths=bg_vids_manual,
-                            caption_styles=caption_styles,
-                            overlay_mode=config.asset_overlay_mode,
-                        )
+                        try:
+                            render_video(
+                                config=config,
+                                asset_paths=assets,
+                                texts=texts,
+                                tts_audio_path=audio_path,
+                                output_path=output_path,
+                                bgm_path=bgm_path,
+                                bgm_volume=config.bgm_volume,
+                                bg_video_paths=bg_vids_manual,
+                                bg_image_paths=bg_imgs_manual,
+                                caption_styles=caption_styles,
+                                overlay_mode=config.asset_overlay_mode,
+                            )
+                            _telemetry_log("수동 렌더링 완료", config)
+                        except Exception as render_err:
+                            _telemetry_log(f"수동 렌더링 실패: {render_err}", config)
+                            st.error(f"영상 렌더링 실패: {render_err}")
+                            return
                         video_id = ""
                         video_url = ""
                         if config.enable_youtube_upload:
@@ -3261,33 +3409,6 @@ def run_streamlit_app() -> None:
                 with open(save_path, "wb") as out_file:
                     out_file.write(file.getbuffer())
             st.success("BGM이 저장되었습니다.")
-
-        st.subheader("Pixabay BGM 수동 다운로드")
-        if not config.pixabay_api_key:
-            st.warning("PIXABAY_API_KEY가 설정되지 않았습니다. `.streamlit/secrets.toml`에 추가하세요.")
-        else:
-            pixabay_mood = st.selectbox("BGM 무드", mood_labels, key="pixabay_mood")
-            pixabay_count = st.slider("다운로드 개수", 1, 5, 3, key="pixabay_count")
-            if st.button("Pixabay에서 BGM 다운로드"):
-                mood_info = BGM_MOOD_CATEGORIES[pixabay_mood]
-                bgm_out_dir = os.path.join(config.assets_dir, "bgm", pixabay_mood)
-                query = random.choice(mood_info["pixabay_queries"])
-                downloaded_bgms = []
-                for _ in range(pixabay_count):
-                    path = fetch_bgm_from_pixabay(
-                        api_key=config.pixabay_api_key,
-                        category=pixabay_mood,
-                        output_dir=bgm_out_dir,
-                        custom_query=query,
-                    )
-                    if path:
-                        downloaded_bgms.append(path)
-                if downloaded_bgms:
-                    st.success(f"{len(downloaded_bgms)}개 BGM을 `bgm/{pixabay_mood}/`에 저장했습니다.")
-                    for p in downloaded_bgms:
-                        st.audio(p)
-                else:
-                    st.error("BGM 다운로드에 실패했습니다. API 키나 네트워크를 확인하세요.")
 
         st.subheader("AI 이미지 수집(SerpAPI)")
         collect_query = st.text_input("검색어")
@@ -3679,13 +3800,20 @@ def run_batch(count: int, seed: str = "", beats: int = 7) -> None:
     for index in range(count):
         script = generate_script_jp(config, extra_hint=seed)
         _meta_b = script.get("meta", {})
-        mood = _meta_b.get("bgm_mood", script.get("mood", "mystery"))
+        mood = _meta_b.get("bgm_mood", script.get("mood", "mystery_suspense"))
         texts = _script_to_beats(script)
         visual_kws = _script_to_visual_keywords(script)
         roles = _script_to_roles(script)
         caption_styles = _build_caption_styles(roles, len(texts))
-        mood_to_cat = {"mystery": "shocking", "suspense": "shocking",
-                       "exciting": "exciting", "informative": "humor", "emotional": "touching"}
+        mood_to_cat = {
+            "mystery_suspense": "shocking",
+            "fast_exciting": "exciting",
+            "mystery": "shocking",
+            "suspense": "shocking",
+            "exciting": "exciting",
+            "informative": "humor",
+            "emotional": "touching",
+        }
         cat = mood_to_cat.get(mood, "exciting")
         assets = []
         for _ in texts:
@@ -3701,9 +3829,14 @@ def run_batch(count: int, seed: str = "", beats: int = 7) -> None:
         bgm_path = match_bgm_by_mood(config, mood)
         # 세그먼트별 배경 영상 — Pixabay 우선, Pexels 폴백
         bg_vids_b: List[Optional[str]] = [None] * len(texts)
-        if config.pixabay_api_key or config.pexels_api_key:
+        bg_imgs_b: List[Optional[str]] = [None] * len(texts)
+        gen_bg_b = _get_generated_bg_paths(config, len(texts))
+        if gen_bg_b:
+            bg_imgs_b = gen_bg_b
+        elif config.pixabay_api_key or config.pexels_api_key:
             _unique_b = list(dict.fromkeys(visual_kws))
             _kw_path_b: Dict[str, Optional[str]] = {}
+            _kw_img_b: Dict[str, Optional[str]] = {}
             for kw in _unique_b:
                 _pb: Optional[str] = None
                 if config.pixabay_api_key:
@@ -3711,7 +3844,12 @@ def run_batch(count: int, seed: str = "", beats: int = 7) -> None:
                 if not _pb and config.pexels_api_key:
                     _pb = fetch_pexels_video(kw, config.pexels_api_key, "/tmp/pexels_bg", config.width, config.height)
                 _kw_path_b[kw] = _pb
+                if not _pb and config.pexels_api_key:
+                    _kw_img_b[kw] = fetch_pexels_image(kw, config.pexels_api_key, "/tmp/pexels_bg_images")
+                else:
+                    _kw_img_b[kw] = None
             bg_vids_b = [_kw_path_b.get(visual_kws[i] if i < len(visual_kws) else "") for i in range(len(texts))]
+            bg_imgs_b = [_kw_img_b.get(visual_kws[i] if i < len(visual_kws) else "") for i in range(len(texts))]
         render_video(
             config=config,
             asset_paths=assets,
@@ -3721,6 +3859,7 @@ def run_batch(count: int, seed: str = "", beats: int = 7) -> None:
             bgm_path=bgm_path,
             bgm_volume=config.bgm_volume,
             bg_video_paths=bg_vids_b,
+            bg_image_paths=bg_imgs_b,
             caption_styles=caption_styles,
             overlay_mode=config.asset_overlay_mode,
         )
