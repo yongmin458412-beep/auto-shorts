@@ -580,6 +580,9 @@ BGM_CATEGORY_KEYWORDS: Dict[str, List[str]] = {
     "exciting":     ["energetic upbeat", "hype electronic", "motivation"],
     "sad":          ["sad piano", "melancholy", "emotional"],
     "anger":        ["intense dramatic", "aggressive rock", "tension"],
+    # 폭로/고발 쇼츠용 무드 키워드
+    "mystery_suspense": ["suspense", "mystery", "dark ambient", "thriller"],
+    "fast_exciting": ["action", "fast beat", "energetic", "epic"],
 }
 
 # 카테고리 → 에셋 tags 매핑 (기존 태그 시스템과 연결)
@@ -655,18 +658,6 @@ def fetch_bgm_from_pixabay(
         query = random.choice(keywords)
     os.makedirs(output_dir, exist_ok=True)
     try:
-        params = {
-            "key": api_key,
-            "q": query,
-            "media_type": "music",
-            "per_page": 10,
-            "safesearch": "true",
-        }
-        response = requests.get(
-            "https://pixabay.com/api/videos/",  # music endpoint
-            params=params,
-            timeout=30,
-        )
         # Pixabay music API endpoint
         music_params = {
             "key": api_key,
@@ -1044,7 +1035,8 @@ def match_bgm_by_mood(config: AppConfig, mood: str) -> Optional[str]:
     """
     mood(mystery_suspense/fast_exciting)에 맞는 BGM 파일 반환.
     1) assets/bgm/{mood}/ 폴더에서 랜덤 선택
-    2) 없으면 None 반환 (자동 수집/다운로드 비활성화)
+    2) 없으면 Pixabay에서 자동 다운로드 (API 키 있을 때만)
+    3) 그래도 없으면 assets/bgm 폴더에서 폴백
     """
     if mood in BGM_MOOD_ALIASES:
         mood = BGM_MOOD_ALIASES[mood]
@@ -1062,7 +1054,20 @@ def match_bgm_by_mood(config: AppConfig, mood: str) -> Optional[str]:
     if existing:
         return random.choice(existing)
 
-    # 로컬 저장소만 사용 (자동 수집/다운로드 비활성화)
+    # Pixabay 자동 다운로드 (API 키 있을 때만)
+    if config.pixabay_api_key:
+        query_pool = BGM_CATEGORY_KEYWORDS.get(mood, [])
+        custom_query = random.choice(query_pool) if query_pool else ""
+        downloaded = fetch_bgm_from_pixabay(
+            api_key=config.pixabay_api_key,
+            category=mood,
+            output_dir=bgm_dir,
+            custom_query=custom_query,
+        )
+        if downloaded and os.path.exists(downloaded):
+            return downloaded
+
+    # 로컬 일반 폴더 폴백
     fallback_dir = os.path.join(config.assets_dir, "bgm")
     fallback_files = _list_audio_files(fallback_dir)
     if fallback_files:
@@ -2808,7 +2813,7 @@ def _auto_jp_flow(config: AppConfig, progress, status_box, extra_hint: str = "")
         st.warning(
             "BGM 파일을 찾지 못했습니다. "
             "assets/bgm/mystery_suspense 또는 assets/bgm/fast_exciting 폴더에 "
-            "BGM 파일을 넣어주세요."
+            "BGM 파일을 넣어주세요. (PIXABAY_API_KEY가 있으면 자동 다운로드 시도)"
         )
 
     # ── 배경 영상 — Pixabay 우선, Pexels 폴백 ─────────────
