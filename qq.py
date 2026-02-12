@@ -473,6 +473,11 @@ class AppConfig:
     use_japanese_caption_style: bool
     linktree_url: str
     enable_pinned_comment: bool
+    highlight_clip_enabled: bool
+    highlight_clip_duration_sec: float
+    highlight_clip_sample_fps: float
+    highlight_clip_max_scan_sec: float
+    ab_test_enabled: bool
     # 플랫폼: instagram(기본), youtube, tiktok(준비)
     upload_platform: str
     enable_instagram_upload: bool
@@ -557,6 +562,11 @@ def load_config() -> AppConfig:
         use_japanese_caption_style=_get_bool("USE_JAPANESE_CAPTION_STYLE", True),
         linktree_url=(_get_secret("LINKTREE_URL", "") or "").strip(),
         enable_pinned_comment=_get_bool("ENABLE_PINNED_COMMENT", False),
+        highlight_clip_enabled=_get_bool("HIGHLIGHT_CLIP_ENABLED", True),
+        highlight_clip_duration_sec=float(_get_secret("HIGHLIGHT_CLIP_DURATION_SEC", "55") or 55),
+        highlight_clip_sample_fps=float(_get_secret("HIGHLIGHT_CLIP_SAMPLE_FPS", "2") or 2),
+        highlight_clip_max_scan_sec=float(_get_secret("HIGHLIGHT_CLIP_MAX_SCAN_SEC", "900") or 900),
+        ab_test_enabled=_get_bool("AB_TEST_ENABLED", True),
         upload_platform=(_get_secret("UPLOAD_PLATFORM", "instagram") or "instagram").strip().lower(),
         enable_instagram_upload=_get_bool("ENABLE_INSTAGRAM_UPLOAD", True),
         instagram_access_token=(_get_secret("INSTAGRAM_ACCESS_TOKEN", "") or "").strip(),
@@ -1404,6 +1414,22 @@ def _build_caption_styles(roles: List[str], count: int) -> List[str]:
     return styles
 
 
+def _select_caption_variant(config: AppConfig) -> str:
+    if not getattr(config, "ab_test_enabled", False):
+        return "default"
+    return random.choice(["default", "japanese_variety"])
+
+
+def _apply_caption_variant(styles: List[str], variant: str) -> List[str]:
+    if not styles:
+        return styles
+    if variant == "japanese_variety":
+        return ["reaction" if s == "reaction" else "japanese_variety" for s in styles]
+    if variant == "default":
+        return ["reaction" if s == "reaction" else "default_plain" for s in styles]
+    return styles
+
+
 _GENERIC_VIDEO_TOKENS = {
     "calm", "relax", "relaxing", "nature", "landscape", "scenery",
     "ocean", "sea", "forest", "sky", "clouds", "sunset", "sunrise",
@@ -2022,6 +2048,17 @@ def _shorten_caption_text(text: str, max_chars: int = 18) -> str:
 
 def _build_caption_texts(texts: List[str], max_chars: int) -> List[str]:
     return [_shorten_caption_text(t, max_chars=max_chars) for t in texts]
+
+
+def _pick_thumbnail_text(meta: Optional[Dict[str, Any]], texts: List[str]) -> str:
+    meta = meta or {}
+    for key in ("thumbnail_text_ja", "title_ja", "title", "video_title"):
+        value = meta.get(key)
+        if isinstance(value, str) and value.strip():
+            return value.strip()
+    if texts:
+        return texts[0]
+    return ""
 
 
 def _apply_korean_template(image: Image.Image, canvas_width: int, canvas_height: int) -> Image.Image:
@@ -2902,6 +2939,71 @@ def _estimate_durations(texts: List[str], total_duration: float) -> List[float]:
     return [duration * scale for duration in adjusted]
 
 
+_HIGHLIGHT_CACHE: Dict[Tuple[str, int], float] = {}
+
+
+def _find_dynamic_segment_start(
+    video_path: str,
+    target_duration: float,
+    sample_fps: float = 2.0,
+    max_scan_sec: float = 900.0,
+) -> float:
+    if not video_path or not os.path.exists(video_path):
+        return 0.0
+    if not MOVIEPY_AVAILABLE or np is None:
+        return 0.0
+    key = (video_path, int(target_duration))
+    if key in _HIGHLIGHT_CACHE:
+        return _HIGHLIGHT_CACHE[key]
+    try:
+        clip = VideoFileClip(video_path).without_audio()
+        duration = float(clip.duration or 0)
+        scan_dur = min(duration, max_scan_sec)
+        if scan_dur <= target_duration + 1:
+            clip.close()
+            _HIGHLIGHT_CACHE[key] = 0.0
+            return 0.0
+        step = 1.0 / max(sample_fps, 0.5)
+        t = 0.0
+        prev = None
+        scores: List[float] = []
+        times: List[float] = []
+        while t < scan_dur:
+            frame = clip.get_frame(t)
+            gray = np.mean(frame, axis=2).astype("float32")
+            if prev is not None:
+                diff = float(np.mean(np.abs(gray - prev)))
+                scores.append(diff)
+                times.append(t)
+            prev = gray
+            t += step
+        clip.close()
+        if not scores:
+            _HIGHLIGHT_CACHE[key] = 0.0
+            return 0.0
+        window = max(1, int(target_duration * max(sample_fps, 0.5)))
+        if window >= len(scores):
+            _HIGHLIGHT_CACHE[key] = 0.0
+            return 0.0
+        # 슬라이딩 윈도우 합계로 가장 역동적인 구간 탐색
+        current = sum(scores[:window])
+        best = current
+        best_idx = 0
+        for i in range(window, len(scores)):
+            current += scores[i] - scores[i - window]
+            if current > best:
+                best = current
+                best_idx = i - window + 1
+        start = times[best_idx] if best_idx < len(times) else 0.0
+        max_start = max(duration - target_duration - 0.1, 0.0)
+        start = min(max(start, 0.0), max_start)
+        _HIGHLIGHT_CACHE[key] = start
+        return start
+    except Exception:
+        _HIGHLIGHT_CACHE[key] = 0.0
+        return 0.0
+
+
 def _open_bg_video(path: str, W: int, H: int) -> Optional["VideoFileClip"]:
     """배경 영상을 열어 세로형(portrait)으로 resize·crop 후 반환."""
     try:
@@ -2948,6 +3050,7 @@ def render_video(
 
     # 경로 → VideoFileClip 캐시 (같은 파일 중복 오픈 방지)
     _vid_cache: Dict[str, Any] = {}
+    _highlight_cache: Dict[str, float] = {}
 
     def _get_vid(path: Optional[str]) -> Optional[Any]:
         if not path or not os.path.exists(path):
@@ -2992,6 +3095,18 @@ def render_video(
         if not seg_path and _bg_video_pool:
             seg_path = random.choice(_bg_video_pool)
         bg_vid = _get_vid(seg_path) or global_bg_vid
+        highlight_start = None
+        if bg_vid is not None and getattr(config, "highlight_clip_enabled", False):
+            src_path = seg_path or bg_video_path
+            if src_path:
+                if src_path not in _highlight_cache:
+                    _highlight_cache[src_path] = _find_dynamic_segment_start(
+                        src_path,
+                        float(getattr(config, "highlight_clip_duration_sec", dur)),
+                        float(getattr(config, "highlight_clip_sample_fps", 2.0)),
+                        float(getattr(config, "highlight_clip_max_scan_sec", 900.0)),
+                    )
+                highlight_start = _highlight_cache.get(src_path, 0.0)
 
         # 클로저 캡처 (Python for-loop 캡처 이슈 방지)
         _cap = cap_text
@@ -3024,7 +3139,10 @@ def render_video(
         if bg_vid is not None:
             # 배경 영상에서 랜덤 오프셋 구간 추출
             max_start = max(bg_vid.duration - dur - 0.1, 0)
-            seg_start = random.uniform(0, max_start) if max_start > 0 else 0
+            if highlight_start is not None and max_start > 0:
+                seg_start = min(max(highlight_start + vid_offset, 0.0), max_start)
+            else:
+                seg_start = random.uniform(0, max_start) if max_start > 0 else 0
             seg = bg_vid.subclip(seg_start, seg_start + dur)
             clip = seg.fl(_render_frame).set_duration(dur)
         else:
@@ -3222,6 +3340,8 @@ def append_publish_log(config: AppConfig, row: Dict[str, str]) -> None:
         "template_id",
         "asset_ids",
         "voice_id",
+        "caption_variant",
+        "bgm_file",
         "video_path",
         "youtube_video_id",
         "youtube_url",
@@ -4038,6 +4158,36 @@ def _status_update(progress, status_box, pct: float, message: str) -> None:
         status_box.info(f"진행 상태: {message}")
 
 
+def _ui_info(message: str, use_streamlit: bool = True) -> None:
+    if use_streamlit:
+        try:
+            st.info(message)
+            return
+        except Exception:
+            pass
+    print(message)
+
+
+def _ui_warning(message: str, use_streamlit: bool = True) -> None:
+    if use_streamlit:
+        try:
+            st.warning(message)
+            return
+        except Exception:
+            pass
+    print(message)
+
+
+def _ui_error(message: str, use_streamlit: bool = True) -> None:
+    if use_streamlit:
+        try:
+            st.error(message)
+            return
+        except Exception:
+            pass
+    print(message)
+
+
 def _script_plan_text(script: Dict[str, Any]) -> str:
     _meta = script.get("meta", {})
     texts = _script_to_beats(script)
@@ -4052,13 +4202,22 @@ def _script_plan_text(script: Dict[str, Any]) -> str:
     )
 
 
-def _auto_jp_flow(config: AppConfig, progress, status_box, extra_hint: str = "") -> bool:
+def _auto_jp_flow(
+    config: AppConfig,
+    progress,
+    status_box,
+    extra_hint: str = "",
+    use_streamlit: bool = True,
+) -> bool:
     """
     크롤링 없이 LLM이 주제를 자동 선정해 일본인 타겟 숏츠를 생성하는 메인 플로우.
     텔레그램 승인 → TTS → 영상 렌더링 → 유튜브 업로드.
     """
     if config.require_approval and (not config.telegram_bot_token or not config.telegram_admin_chat_id):
-        st.error("승인 모드에서는 텔레그램 봇 설정이 필요합니다. TELEGRAM_BOT_TOKEN, TELEGRAM_ADMIN_CHAT_ID를 확인하세요.")
+        _ui_error(
+            "승인 모드에서는 텔레그램 봇 설정이 필요합니다. TELEGRAM_BOT_TOKEN, TELEGRAM_ADMIN_CHAT_ID를 확인하세요.",
+            use_streamlit,
+        )
         return False
     manifest_items = load_manifest(config.manifest_path)
 
@@ -4070,7 +4229,7 @@ def _auto_jp_flow(config: AppConfig, progress, status_box, extra_hint: str = "")
         _telemetry_log("대본 생성 완료", config)
     except Exception as exc:
         _telemetry_log(f"대본 생성 실패: {exc}", config)
-        st.error(f"대본 생성 실패: {exc}")
+        _ui_error(f"대본 생성 실패: {exc}", use_streamlit)
         return False
 
     # ── 새 스키마 필드 추출 ───────────────────────────────
@@ -4088,6 +4247,8 @@ def _auto_jp_flow(config: AppConfig, progress, status_box, extra_hint: str = "")
     visual_keywords = _script_to_visual_keywords(script)
     roles = _script_to_roles(script)
     caption_styles = _build_caption_styles(roles, len(texts))
+    caption_variant = _select_caption_variant(config)
+    caption_styles = _apply_caption_variant(caption_styles, caption_variant)
     caption_texts = _build_caption_texts(texts, config.caption_max_chars)
     texts_ko_norm = _normalize_ko_lines(texts_ko, texts)
 
@@ -4097,7 +4258,7 @@ def _auto_jp_flow(config: AppConfig, progress, status_box, extra_hint: str = "")
             mood = "fast_exciting"
             _telemetry_log("인기 오디오 스타일 적용: fast_exciting", config)
 
-    st.info(f"제목: **{video_title}** | 무드: **{mood}**")
+    _ui_info(f"제목: **{video_title}** | 무드: **{mood}** | 자막 변형: **{caption_variant}**", use_streamlit)
 
     # ── BGM 매칭 ─────────────────────────────────────────
     _telemetry_log(f"BGM 매칭 시작 (mood={mood})", config)
@@ -4106,10 +4267,12 @@ def _auto_jp_flow(config: AppConfig, progress, status_box, extra_hint: str = "")
     bgm_display = os.path.basename(bgm_path) if bgm_path else "없음"
     _telemetry_log(f"BGM 매칭 결과: {bgm_display}", config)
     if not bgm_path or not os.path.exists(bgm_path):
-        st.warning(
+        _ui_warning(
             "BGM 파일을 찾지 못했습니다. "
             "assets/bgm/mystery_suspense 또는 assets/bgm/fast_exciting 폴더에 "
             "BGM 파일을 넣어주세요. (PIXABAY_API_KEY가 있으면 자동 다운로드 시도)"
+            ,
+            use_streamlit,
         )
 
     # ── 배경 영상 — Minecraft Parkour(yt-dlp) 우선, Pixabay/Pexels 폴백 ─────────────
@@ -4131,7 +4294,7 @@ def _auto_jp_flow(config: AppConfig, progress, status_box, extra_hint: str = "")
             placeholder = _ensure_placeholder_image(config)
             bg_image_paths = [placeholder] * len(texts)
             _telemetry_log("Minecraft Parkour 배경 영상 사용", config)
-            st.info("배경 영상: Minecraft Parkour (YouTube)")
+            _ui_info("배경 영상: Minecraft Parkour (YouTube)", use_streamlit)
         else:
             _telemetry_log("Minecraft Parkour 다운로드 실패 — Pixabay/Pexels 폴백", config)
             # 폴백: Pixabay/Pexels
@@ -4328,11 +4491,12 @@ def _auto_jp_flow(config: AppConfig, progress, status_box, extra_hint: str = "")
             if not thumb_src:
                 thumb_src = _ensure_placeholder_image(config)
             thumb_path = os.path.join(config.output_dir, f"thumb_{now}.jpg")
+            thumb_text = _pick_thumbnail_text(meta, texts)
             generate_thumbnail_image(
                 config=config,
                 bg_image_path=thumb_src,
                 title_text=video_title,
-                hook_text=texts[0] if texts else video_title,
+                hook_text=thumb_text or video_title,
                 output_path=thumb_path,
             )
             _telemetry_log(f"썸네일 생성 완료: {os.path.basename(thumb_path)}", config)
@@ -4437,6 +4601,8 @@ def _auto_jp_flow(config: AppConfig, progress, status_box, extra_hint: str = "")
         "youtube_url": video_url,
         "instagram_media_id": video_id if getattr(config, "enable_instagram_upload", False) else "",
         "platform": "instagram" if getattr(config, "enable_instagram_upload", False) else "youtube",
+        "caption_variant": caption_variant,
+        "bgm_file": os.path.basename(bgm_path) if bgm_path else "",
         "status": "ok" if not upload_error else "error",
         "error": upload_error,
     }
@@ -4445,6 +4611,18 @@ def _auto_jp_flow(config: AppConfig, progress, status_box, extra_hint: str = "")
     except Exception:
         pass
     _write_local_log(os.path.join(config.output_dir, "runs.jsonl"), log_row)
+    _write_local_log(
+        os.path.join(config.output_dir, "ab_tests.jsonl"),
+        {
+            "date_jst": log_row["date_jst"],
+            "title": video_title,
+            "caption_variant": caption_variant,
+            "bgm_file": os.path.basename(bgm_path) if bgm_path else "",
+            "mood": mood,
+            "youtube_video_id": video_id,
+            "youtube_url": video_url,
+        },
+    )
 
     _status_update(progress, status_box, 1.0, "완료")
     st.video(output_path)
@@ -4545,6 +4723,10 @@ def run_streamlit_app() -> None:
         "- `THUMBNAIL_ENABLED` (썸네일 자동 생성)\n"
         "- `THUMBNAIL_USE_HOOK` (썸네일에 훅 문장 사용)\n"
         "- `THUMBNAIL_MAX_CHARS` (썸네일 문장 길이)\n\n"
+        "- `HIGHLIGHT_CLIP_ENABLED` (역동 구간 자동 선택)\n"
+        "- `HIGHLIGHT_CLIP_DURATION_SEC` (하이라이트 길이)\n"
+        "- `HIGHLIGHT_CLIP_SAMPLE_FPS` (모션 샘플링 FPS)\n\n"
+        "- `AB_TEST_ENABLED` (자막/BGM A/B 기록)\n\n"
         "**BGM 무드 폴더:** `assets/bgm/mystery_suspense/`, `assets/bgm/fast_exciting/`"
     )
     missing = _missing_required(config)
@@ -4676,6 +4858,8 @@ def run_streamlit_app() -> None:
                         )
                     roles = _script_to_roles(script)
                     caption_styles = _build_caption_styles(roles, len(texts))
+                    caption_variant = _select_caption_variant(config)
+                    caption_styles = _apply_caption_variant(caption_styles, caption_variant)
                     caption_texts = _build_caption_texts(texts, config.caption_max_chars)
                     texts_ko_norm = _normalize_ko_lines(_texts_ko, texts)
                     pinned_ko = _meta.get("pinned_comment_ko", pinned_val)
@@ -4807,11 +4991,12 @@ def run_streamlit_app() -> None:
                             if not thumb_src:
                                 thumb_src = _ensure_placeholder_image(config)
                             thumb_path = os.path.join(config.output_dir, f"thumb_{now}.jpg")
+                            thumb_text = _pick_thumbnail_text(_meta, texts)
                             generate_thumbnail_image(
                                 config=config,
                                 bg_image_path=thumb_src,
                                 title_text=video_title_val,
-                                hook_text=texts[0] if texts else video_title_val,
+                                hook_text=thumb_text or video_title_val,
                                 output_path=thumb_path,
                             )
                         except Exception as thumb_err:
@@ -4901,6 +5086,8 @@ def run_streamlit_app() -> None:
                         "video_path": output_path,
                         "youtube_video_id": video_id,
                         "youtube_url": video_url,
+                        "caption_variant": caption_variant,
+                        "bgm_file": os.path.basename(bgm_path) if bgm_path else "",
                         "status": "ok" if not upload_error else "error",
                         "error": upload_error,
                     }
@@ -4909,6 +5096,18 @@ def run_streamlit_app() -> None:
                     except Exception:
                         pass
                     _write_local_log(os.path.join(config.output_dir, "runs.jsonl"), log_row)
+                    _write_local_log(
+                        os.path.join(config.output_dir, "ab_tests.jsonl"),
+                        {
+                            "date_jst": log_row["date_jst"],
+                            "title": video_title_val,
+                            "caption_variant": caption_variant,
+                            "bgm_file": os.path.basename(bgm_path) if bgm_path else "",
+                            "mood": mood,
+                            "youtube_video_id": video_id,
+                            "youtube_url": video_url,
+                        },
+                    )
                     _status_update(progress, status_box, 1.0, "완료")
                     st.video(output_path)
                     if video_url:
@@ -5481,6 +5680,8 @@ def run_batch(count: int, seed: str = "", beats: int = 7) -> None:
         visual_kws = _script_to_visual_keywords(script)
         roles = _script_to_roles(script)
         caption_styles = _build_caption_styles(roles, len(texts))
+        caption_variant = _select_caption_variant(config)
+        caption_styles = _apply_caption_variant(caption_styles, caption_variant)
         caption_texts = _build_caption_texts(texts, config.caption_max_chars)
         mood_to_cat = {
             "mystery_suspense": "shocking",
@@ -5595,11 +5796,12 @@ def run_batch(count: int, seed: str = "", beats: int = 7) -> None:
                 if not thumb_src:
                     thumb_src = _ensure_placeholder_image(config)
                 thumb_path = os.path.join(config.output_dir, f"thumb_{now}_{index}.jpg")
+                thumb_text = _pick_thumbnail_text(_meta_b, texts)
                 generate_thumbnail_image(
                     config=config,
                     bg_image_path=thumb_src,
                     title_text=_meta_b.get("title_ja", _meta_b.get("title", "")),
-                    hook_text=texts[0] if texts else _meta_b.get("title_ja", ""),
+                    hook_text=thumb_text or _meta_b.get("title_ja", ""),
                     output_path=thumb_path,
                 )
             except Exception:
@@ -5675,6 +5877,8 @@ def run_batch(count: int, seed: str = "", beats: int = 7) -> None:
             "video_path": output_path,
             "youtube_video_id": video_id,
             "youtube_url": video_url,
+            "caption_variant": caption_variant,
+            "bgm_file": os.path.basename(bgm_path) if bgm_path else "",
             "status": "ok" if not upload_error else "error",
             "error": upload_error,
         }
@@ -5683,6 +5887,18 @@ def run_batch(count: int, seed: str = "", beats: int = 7) -> None:
         except Exception:
             pass
         _write_local_log(os.path.join(config.output_dir, "runs.jsonl"), log_row)
+        _write_local_log(
+            os.path.join(config.output_dir, "ab_tests.jsonl"),
+            {
+                "date_jst": log_row["date_jst"],
+                "title": _title_b,
+                "caption_variant": caption_variant,
+                "bgm_file": os.path.basename(bgm_path) if bgm_path else "",
+                "mood": mood,
+                "youtube_video_id": video_id,
+                "youtube_url": video_url,
+            },
+        )
 
 
 def _run_streamlit_app_safe() -> None:
