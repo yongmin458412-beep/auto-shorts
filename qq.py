@@ -417,14 +417,9 @@ class AppConfig:
     telegram_admin_chat_id: str
     telegram_timeout_sec: int
     telegram_offset_path: str
-    bboom_list_url: str
-    bboom_max_fetch: int
-    used_links_path: str
-    trend_query: str
-    trend_max_results: int
     approve_keywords: List[str]
     swap_keywords: List[str]
-    pixabay_api_key: str  # NEW: Pixabay Audio API
+    pixabay_api_key: str
 
 
 def load_config() -> AppConfig:
@@ -462,16 +457,9 @@ def load_config() -> AppConfig:
         telegram_timeout_sec=int(_get_secret("TELEGRAM_TIMEOUT_SEC", "600") or 600),
         telegram_offset_path=_get_secret("TELEGRAM_OFFSET_PATH", "data/state/telegram_offset.json")
         or "data/state/telegram_offset.json",
-        bboom_list_url=_get_secret("BBOOM_LIST_URL", "https://m.bboom.naver.com/")
-        or "https://m.bboom.naver.com/",
-        bboom_max_fetch=int(_get_secret("BBOOM_MAX_FETCH", "30") or 30),
-        used_links_path=_get_secret("USED_LINKS_PATH", "data/state/used_links.json")
-        or "data/state/used_links.json",
-        trend_query=_get_secret("TREND_QUERY", "日本 トレンド ハッシュタグ") or "日本 トレンド ハッシュタグ",
-        trend_max_results=int(_get_secret("TREND_MAX_RESULTS", "8") or 8),
         approve_keywords=_get_list("APPROVE_KEYWORDS") or ["승인", "approve", "ok", "yes"],
         swap_keywords=_get_list("SWAP_KEYWORDS") or ["교환", "swap", "change", "next"],
-        pixabay_api_key=_get_secret("PIXABAY_API_KEY", "") or "",  # NEW
+        pixabay_api_key=_get_secret("PIXABAY_API_KEY", "") or "",
     )
 
 
@@ -683,143 +671,166 @@ def get_or_download_bgm(
 
 
 # ─────────────────────────────────────────────
-# NEW: 한국 양산형 숏츠 대본 생성 (분위기별)
+# 일본인 타겟 숏츠 대본 생성 시스템
 # ─────────────────────────────────────────────
 
-KOREAN_SHORTS_STYLE_PROMPTS: Dict[str, str] = {
-    "shock_twist": (
-        "한국 숏츠 양산형 '충격/반전' 스타일로 작성하세요. "
-        "첫 3초 훅은 '이거 실화임?' '결말이...' 식으로 궁금증을 유발하고, "
-        "마지막 비트는 반전/충격 결말로 끝내세요. "
-        "전체 구조: 훅 → 상황설명 → 고조 → 반전 결말"
-    ),
-    "empathy_touching": (
-        "한국 숏츠 양산형 '공감/감동' 스타일로 작성하세요. "
-        "첫 3초 훅은 '이런 사람 주변에 있으면...' '나만 이런 거 아니지?' 식 공감 유발, "
-        "마지막 비트는 따뜻하거나 눈물나는 결말로 끝내세요. "
-        "전체 구조: 공감훅 → 상황공감 → 감정고조 → 감동결말"
-    ),
+# BGM 무드 카테고리 (mystery / exciting / informative)
+BGM_MOOD_CATEGORIES: Dict[str, Dict[str, Any]] = {
+    "mystery": {
+        "description": "미스터리/긴장감 — 충격 폭로, 이면 폭로, 공포 계열",
+        "pixabay_queries": ["suspense dramatic", "mystery tension", "thriller cinematic"],
+        "folder": "mystery",
+    },
+    "exciting": {
+        "description": "템포 빠른 신나는 비트 — 맛집, 여행, 랭킹, 에너지",
+        "pixabay_queries": ["energetic upbeat", "hype electronic", "fun pop beat"],
+        "folder": "exciting",
+    },
+    "informative": {
+        "description": "감성 브이로그 톤 — 정보/팁, 일상, 가이드 계열",
+        "pixabay_queries": ["chill lofi", "acoustic vlog", "soft background"],
+        "folder": "informative",
+    },
 }
 
-CATEGORY_TO_SCRIPT_STYLE: Dict[str, str] = {
-    "humor":        "shock_twist",
-    "shocking":     "shock_twist",
-    "cringe":       "shock_twist",
-    "exciting":     "shock_twist",
-    "anger":        "shock_twist",
-    "touching":     "empathy_touching",
-    "heartwarming": "empathy_touching",
-    "sad":          "empathy_touching",
-}
+# 롤렛 주제 풀 — LLM이 이 리스트를 참고해 매번 새 주제 생성
+JP_CONTENT_THEMES: List[str] = [
+    "한국 여행 꿀팁 / 가성비 맛집 랭킹",
+    "일본인이 놀라는 한국 문화 충격",
+    "한국 편의점 신상품 리뷰",
+    "서울/부산/제주 숨겨진 명소",
+    "한국인만 아는 초가성비 맛집",
+    "한국 최근 논란·핫이슈",
+    "K-뷰티 꿀팁·추천 아이템",
+    "한국 길거리 음식 BEST",
+    "한국과 일본의 문화 차이",
+    "한국 여행에서 절대 하면 안 되는 실수",
+]
+
+# 시스템 프롬프트 (LLM에 직접 전달)
+JP_SHORTS_SYSTEM_PROMPT: str = """당신은 일본인 유튜브 숏츠 채널 전문 작가입니다.
+채널 컨셉: '한국 여행·문화·음식·이슈'를 일본인 시청자에게 소개하는 숏츠.
+목표: 조회수 1위, 극강 어그로, 시청 지속 시간 극대화.
+
+[주제 선정 규칙]
+- 매번 새롭고 자극적인 주제를 스스로 선정할 것 (롤렛 방식)
+- 예시 카테고리: 가성비 맛집 랭킹, 숨겨진 명소, 충격 이슈, 문화 차이, 여행 실수 주의
+- 지역 타겟팅 활용: '부산', '서울 홍대', '제주도' 등 구체적일수록 좋음
+
+[필수 출력 규칙]
+1. hook_3_sec: 극단적이고 자극적인 일본어 문장 1개 (3초 내 이탈 방지)
+   - 예: "日本人は絶対知らない〜", "これ食べずに韓国旅行したら後悔する", "99%が騙されている韓国の真実"
+2. body_script: 6~8개 짧은 일본어 문장 배열 (템포 빠르게, 궁금증 지속 유발)
+3. cta_outro: 협박성/강한 호기심 구독 유도 (평범한 "チャンネル登録" 금지)
+   - 예: "次の動画では〇〇を暴露します。見逃したくなければ登録！"
+4. pinned_comment: 시청자가 참지 못하고 댓글 달게 만드는 논쟁/참여 유도 질문 1개
+   - 예: "韓国チキン vs 日本の唐揚げ、正直どっちが美味しい？コメントで戦ってください笑"
+5. mood: "mystery" | "exciting" | "informative" 중 정확히 1개 선택 (BGM 자동 매칭용)
+6. video_title: 유튜브 알고리즘용 극강 어그로 일본어 제목
+7. hashtags: 일본 조회수 터지는 해시태그 정확히 5개 (# 포함)
+
+[출력 형식 — 반드시 순수 JSON만 출력, 마크다운 금지]
+{
+  "topic_theme": "선정된 주제 테마 (한국어 or 일본어)",
+  "video_title": "극강 어그로 일본어 제목",
+  "hashtags": ["#태그1", "#태그2", "#태그3", "#태그4", "#태그5"],
+  "hook_3_sec": "3초 후킹 일본어 문장",
+  "body_script": ["문장1", "문장2", "문장3", "문장4", "문장5", "문장6"],
+  "cta_outro": "어그로성 구독 유도 일본어 문장",
+  "pinned_comment": "댓글 폭발 유도 일본어 질문",
+  "mood": "mystery | exciting | informative 중 1개"
+}"""
 
 
-def generate_script(
+def generate_script_jp(
     config: AppConfig,
-    seed_text: str,
-    language: str = "ja",
-    beats_count: int = 7,
-    allowed_tags: List[str] | None = None,
-    trend_context: str = "",
-    dialect_style: str = "",
-    content_category: str = "",
-    source_type: str = "",  # "news" | "" 뉴스 소스일 때 프롬프트 강화
+    extra_hint: str = "",
 ) -> Dict[str, Any]:
+    """
+    LLM이 주제를 스스로 선정해 일본인 타겟 숏츠 대본을 JSON으로 생성.
+    extra_hint: 추가로 힌트를 줄 때 사용 (예: 특정 지역, 키워드)
+    """
     if not config.openai_api_key:
         raise RuntimeError("OPENAI_API_KEY가 없습니다.")
-    allowed_tags = allowed_tags or [
-        "shock",
-        "laugh",
-        "awkward",
-        "angry",
-        "cute",
-        "facepalm",
-        "wow",
-        "plot",
-        "ending",
-    ]
-    tag_list = ", ".join(allowed_tags)
 
-    # 카테고리에 따른 스타일 프롬프트 선택
-    script_style_key = CATEGORY_TO_SCRIPT_STYLE.get(content_category, "shock_twist")
-    korean_style_prompt = KOREAN_SHORTS_STYLE_PROMPTS[script_style_key]
-
-    # 뉴스 전용 추가 지시
-    news_extra = ""
-    if source_type == "news":
-        news_extra = (
-            "SPECIAL INSTRUCTION - This is a Korean NEWS article:\n"
-            "- Format title as: '韓国で話題！○○' or '韓国人が衝撃！○○' or '【韓国】○○が大炎上' style\n"
-            "- Beat 1 (hook): Start with '韓国で今...' or '韓国人が...' to establish Korean context\n"
-            "- Focus on the SURPRISING or EMOTIONAL core of the news\n"
-            "- Include reactions/responses if mentioned in source (e.g. netizen reactions, expert opinions)\n"
-            "- Last beat: Japanese viewer's perspective or call-to-action ('あなたはどう思う？' style)\n"
-            "- hashtags_ja MUST include #韓国 #韓国ニュース #韓国情報 and topic-specific tags\n"
-        )
-
-    system_text = (
-        "You are a short-form video scriptwriter specializing in Korean viral content adapted for Japanese audiences.\n"
-        "Your job: read the Korean source content carefully and create a script that FAITHFULLY captures its actual story, joke, or reaction — do NOT invent unrelated content.\n\n"
-        + (news_extra + "\n" if news_extra else "")
-        + "Return ONLY valid JSON with these keys:\n"
-        "  title_ko        : Korean title (punchy, short-form style)\n"
-        "  title_ja        : Japanese title — for news use '韓国で話題！○○' style\n"
-        "  description_ja  : Japanese description (1-2 sentences)\n"
-        "  hashtags_ja     : array of 3-6 Japanese hashtags (# included)\n"
-        "  bgm_query       : 1-3 English keywords for royalty-free BGM that fits the mood (e.g. 'funny quirky ukulele')\n"
-        "  beats           : array of beat objects\n\n"
-        "Each beat object:\n"
-        "  text_ko : Korean version of the line (natural Korean short-form style, 1 punchy line)\n"
-        "  text    : Japanese translation of text_ko\n"
-        "  tag     : one reaction tag from the allowed list\n\n"
-        "Rules:\n"
-        "- beats count: decide naturally based on the content — typically 5~9 beats. "
-        "  Short jokes → 5 beats. Complex stories → up to 9 beats. Never force a fixed number.\n"
-        "- First beat: hook (grab attention in 3 seconds)\n"
-        "- Last beat: loop-friendly ending or satisfying punchline\n"
-        "- CRITICAL: Every beat must be directly based on the actual source content. "
-        "  Do NOT add unrelated details or hallucinate story elements not present in the source.\n"
-        "- Keep each beat short (1 line, 10-20 words in Korean)\n"
-        "- No emojis in text or text_ko\n"
-        "- title_ko and text_ko must be in Korean. title_ja, text, description_ja, hashtags_ja in Japanese.\n"
-        "Output JSON only, no markdown."
-    )
-    style_line = (
-        f"Korean viral style instruction: {korean_style_prompt} "
-        "Translate and adapt the Korean viral style into natural Japanese. "
-    )
-    if dialect_style:
-        style_line += (
-            f"Use {dialect_style} dialect for ALL Japanese text. "
-            "Keep it friendly and natural, avoid offensive stereotypes. "
-        )
-
+    theme_pool = "\n".join(f"- {t}" for t in JP_CONTENT_THEMES)
     user_text = (
-        f"=== SOURCE CONTENT (Korean) ===\n{seed_text}\n\n"
-        f"=== METADATA ===\n"
-        f"Content mood category: {content_category or 'humor'}\n"
-        f"Language output: {language}\n"
-        f"Allowed reaction tags: {tag_list}\n"
-        f"Trend context: {trend_context}\n\n"
-        f"=== STYLE INSTRUCTION ===\n{style_line}\n\n"
-        "IMPORTANT: Read the source content carefully. "
-        "The script beats MUST reflect the actual story/joke/reaction in the source. "
-        "Output JSON only."
+        "아래 주제 풀에서 영감을 받아, 오늘 가장 조회수가 터질 것 같은 주제를 스스로 선택하거나 새로 창작하세요.\n\n"
+        f"[주제 풀 예시]\n{theme_pool}\n\n"
+        + (f"[추가 힌트]\n{extra_hint}\n\n" if extra_hint else "")
+        + "위 시스템 프롬프트의 규칙을 완벽히 지켜 JSON만 출력하세요."
     )
+
     client = OpenAI(api_key=config.openai_api_key)
     response = client.responses.create(
         model=config.openai_model,
         input=[
-            {"role": "system", "content": system_text},
+            {"role": "system", "content": JP_SHORTS_SYSTEM_PROMPT},
             {"role": "user", "content": user_text},
         ],
     )
     output_text = getattr(response, "output_text", "") or ""
     result = extract_json(output_text)
     if not result:
-        raise RuntimeError("Failed to parse JSON from model response")
-    result["hashtags_ja"] = normalize_hashtags(result.get("hashtags_ja", []))
-    result["content_category"] = content_category  # 카테고리 보존
+        raise RuntimeError("LLM JSON 파싱 실패")
+
+    # 해시태그 정규화
+    result["hashtags"] = normalize_hashtags(result.get("hashtags", []))
+    # mood 검증
+    if result.get("mood") not in BGM_MOOD_CATEGORIES:
+        result["mood"] = "exciting"
+    # body_script가 리스트인지 확인
+    if not isinstance(result.get("body_script"), list):
+        body = result.get("body_script", "")
+        result["body_script"] = [s.strip() for s in str(body).split("。") if s.strip()]
     return result
+
+
+def _script_to_beats(script: Dict[str, Any]) -> List[str]:
+    """generate_script_jp 결과를 TTS/영상용 텍스트 리스트로 변환."""
+    texts: List[str] = []
+    hook = script.get("hook_3_sec", "")
+    if hook:
+        texts.append(hook)
+    for line in script.get("body_script", []):
+        if line:
+            texts.append(line)
+    outro = script.get("cta_outro", "")
+    if outro:
+        texts.append(outro)
+    return texts
+
+
+def match_bgm_by_mood(config: AppConfig, mood: str) -> Optional[str]:
+    """
+    mood(mystery/exciting/informative)에 맞는 BGM 파일 반환.
+    1) assets/bgm/{mood}/ 폴더에서 랜덤 선택
+    2) 없으면 Pixabay에서 다운로드 시도
+    3) 그래도 없으면 기존 pick_bgm_path() fallback
+    """
+    mood_info = BGM_MOOD_CATEGORIES.get(mood, BGM_MOOD_CATEGORIES["exciting"])
+    folder_name = mood_info["folder"]
+    bgm_dir = os.path.join(config.assets_dir, "bgm", folder_name)
+    os.makedirs(bgm_dir, exist_ok=True)
+
+    # 기존 파일 있으면 랜덤 선택
+    existing = [
+        os.path.join(bgm_dir, f)
+        for f in os.listdir(bgm_dir)
+        if f.lower().endswith((".mp3", ".wav", ".ogg", ".m4a"))
+    ]
+    if existing:
+        return random.choice(existing)
+
+    # Pixabay 다운로드 시도
+    if config.pixabay_api_key:
+        queries = mood_info.get("pixabay_queries", [])
+        query = random.choice(queries) if queries else folder_name
+        path = fetch_bgm_from_pixabay(config.pixabay_api_key, mood, bgm_dir, custom_query=query)
+        if path:
+            return path
+
+    return pick_bgm_path(config)
 
 
 def pick_voice_id(voice_ids: List[str]) -> str:
@@ -1458,14 +1469,14 @@ def get_trend_context(config: AppConfig) -> str:
     try:
         params = {
             "engine": "google_news",
-            "q": config.trend_query,
+            "q": "日本 トレンド ハッシュタグ",
             "api_key": config.serpapi_api_key,
             "hl": "ja",
             "gl": "jp",
         }
         response = requests.get("https://serpapi.com/search.json", params=params, timeout=60)
         response.raise_for_status()
-        news = response.json().get("news_results", [])[: config.trend_max_results]
+        news = response.json().get("news_results", [])[:8]
         titles = [item.get("title", "") for item in news if item.get("title")]
         if not titles:
             return ""
@@ -1581,783 +1592,6 @@ def collect_images_auto_trend(
         collected.extend(items)
         remaining = total_count - len(collected)
     return collected[:total_count], queries
-
-
-# ══════════════════════════════════════════════════════════════════
-#  다중 커뮤니티 소스 크롤러
-# ══════════════════════════════════════════════════════════════════
-
-def fetch_natepann_list(max_fetch: int = 30) -> List[Dict[str, str]]:
-    """네이트판 실시간 베스트 글 목록 수집."""
-    base = "https://pann.nate.com"
-    urls_to_try = [
-        "https://pann.nate.com/talk/ranking/",
-        "https://pann.nate.com/talk/ranking/d",
-    ]
-    headers = {
-        "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 Chrome/124.0.0.0 Safari/537.36",
-        "Referer": "https://pann.nate.com/",
-        "Accept-Language": "ko-KR,ko;q=0.9",
-    }
-    items: List[Dict[str, str]] = []
-    seen: set = set()
-    for list_url in urls_to_try:
-        try:
-            r = requests.get(list_url, headers=headers, timeout=20)
-            r.raise_for_status()
-            soup = BeautifulSoup(r.text, "html.parser")
-            for a in soup.find_all("a", href=True):
-                href = a.get("href", "")
-                if "/talk/t/" not in href and "/talk/r/" not in href:
-                    continue
-                full_url = href if href.startswith("http") else urljoin(base, href)
-                full_url = full_url.split("?")[0]
-                if full_url in seen:
-                    continue
-                title = a.get_text(" ", strip=True)
-                if not title or len(title) < 3:
-                    p = a.find_parent(["li", "div", "article"])
-                    if p:
-                        title = p.get_text(" ", strip=True)[:80]
-                if not title:
-                    continue
-                seen.add(full_url)
-                items.append({"url": full_url, "title": title, "source": "네이트판"})
-                if len(items) >= max_fetch:
-                    break
-        except Exception as e:
-            print(f"[네이트판] 수집 오류: {e}")
-        if len(items) >= max_fetch:
-            break
-    return items
-
-
-def fetch_natepann_post(url: str) -> Dict[str, str]:
-    """네이트판 글 본문 + 댓글 수집."""
-    headers = {
-        "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 Chrome/124.0.0.0 Safari/537.36",
-        "Referer": "https://pann.nate.com/",
-        "Accept-Language": "ko-KR,ko;q=0.9",
-    }
-    try:
-        r = requests.get(url, headers=headers, timeout=20)
-        r.raise_for_status()
-        soup = BeautifulSoup(r.text, "html.parser")
-        title = ""
-        og = soup.find("meta", property="og:title")
-        if og and og.get("content"):
-            title = og["content"].strip()
-        if not title and soup.title:
-            title = soup.title.get_text(strip=True)
-        # 본문
-        content_area = soup.find("div", class_=lambda c: c and any(k in c for k in ("post-ct", "talk-ct", "content", "view-content")))
-        if not content_area:
-            content_area = soup
-        SKIP = {"더보기", "닫기", "공유", "신고", "좋아요", "댓글", "팔로우", "loading"}
-        blocks, seen_t = [], set()
-        for tag in content_area.find_all(["p", "span", "div", "li"]):
-            if tag.name == "div" and len(tag.find_all(["p", "span", "li"])) > 3:
-                continue
-            t = tag.get_text(" ", strip=True)
-            if not t or len(t) < 5 or len(t) > 400 or any(k in t for k in SKIP) or t in seen_t:
-                continue
-            seen_t.add(t)
-            blocks.append(t)
-            if len(blocks) >= 30:
-                break
-        # 댓글
-        cmt_blocks = []
-        for area in soup.find_all(["div", "ul"], class_=lambda c: c and any(k in c for k in ("comment", "reply", "cmt"))):
-            for tag in area.find_all(["p", "span", "li"]):
-                t = tag.get_text(" ", strip=True)
-                if t and 5 < len(t) < 150 and t not in seen_t:
-                    seen_t.add(t)
-                    cmt_blocks.append(t)
-                if len(cmt_blocks) >= 10:
-                    break
-        content = "\n".join(blocks)
-        if cmt_blocks:
-            content += "\n\n[댓글 반응]\n" + "\n".join(cmt_blocks)
-        return {"title": title, "content": content, "source": "네이트판"}
-    except Exception as e:
-        return {"title": "", "content": "", "source": "네이트판", "error": str(e)}
-
-
-def fetch_fmkorea_list(max_fetch: int = 30) -> List[Dict[str, str]]:
-    """에펨코리아 베스트 글 목록 수집."""
-    list_urls = [
-        "https://www.fmkorea.com/best",
-        "https://www.fmkorea.com/humor",
-    ]
-    headers = {
-        "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 Chrome/124.0.0.0 Safari/537.36",
-        "Referer": "https://www.fmkorea.com/",
-        "Accept-Language": "ko-KR,ko;q=0.9",
-    }
-    items: List[Dict[str, str]] = []
-    seen: set = set()
-    for list_url in list_urls:
-        try:
-            r = requests.get(list_url, headers=headers, timeout=20)
-            r.raise_for_status()
-            soup = BeautifulSoup(r.text, "html.parser")
-            for a in soup.find_all("a", href=True):
-                href = a.get("href", "")
-                if not re.search(r"/\d{7,}", href):
-                    continue
-                full_url = href if href.startswith("http") else urljoin("https://www.fmkorea.com", href)
-                full_url = full_url.split("?")[0]
-                if full_url in seen or "fmkorea.com" not in full_url:
-                    continue
-                title = a.get_text(" ", strip=True)
-                if not title or len(title) < 3:
-                    continue
-                seen.add(full_url)
-                items.append({"url": full_url, "title": title, "source": "에펨코리아"})
-                if len(items) >= max_fetch:
-                    break
-        except Exception as e:
-            print(f"[에펨코리아] 수집 오류: {e}")
-        if len(items) >= max_fetch:
-            break
-    return items
-
-
-def fetch_fmkorea_post(url: str) -> Dict[str, str]:
-    """에펨코리아 글 본문 수집."""
-    headers = {
-        "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 Chrome/124.0.0.0 Safari/537.36",
-        "Referer": "https://www.fmkorea.com/",
-        "Accept-Language": "ko-KR,ko;q=0.9",
-    }
-    try:
-        r = requests.get(url, headers=headers, timeout=20)
-        r.raise_for_status()
-        soup = BeautifulSoup(r.text, "html.parser")
-        title = ""
-        og = soup.find("meta", property="og:title")
-        if og and og.get("content"):
-            title = og["content"].strip()
-        if not title and soup.title:
-            title = soup.title.get_text(strip=True)
-        content_area = soup.find("div", class_=lambda c: c and any(k in c for k in ("xe_content", "rd_body", "content")))
-        if not content_area:
-            content_area = soup
-        SKIP = {"더보기", "닫기", "공유", "신고", "좋아요", "댓글", "팔로우", "loading", "광고"}
-        blocks, seen_t = [], set()
-        for tag in content_area.find_all(["p", "span", "div", "li"]):
-            if tag.name == "div" and len(tag.find_all(["p", "span", "li"])) > 3:
-                continue
-            t = tag.get_text(" ", strip=True)
-            if not t or len(t) < 5 or len(t) > 400 or any(k in t for k in SKIP) or t in seen_t:
-                continue
-            seen_t.add(t)
-            blocks.append(t)
-            if len(blocks) >= 30:
-                break
-        cmt_blocks = []
-        for area in soup.find_all(["div", "ul"], class_=lambda c: c and any(k in c for k in ("comment", "reply", "cmt"))):
-            for tag in area.find_all(["p", "span", "li"]):
-                t = tag.get_text(" ", strip=True)
-                if t and 5 < len(t) < 150 and t not in seen_t:
-                    seen_t.add(t)
-                    cmt_blocks.append(t)
-                if len(cmt_blocks) >= 10:
-                    break
-        content = "\n".join(blocks)
-        if cmt_blocks:
-            content += "\n\n[댓글 반응]\n" + "\n".join(cmt_blocks)
-        return {"title": title, "content": content, "source": "에펨코리아"}
-    except Exception as e:
-        return {"title": "", "content": "", "source": "에펨코리아", "error": str(e)}
-
-
-def fetch_dcinside_list(max_fetch: int = 30) -> List[Dict[str, str]]:
-    """DC인사이드 개념글 목록 수집."""
-    list_urls = [
-        "https://gall.dcinside.com/board/lists/?id=hit&exception_mode=recommend",
-        "https://gall.dcinside.com/board/lists/?id=humorworld",
-    ]
-    headers = {
-        "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 Chrome/124.0.0.0 Safari/537.36",
-        "Referer": "https://gall.dcinside.com/",
-        "Accept-Language": "ko-KR,ko;q=0.9",
-    }
-    items: List[Dict[str, str]] = []
-    seen: set = set()
-    for list_url in list_urls:
-        try:
-            r = requests.get(list_url, headers=headers, timeout=20)
-            r.raise_for_status()
-            soup = BeautifulSoup(r.text, "html.parser")
-            for a in soup.find_all("a", href=True):
-                href = a.get("href", "")
-                if "no=" not in href or "lists" in href:
-                    continue
-                full_url = href if href.startswith("http") else urljoin("https://gall.dcinside.com", href)
-                full_url = full_url.split("&page=")[0]
-                if full_url in seen:
-                    continue
-                title = a.get_text(" ", strip=True)
-                if not title or len(title) < 3:
-                    continue
-                seen.add(full_url)
-                items.append({"url": full_url, "title": title, "source": "DC인사이드"})
-                if len(items) >= max_fetch:
-                    break
-        except Exception as e:
-            print(f"[DC인사이드] 수집 오류: {e}")
-        if len(items) >= max_fetch:
-            break
-    return items
-
-
-def fetch_dcinside_post(url: str) -> Dict[str, str]:
-    """DC인사이드 글 본문 수집."""
-    headers = {
-        "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 Chrome/124.0.0.0 Safari/537.36",
-        "Referer": "https://gall.dcinside.com/",
-        "Accept-Language": "ko-KR,ko;q=0.9",
-    }
-    try:
-        r = requests.get(url, headers=headers, timeout=20)
-        r.raise_for_status()
-        soup = BeautifulSoup(r.text, "html.parser")
-        title = ""
-        og = soup.find("meta", property="og:title")
-        if og and og.get("content"):
-            title = og["content"].strip()
-        if not title and soup.title:
-            title = soup.title.get_text(strip=True)
-        content_area = soup.find("div", class_=lambda c: c and any(k in c for k in ("write_div", "view-content", "content")))
-        if not content_area:
-            content_area = soup
-        SKIP = {"더보기", "닫기", "공유", "신고", "좋아요", "댓글", "팔로우", "loading", "광고", "갤로그"}
-        blocks, seen_t = [], set()
-        for tag in content_area.find_all(["p", "span", "div", "li"]):
-            if tag.name == "div" and len(tag.find_all(["p", "span", "li"])) > 3:
-                continue
-            t = tag.get_text(" ", strip=True)
-            if not t or len(t) < 5 or len(t) > 400 or any(k in t for k in SKIP) or t in seen_t:
-                continue
-            seen_t.add(t)
-            blocks.append(t)
-            if len(blocks) >= 30:
-                break
-        cmt_blocks = []
-        for area in soup.find_all(["div", "ul"], class_=lambda c: c and any(k in c for k in ("comment", "reply", "cmt", "dccon"))):
-            for tag in area.find_all(["p", "span", "li", "em"]):
-                t = tag.get_text(" ", strip=True)
-                if t and 5 < len(t) < 150 and t not in seen_t:
-                    seen_t.add(t)
-                    cmt_blocks.append(t)
-                if len(cmt_blocks) >= 10:
-                    break
-        content = "\n".join(blocks)
-        if cmt_blocks:
-            content += "\n\n[댓글 반응]\n" + "\n".join(cmt_blocks)
-        return {"title": title, "content": content, "source": "DC인사이드"}
-    except Exception as e:
-        return {"title": "", "content": "", "source": "DC인사이드", "error": str(e)}
-
-
-def fetch_bobaedream_list(max_fetch: int = 30) -> List[Dict[str, str]]:
-    """보배드림 베스트 글 목록 수집."""
-    list_urls = [
-        "https://www.bobaedream.co.kr/list?code=best",
-        "https://www.bobaedream.co.kr/list?code=humor",
-    ]
-    headers = {
-        "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 Chrome/124.0.0.0 Safari/537.36",
-        "Referer": "https://www.bobaedream.co.kr/",
-        "Accept-Language": "ko-KR,ko;q=0.9",
-    }
-    items: List[Dict[str, str]] = []
-    seen: set = set()
-    for list_url in list_urls:
-        try:
-            r = requests.get(list_url, headers=headers, timeout=20)
-            r.raise_for_status()
-            soup = BeautifulSoup(r.text, "html.parser")
-            for a in soup.find_all("a", href=True):
-                href = a.get("href", "")
-                if "view.php" not in href and "No=" not in href:
-                    continue
-                full_url = href if href.startswith("http") else urljoin("https://www.bobaedream.co.kr", href)
-                full_url = full_url.split("&page=")[0]
-                if full_url in seen:
-                    continue
-                title = a.get_text(" ", strip=True)
-                if not title or len(title) < 3:
-                    continue
-                seen.add(full_url)
-                items.append({"url": full_url, "title": title, "source": "보배드림"})
-                if len(items) >= max_fetch:
-                    break
-        except Exception as e:
-            print(f"[보배드림] 수집 오류: {e}")
-        if len(items) >= max_fetch:
-            break
-    return items
-
-
-def fetch_bobaedream_post(url: str) -> Dict[str, str]:
-    """보배드림 글 본문 수집."""
-    headers = {
-        "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 Chrome/124.0.0.0 Safari/537.36",
-        "Referer": "https://www.bobaedream.co.kr/",
-        "Accept-Language": "ko-KR,ko;q=0.9",
-    }
-    try:
-        r = requests.get(url, headers=headers, timeout=20)
-        r.raise_for_status()
-        soup = BeautifulSoup(r.text, "html.parser")
-        title = ""
-        og = soup.find("meta", property="og:title")
-        if og and og.get("content"):
-            title = og["content"].strip()
-        if not title and soup.title:
-            title = soup.title.get_text(strip=True)
-        content_area = soup.find("div", class_=lambda c: c and any(k in c for k in ("bodyCont", "post_content", "content", "view_cont")))
-        if not content_area:
-            content_area = soup
-        SKIP = {"더보기", "닫기", "공유", "신고", "좋아요", "댓글", "팔로우", "loading", "광고"}
-        blocks, seen_t = [], set()
-        for tag in content_area.find_all(["p", "span", "div", "li"]):
-            if tag.name == "div" and len(tag.find_all(["p", "span", "li"])) > 3:
-                continue
-            t = tag.get_text(" ", strip=True)
-            if not t or len(t) < 5 or len(t) > 400 or any(k in t for k in SKIP) or t in seen_t:
-                continue
-            seen_t.add(t)
-            blocks.append(t)
-            if len(blocks) >= 30:
-                break
-        cmt_blocks = []
-        for area in soup.find_all(["div", "ul"], class_=lambda c: c and any(k in c for k in ("comment", "reply", "cmt"))):
-            for tag in area.find_all(["p", "span", "li"]):
-                t = tag.get_text(" ", strip=True)
-                if t and 5 < len(t) < 150 and t not in seen_t:
-                    seen_t.add(t)
-                    cmt_blocks.append(t)
-                if len(cmt_blocks) >= 10:
-                    break
-        content = "\n".join(blocks)
-        if cmt_blocks:
-            content += "\n\n[댓글 반응]\n" + "\n".join(cmt_blocks)
-        return {"title": title, "content": content, "source": "보배드림"}
-    except Exception as e:
-        return {"title": "", "content": "", "source": "보배드림", "error": str(e)}
-
-
-# 소스별 크롤러 매핑
-# ── 네이트뉴스 실시간 랭킹 ──────────────────────────────────────
-
-# 뉴스 필터: 제목에 이 키워드가 포함되면 스킵 (정치/날씨/증시 등 재미없는 것들)
-NEWS_SKIP_KEYWORDS = [
-    # 정치
-    "대통령", "국회", "여당", "야당", "민주당", "국민의힘", "대선", "총선", "탄핵",
-    "내각", "장관", "의원", "정치", "헌재", "헌법재판", "법원", "검찰", "수사",
-    "선거", "투표", "의석", "국정", "외교", "정부", "청와대", "용산",
-    "계엄", "특검", "공수처", "의회", "입법",
-    # 경제/날씨/주식
-    "코스피", "코스닥", "주가", "환율", "금리", "증시", "주식", "경제지표",
-    "날씨", "미세먼지", "태풍", "폭설", "황사", "기온", "강수",
-    "GDP", "CPI", "무역수지", "수출입", "통계청", "물가", "기준금리",
-    # 부동산/건설
-    "아파트값", "집값", "전셋값", "분양", "재건축", "재개발",
-    # 군사/외교
-    "북한", "핵", "미사일", "국방", "전쟁", "군사", "병역",
-    # 기업/산업 딱딱한 것
-    "삼성전자", "반도체", "배터리", "수주", "실적발표", "영업이익",
-]
-
-# K-POP/한류 팬이라면 관심 가질만한 필수 키워드 화이트리스트
-# 제목에 하나라도 포함되어야 통과 (없으면 전량 스킵)
-# ★ 의도적으로 "세계/글로벌/해외/드라마/배우/가수" 등 모호한 단어 제외 — 정치기사 유입 방지
-NEWS_MUST_KEYWORDS = [
-    # K-POP 그룹 / 팀명
-    "아이돌", "걸그룹", "보이그룹", "케이팝", "K-POP", "KPOP", "한류",
-    "BTS", "방탄소년단", "블랙핑크", "BLACKPINK",
-    "뉴진스", "NewJeans", "에스파", "aespa",
-    "트와이스", "TWICE", "세븐틴", "SEVENTEEN",
-    "스트레이키즈", "Stray Kids", "NCT", "IVE", "아이브",
-    "르세라핌", "LE SSERAFIM", "엑소", "EXO",
-    "빅뱅", "BIGBANG", "샤이니", "SHINee", "2NE1", "소녀시대",
-    "(여자)아이들", "오마이걸", "레드벨벳", "있지", "ITZY",
-    "txt", "투모로우바이투게더", "엔하이픈", "ENHYPEN",
-    "지코", "태민", "청하", "효린", "청하",
-    # BTS 멤버
-    "지민", "뷔", "정국", "슈가", "RM", "제이홉",
-    # 블랙핑크 멤버
-    "제니", "리사", "로제", "지수",
-    # 에스파 멤버
-    "카리나", "윈터", "닝닝", "지젤",
-    # 기획사 (연예 맥락)
-    "하이브", "HYBE", "SM엔터테인먼트", "JYP엔터테인먼트", "YG엔터테인먼트",
-    # K-POP 전용 용어
-    "컴백", "뮤직비디오", "앨범", "음원", "팬미팅", "콘서트", "월드투어",
-    "빌보드", "그래미", "데뷔", "활동재개",
-    # K-드라마 (구체적 제목·장르명)
-    "넷플릭스 한국", "K드라마", "오징어게임",
-    # 한국 연예 행사
-    "연예인", "멜론", "가요대전", "음악방송",
-    # 해외 반응 (구체적 표현)
-    "해외반응", "외국인 반응",
-    # K뷰티/K패션 (구체적)
-    "K뷰티", "K패션", "한복",
-]
-
-# 뉴스 통과: 제목에 이 키워드가 있으면 우선순위 상승
-NEWS_HOT_KEYWORDS = [
-    # K-POP 최고 우선
-    "빌보드", "그래미", "월드투어", "컴백", "신곡", "뮤직비디오",
-    "역대급", "최초", "최고", "1위",
-    # 화제성
-    "충격", "논란", "폭로", "화제", "난리", "반전",
-    # 글로벌 관심
-    "해외반응", "외국인 반응", "세계", "글로벌",
-    # 연애/스캔들 (팬들 관심)
-    "열애", "결혼", "이혼", "열애설", "불륜", "스캔들",
-    # 사건
-    "사망", "체포", "갑질", "탈세",
-    # SNS 바이럴
-    "유튜브", "틱톡", "SNS",
-]
-
-
-def fetch_natenews_list(max_fetch: int = 30) -> List[Dict[str, str]]:
-    """네이트뉴스 실시간 인기 뉴스 수집 (K-POP/한류/연예 화이트리스트 필터링)."""
-    list_urls = [
-        "https://news.nate.com/rank/interest?sc=en",    # 연예 전용
-    ]
-    headers = {
-        "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 Chrome/124.0.0.0 Safari/537.36",
-        "Referer": "https://news.nate.com/",
-        "Accept-Language": "ko-KR,ko;q=0.9",
-    }
-    items: List[Dict[str, str]] = []
-    seen: set = set()
-
-    for list_url in list_urls:
-        try:
-            r = requests.get(list_url, headers=headers, timeout=15)
-            r.encoding = r.apparent_encoding
-            soup = BeautifulSoup(r.text, "html.parser")
-            for a in soup.find_all("a", href=True):
-                href = a.get("href", "")
-                title = a.get_text(strip=True)
-                # /view/ 패턴 링크만
-                if "/view/" not in href:
-                    continue
-                # URL 정규화
-                # 케이스1: //news.nate.com/view/... (프로토콜 상대 URL)
-                # 케이스2: /view/... (경로 상대 URL)
-                # 케이스3: https://... (절대 URL)
-                if href.startswith("//"):
-                    full_url = "https:" + href
-                elif href.startswith("http"):
-                    full_url = href
-                else:
-                    full_url = "https://news.nate.com" + href
-                full_url = full_url.split("?")[0]
-                if full_url in seen or not title or len(title) < 10:
-                    continue
-                # 1차: 정치/경제 등 하드 블록
-                if any(kw in title for kw in NEWS_SKIP_KEYWORDS):
-                    continue
-                # 2차: K-POP/한류/연예 화이트리스트 — 하나도 없으면 스킵
-                if not any(kw in title for kw in NEWS_MUST_KEYWORDS):
-                    continue
-                seen.add(full_url)
-                # 핫 키워드 포함 여부로 점수 매기기
-                hot_score = sum(1 for kw in NEWS_HOT_KEYWORDS if kw in title)
-                items.append({"url": full_url, "title": title, "source": "네이트뉴스 🔥", "hot_score": str(hot_score)})
-        except Exception as e:
-            print(f"[네이트뉴스] 수집 오류 ({list_url}): {e}")
-
-    # 핫 점수 높은 순으로 정렬
-    items.sort(key=lambda x: int(x.get("hot_score", "0")), reverse=True)
-    return items[:max_fetch]
-
-
-def fetch_natenews_post(url: str) -> Dict[str, str]:
-    """네이트뉴스 기사 본문 수집."""
-    headers = {
-        "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 Chrome/124.0.0.0 Safari/537.36",
-        "Referer": "https://news.nate.com/",
-        "Accept-Language": "ko-KR,ko;q=0.9",
-    }
-    try:
-        r = requests.get(url, headers=headers, timeout=15)
-        r.encoding = r.apparent_encoding
-        soup = BeautifulSoup(r.text, "html.parser")
-
-        # 제목
-        title = ""
-        og_title = soup.find("meta", property="og:title")
-        if og_title and og_title.get("content"):
-            title = og_title["content"].replace(" : 네이트", "").replace(" - 네이트뉴스", "").strip()
-        if not title and soup.title:
-            title = soup.title.get_text(strip=True)
-
-        # og:description (AI 요약 or 첫 문장)
-        og_desc = soup.find("meta", property="og:description")
-        desc = og_desc["content"].strip() if og_desc and og_desc.get("content") else ""
-
-        # 본문 영역
-        SKIP_UI = {"NATE", "스포츠", "뉴스", "연예", "판", "날씨", "검색", "최신뉴스",
-                   "공유하기", "원문", "기사전송", "AI 챗", "AI 요약", "작게", "보통", "크게"}
-        content_area = soup.find("div", class_=lambda c: c and any(
-            k in c for k in ("news_text", "artText", "article_body", "news-article", "article-body", "view_text")
-        ))
-        if not content_area:
-            # id 기반 fallback
-            content_area = soup.find("div", id=lambda i: i and any(
-                k in i for k in ("articleBodyContents", "articeBody", "newsEndContents")
-            ))
-        if not content_area:
-            content_area = soup
-
-        blocks, seen_t = [], set()
-        for tag in content_area.find_all(["p", "span", "div", "li"]):
-            if tag.name == "div" and len(tag.find_all(["p", "span", "li"])) > 3:
-                continue
-            t = tag.get_text(" ", strip=True)
-            if not t or len(t) < 10 or len(t) > 500:
-                continue
-            if t in SKIP_UI or any(ui in t for ui in SKIP_UI):
-                continue
-            if t in seen_t:
-                continue
-            seen_t.add(t)
-            blocks.append(t)
-            if len(blocks) >= 25:
-                break
-
-        content = "\n".join(blocks)
-        if not content.strip():
-            content = desc
-
-        return {"title": title, "content": content, "desc": desc, "source": "네이트뉴스 🔥"}
-    except Exception as e:
-        return {"title": "", "content": "", "source": "네이트뉴스 🔥", "error": str(e)}
-
-
-SOURCE_CRAWLERS = {
-    "네이트뉴스 🔥": (fetch_natenews_list, fetch_natenews_post),  # 핫 이슈 뉴스
-    "네이버 뿜": None,   # fetch_bboom_list / fetch_bboom_post_text (기존)
-    "네이트판":  (fetch_natepann_list,   fetch_natepann_post),
-    "에펨코리아": (fetch_fmkorea_list,   fetch_fmkorea_post),
-    "DC인사이드": (fetch_dcinside_list,  fetch_dcinside_post),
-    "보배드림":   (fetch_bobaedream_list, fetch_bobaedream_post),
-}
-
-
-def fetch_all_sources(config: AppConfig, selected_sources: List[str]) -> List[Dict[str, str]]:
-    """
-    선택된 소스에서 글 목록을 수집해 하나의 리스트로 합산.
-    각 아이템: {"url", "title", "source"}
-    """
-    all_items: List[Dict[str, str]] = []
-    per_source = max(10, config.bboom_max_fetch // max(len(selected_sources), 1))
-    for src in selected_sources:
-        try:
-            if src == "네이버 뿜":
-                items = fetch_bboom_list(config)
-                for it in items:
-                    it.setdefault("source", "네이버 뿜")
-            else:
-                crawlers = SOURCE_CRAWLERS.get(src)
-                if not crawlers:
-                    continue
-                list_fn, _ = crawlers
-                items = list_fn(per_source)
-            all_items.extend(items)
-            print(f"[소스수집] {src}: {len(items)}개")
-        except Exception as e:
-            print(f"[소스수집] {src} 오류: {e}")
-    # 중복 URL 제거
-    seen: set = set()
-    deduped = []
-    for it in all_items:
-        u = it.get("url", "")
-        if u and u not in seen:
-            seen.add(u)
-            deduped.append(it)
-    random.shuffle(deduped)
-    return deduped
-
-
-def fetch_post_by_source(source: str, url: str, config: AppConfig) -> Dict[str, str]:
-    """소스에 맞는 크롤러로 글 본문 수집."""
-    if source == "네이버 뿜":
-        return fetch_bboom_post_text(url)
-    # 정확한 키 매칭 우선
-    crawlers = SOURCE_CRAWLERS.get(source)
-    if not crawlers:
-        # 이모지 등 불일치 대비: 소스 이름 포함 여부로 fallback 매칭
-        for key, val in SOURCE_CRAWLERS.items():
-            if val and (source in key or key in source):
-                crawlers = val
-                break
-    if crawlers:
-        _, post_fn = crawlers
-        return post_fn(url)
-    return {"title": "", "content": ""}
-
-
-def fetch_bboom_list(config: AppConfig) -> List[Dict[str, str]]:
-    _BBOOM_BASE = "https://m.bboom.naver.com"
-    # 메인 페이지 URL 자동 보정 (/best 는 404 → / 로)
-    list_url = config.bboom_list_url
-    if list_url.rstrip("/").endswith("/best"):
-        list_url = _BBOOM_BASE + "/"
-
-    headers = {
-        "User-Agent": (
-            "Mozilla/5.0 (Windows NT 10.0; Win64; x64) "
-            "AppleWebKit/537.36 (KHTML, like Gecko) "
-            "Chrome/124.0.0.0 Safari/537.36"
-        ),
-        "Referer": "https://www.naver.com/",
-        "Accept-Language": "ko-KR,ko;q=0.9",
-    }
-    response = requests.get(list_url, headers=headers, timeout=30)
-    response.raise_for_status()
-    html = response.text
-    soup = BeautifulSoup(html, "html.parser")
-    items: List[Dict[str, str]] = []
-    seen = set()
-
-    for anchor in soup.find_all("a", href=True):
-        href = anchor.get("href", "")
-        # 현재 뿜 게시글 URL 패턴: /best/get?boardNo=...&postNo=...
-        if "postNo=" not in href and "postno=" not in href.lower():
-            continue
-        # 앵커(#) 제거
-        href = href.split("#")[0]
-        full_url = urljoin(_BBOOM_BASE, href) if href.startswith("/") else href
-        if full_url in seen:
-            continue
-        title = anchor.get_text(" ", strip=True)
-        title = unescape(title).strip()
-        # 제목 없으면 상위 부모에서 탐색
-        if not title:
-            parent = anchor.find_parent(["li", "div", "article"])
-            if parent:
-                title = parent.get_text(" ", strip=True)[:80].strip()
-        if not title:
-            title = full_url
-        seen.add(full_url)
-        items.append({"url": full_url, "title": title})
-        if len(items) >= config.bboom_max_fetch:
-            break
-
-    if items:
-        return items
-
-    # fallback: 정규식으로 postNo 포함 경로 추출
-    for match in re.findall(r'href=["\']([^"\']*postNo=\d+[^"\']*)["\']', html, flags=re.I):
-        href = match.split("#")[0]
-        full_url = urljoin(_BBOOM_BASE, href) if href.startswith("/") else href
-        if full_url in seen:
-            continue
-        seen.add(full_url)
-        items.append({"url": full_url, "title": full_url})
-        if len(items) >= config.bboom_max_fetch:
-            break
-
-    return items
-
-
-def fetch_bboom_post_text(url: str) -> Dict[str, str]:
-    """
-    네이버 뿜 게시글 본문 + 댓글/반응 텍스트 최대한 수집.
-    seed_text 로 그대로 OpenAI 에 넘기므로 맥락이 풍부할수록 좋음.
-    """
-    headers = {
-        "User-Agent": (
-            "Mozilla/5.0 (Windows NT 10.0; Win64; x64) "
-            "AppleWebKit/537.36 (KHTML, like Gecko) "
-            "Chrome/124.0.0.0 Safari/537.36"
-        ),
-        "Referer": "https://m.bboom.naver.com/",
-        "Accept-Language": "ko-KR,ko;q=0.9",
-        "Accept": "text/html,application/xhtml+xml,application/xml;q=0.9,*/*;q=0.8",
-    }
-    response = requests.get(url, headers=headers, timeout=30)
-    response.raise_for_status()
-    html = response.text
-    soup = BeautifulSoup(html, "html.parser")
-
-    # ── 제목 ──────────────────────────────────────────────
-    title = ""
-    meta_title = soup.find("meta", property="og:title")
-    if meta_title and meta_title.get("content"):
-        title = meta_title["content"].strip()
-    if not title and soup.title:
-        title = soup.title.get_text(strip=True)
-
-    # ── og:description (미리보기 한줄 요약) ──────────────
-    meta_desc = soup.find("meta", property="og:description")
-    desc = meta_desc["content"].strip() if meta_desc and meta_desc.get("content") else ""
-
-    # ── 본문: 짧은 텍스트 노드 제거, 불필요 UI 텍스트 필터 ──
-    SKIP_KEYWORDS = {"더보기", "닫기", "공유", "신고", "좋아요", "댓글", "팔로우", "구독", "loading"}
-    text_blocks = []
-    seen_texts: set = set()
-
-    # 본문 영역 후보 (class 명 기반 우선)
-    body_candidates = soup.find_all(
-        ["div", "section", "article"],
-        class_=lambda c: c and any(k in c for k in ("content", "body", "post", "text", "article", "view"))
-    )
-    search_root = body_candidates[0] if body_candidates else soup
-
-    for tag in search_root.find_all(["p", "span", "div", "li", "td", "blockquote"]):
-        # 자식 태그가 많은 컨테이너 div는 건너뜀 (텍스트 중복 방지)
-        if tag.name == "div" and len(tag.find_all(["p", "span", "li"])) > 3:
-            continue
-        text = tag.get_text(" ", strip=True)
-        if not text or len(text) < 4 or len(text) > 300:
-            continue
-        if any(kw in text for kw in SKIP_KEYWORDS):
-            continue
-        if text in seen_texts:
-            continue
-        seen_texts.add(text)
-        text_blocks.append(text)
-        if len(text_blocks) >= 30:
-            break
-
-    content = "\n".join(text_blocks)
-    if not content:
-        content = desc
-
-    # ── 댓글/반응 섹션 별도 수집 ────────────────────────
-    comment_blocks = []
-    comment_area = soup.find_all(
-        ["div", "ul", "section"],
-        class_=lambda c: c and any(k in c for k in ("comment", "reply", "reaction", "cmt"))
-    )
-    for area in comment_area[:2]:
-        for tag in area.find_all(["p", "span", "li"]):
-            t = tag.get_text(" ", strip=True)
-            if t and 4 < len(t) < 150 and t not in seen_texts:
-                seen_texts.add(t)
-                comment_blocks.append(t)
-            if len(comment_blocks) >= 10:
-                break
-
-    comments_text = "\n".join(comment_blocks)
-
-    # ── 최종 조합 ────────────────────────────────────────
-    full_content = content
-    if comments_text:
-        full_content += f"\n\n[반응/댓글]\n{comments_text}"
-
-    return {"title": title, "content": full_content, "desc": desc}
 
 
 def send_telegram_message(token: str, chat_id: str, text: str) -> bool:
@@ -2679,22 +1913,24 @@ def _status_update(progress, status_box, pct: float, message: str) -> None:
 
 
 def _script_plan_text(script: Dict[str, Any]) -> str:
-    beats = script.get("beats", [])
-    hook = beats[0].get("text", "") if beats else ""
-    ending = beats[-1].get("text", "") if beats else ""
-    middle = beats[1].get("text", "") if len(beats) > 2 else ""
-    category = script.get("content_category", "")
+    body = script.get("body_script", [])
+    middle = body[0] if body else ""
     return (
-        f"제목(안): {script.get('title_ja','')}\n"
-        f"분위기: {category}\n"
-        f"훅: {hook}\n"
+        f"주제: {script.get('topic_theme','')}\n"
+        f"제목: {script.get('video_title','')}\n"
+        f"무드: {script.get('mood','')}\n"
+        f"훅: {script.get('hook_3_sec','')}\n"
         f"전개: {middle}\n"
-        f"오치: {ending}\n"
-        f"해시태그: {' '.join(script.get('hashtags_ja', []))}"
+        f"구독유도: {script.get('cta_outro','')}\n"
+        f"해시태그: {' '.join(script.get('hashtags', []))}"
     )
 
 
-def _auto_bboom_flow(config: AppConfig, progress, status_box) -> None:
+def _auto_jp_flow(config: AppConfig, progress, status_box, extra_hint: str = "") -> None:
+    """
+    크롤링 없이 LLM이 주제를 자동 선정해 일본인 타겟 숏츠를 생성하는 메인 플로우.
+    텔레그램 승인 → TTS → 영상 렌더링 → 유튜브 업로드.
+    """
     if not config.telegram_bot_token or not config.telegram_admin_chat_id:
         st.error("텔레그램 봇 설정이 필요합니다. TELEGRAM_BOT_TOKEN, TELEGRAM_ADMIN_CHAT_ID를 확인하세요.")
         return
@@ -2703,449 +1939,164 @@ def _auto_bboom_flow(config: AppConfig, progress, status_box) -> None:
         st.error("에셋이 없습니다. 먼저 이미지를 추가하세요.")
         return
 
-    _status_update(progress, status_box, 0.05, "네이버 뿜 인기글 수집")
+    # ── 대본 생성 ─────────────────────────────────────────
+    _status_update(progress, status_box, 0.10, "AI 대본 생성 중 (주제 자동 선정)...")
     try:
-        items = fetch_bboom_list(config)
+        script = generate_script_jp(config, extra_hint=extra_hint)
     except Exception as exc:
-        st.error(f"뿜 수집 실패: {exc}")
-        return
-    if not items:
-        st.error("가져올 인기글이 없습니다.")
+        st.error(f"대본 생성 실패: {exc}")
         return
 
-    used_data = _load_used_links(config.used_links_path)
-    trend_context = get_trend_context(config)
+    topic_theme = script.get("topic_theme", "")
+    video_title = script.get("video_title", "")
+    hashtags = script.get("hashtags", [])
+    hook = script.get("hook_3_sec", "")
+    body = script.get("body_script", [])
+    cta = script.get("cta_outro", "")
+    pinned = script.get("pinned_comment", "")
+    mood = script.get("mood", "exciting")
 
-    for item in items:
-        url = item.get("url", "")
-        if not url or _is_used_link(used_data, url):
-            continue
-        _status_update(progress, status_box, 0.10, "글 내용 분석")
+    st.info(f"주제: **{topic_theme}** | 무드: **{mood}**")
+
+    # ── BGM 매칭 ─────────────────────────────────────────
+    _status_update(progress, status_box, 0.25, f"BGM 매칭 중 (무드: {mood})")
+    bgm_path = match_bgm_by_mood(config, mood)
+
+    # ── TTS용 텍스트 리스트 ───────────────────────────────
+    texts = _script_to_beats(script)
+
+    # ── 에셋 선택 (mood → CONTENT_CATEGORIES 매핑) ────────
+    mood_to_cat = {"mystery": "shocking", "exciting": "exciting", "informative": "humor"}
+    content_category = mood_to_cat.get(mood, "exciting")
+    assets: List[str] = []
+    for _ in texts:
+        asset = pick_asset_by_category(manifest_items, content_category)
+        if not asset:
+            asset = random.choice(manifest_items)
+        assets.append(asset.path)
+
+    # ── 텔레그램 미리보기 구성 ────────────────────────────
+    body_preview = "\n".join(f"  {i+1}. {line}" for i, line in enumerate(body))
+    request_text = (
+        f"[ 승인 요청 ] 일본인 타겟 숏츠\n"
+        f"━━━━━━━━━━━━━━━━━━━━\n"
+        f"주제: {topic_theme}\n"
+        f"무드: {mood}  |  BGM: {os.path.basename(bgm_path) if bgm_path else '없음'}\n"
+        f"━━━━━━━━━━━━━━━━━━━━\n"
+        f"[제목]\n{video_title}\n\n"
+        f"[해시태그]\n{' '.join(hashtags)}\n\n"
+        f"[3초 훅]\n{hook}\n\n"
+        f"[본문]\n{body_preview}\n\n"
+        f"[구독 유도]\n{cta}\n\n"
+        f"[고정 댓글]\n{pinned}\n"
+        f"━━━━━━━━━━━━━━━━━━━━\n"
+        f"아래 버튼으로 응답해주세요."
+    )
+
+    # 대표 에셋 미리보기 전송
+    if assets and os.path.exists(assets[0]):
         try:
-            post = fetch_bboom_post_text(url)
-        except Exception:
-            post = {"title": item.get("title", ""), "content": ""}
-        seed = f"{post.get('title','')}\n{post.get('content','')}"
-
-        # 글 분위기 카테고리 분석
-        _status_update(progress, status_box, 0.15, "글 분위기 분석 중")
-        content_category = analyze_content_category(config, seed)
-        st.info(f"감지된 분위기 카테고리: **{content_category}**")
-
-        # 스크립트 생성 (beats 수, BGM 쿼리 등 AI가 자동 결정)
-        _status_update(progress, status_box, 0.22, "AI 스크립트 생성 중...")
-        script = generate_script(
-            config=config,
-            seed_text=seed,
-            trend_context=trend_context,
-            dialect_style=config.ja_dialect_style,
-            content_category=content_category,
-        )
-
-        # AI가 제안한 BGM 쿼리로 BGM 다운로드 (스크립트 생성 후 처리)
-        ai_bgm_query = script.get("bgm_query")
-        if isinstance(ai_bgm_query, list):
-            ai_bgm_query = " ".join(ai_bgm_query)
-        ai_bgm_query = ai_bgm_query or ""  # None 방어
-        _status_update(progress, status_box, 0.30, f"BGM 선정 중 (키워드: {ai_bgm_query or content_category})")
-        bgm_path = get_or_download_bgm(config, content_category, custom_query=ai_bgm_query)
-        if bgm_path:
-            st.info(f"BGM: {os.path.basename(bgm_path)} (쿼리: {ai_bgm_query or content_category})")
-        else:
-            bgm_path = pick_bgm_path(config)
-
-        texts = [beat.get("text", "") for beat in script.get("beats", [])]
-        beat_tags = [beat.get("tag", "") for beat in script.get("beats", [])]
-
-        # 에셋 미리 선택 (미리보기에 포함) - (asset_path, category_tags) 쌍으로 저장
-        assets = []          # str: 파일 경로
-        asset_cats = []      # str: 해당 에셋의 카테고리/태그 요약
-        for tag in beat_tags:
-            asset = pick_asset(manifest_items, [tag])
-            if not asset:
-                asset = pick_asset_by_category(manifest_items, content_category)
-            if asset:
-                assets.append(asset.path)
-                # 태그 정보 요약 (없으면 content_category)
-                tag_summary = ", ".join(asset.tags) if asset.tags else content_category
-                asset_cats.append(tag_summary)
-
-        if not assets:
-            st.error("태그에 맞는 에셋이 없습니다.")
-            return
-
-        # ── 텔레그램 미리보기 메시지 구성 ────────────────────────
-        beats = script.get("beats", [])
-        beats_preview = ""
-        for i, beat in enumerate(beats, 1):
-            tag = beat.get("tag", "")
-            txt_ko = beat.get("text_ko", "")   # 한글 원문
-            txt_ja = beat.get("text", "")       # 일본어 번역
-            cat_label = asset_cats[min(i - 1, len(asset_cats) - 1)] if asset_cats else content_category
-            beats_preview += (
-                f"  {i}. [{tag}]\n"
-                f"     KO: {txt_ko}\n"
-                f"     JA: {txt_ja}\n"
-                f"     사진 카테고리: {cat_label}\n"
-            )
-
-        beats_count_actual = len(beats)
-        bgm_display = os.path.basename(bgm_path) if bgm_path else "없음"
-        bgm_query_display = ai_bgm_query if ai_bgm_query else content_category
-        request_text = (
-            f"[ 승인 요청 ]\n"
-            f"━━━━━━━━━━━━━━━━━━━━\n"
-            f"출처 글: {post.get('title', '')}\n"
-            f"링크: {url}\n"
-            f"분위기: {content_category}  |  beats: {beats_count_actual}개\n"
-            f"BGM: {bgm_display}  (키워드: {bgm_query_display})\n"
-            f"━━━━━━━━━━━━━━━━━━━━\n"
-            f"제목 KO: {script.get('title_ko', '')}\n"
-            f"제목 JA: {script.get('title_ja', '')}\n"
-            f"해시태그: {' '.join(script.get('hashtags_ja', []))}\n"
-            f"━━━━━━━━━━━━━━━━━━━━\n"
-            f"대본 미리보기 ({beats_count_actual}컷)\n"
-            f"{beats_preview}"
-            f"━━━━━━━━━━━━━━━━━━━━\n"
-            f"아래 버튼으로 응답해주세요."
-        )
-
-        # 첫 번째 에셋 사진을 미리보기로 전송
-        if assets and os.path.exists(assets[0]):
-            try:
-                photo_url = f"https://api.telegram.org/bot{config.telegram_bot_token}/sendPhoto"
-                with open(assets[0], "rb") as photo_file:
-                    requests.post(
-                        photo_url,
-                        data={"chat_id": config.telegram_admin_chat_id, "caption": "대표 사진 미리보기"},
-                        files={"photo": photo_file},
-                        timeout=30,
-                    )
-            except Exception:
-                pass
-
-        approval_msg_id = send_telegram_approval_request(
-            config.telegram_bot_token, config.telegram_admin_chat_id, request_text
-        )
-        decision = wait_for_approval(config, progress, status_box, approval_message_id=approval_msg_id)
-        if decision == "swap":
-            _mark_used_link(config.used_links_path, url, "swap", post.get("title", ""))
-            send_telegram_message(config.telegram_bot_token, config.telegram_admin_chat_id, "🔄 교환 처리됨. 다음 인기글로 진행합니다.")
-            continue
-        now = datetime.utcnow().strftime("%Y%m%d_%H%M%S")
-        audio_path = os.path.join(config.output_dir, f"tts_{now}.mp3")
-        voice_id = pick_voice_id(config.openai_tts_voices)
-        try:
-            tts_openai(config, "。".join(texts), audio_path, voice=voice_id)
-        except Exception as tts_err:
-            err_msg = f"❌ TTS 생성 실패: {tts_err}\n\nOpenAI API 키가 잘못되었거나 크레딧이 부족할 수 있습니다."
-            st.error(err_msg)
-            send_telegram_message(config.telegram_bot_token, config.telegram_admin_chat_id, err_msg)
-            _mark_used_link(config.used_links_path, url, "error", post.get("title", ""))
-            continue
-
-        _status_update(progress, status_box, 0.6, "영상 렌더링")
-        output_path = os.path.join(config.output_dir, f"shorts_{now}.mp4")
-        render_video(
-            config=config,
-            asset_paths=assets,
-            texts=texts,
-            tts_audio_path=audio_path,
-            output_path=output_path,
-            bgm_path=bgm_path,
-            bgm_volume=config.bgm_volume,
-        )
-
-        video_id = ""
-        video_url = ""
-        if config.enable_youtube_upload:
-            _status_update(progress, status_box, 0.85, "유튜브 업로드")
-            result = upload_video(
-                config=config,
-                file_path=output_path,
-                title=script.get("title_ja", ""),
-                description=script.get("description_ja", "") + "\n\n" + " ".join(script.get("hashtags_ja", [])),
-                tags=script.get("hashtags_ja", []),
-            )
-            video_id = result.get("video_id", "")
-            video_url = result.get("video_url", "")
-        else:
-            _status_update(progress, status_box, 0.85, "유튜브 업로드(스킵)")
-
-        log_row = {
-            "date_jst": datetime.utcnow().strftime("%Y-%m-%d %H:%M:%S"),
-            "title_ja": script.get("title_ja", ""),
-            "hashtags_ja": " ".join(script.get("hashtags_ja", [])),
-            "template_id": "default",
-            "asset_ids": ",".join([a for a in assets]),
-            "voice_id": voice_id,
-            "video_path": output_path,
-            "youtube_video_id": video_id,
-            "youtube_url": video_url,
-            "status": "ok",
-            "error": "",
-        }
-        try:
-            append_publish_log(config, log_row)
+            photo_api = f"https://api.telegram.org/bot{config.telegram_bot_token}/sendPhoto"
+            with open(assets[0], "rb") as photo_file:
+                requests.post(
+                    photo_api,
+                    data={"chat_id": config.telegram_admin_chat_id, "caption": "대표 사진 미리보기"},
+                    files={"photo": photo_file},
+                    timeout=30,
+                )
         except Exception:
             pass
-        _write_local_log(os.path.join(config.output_dir, "runs.jsonl"), log_row)
-        _mark_used_link(config.used_links_path, url, "approved", post.get("title", ""))
-        _status_update(progress, status_box, 1.0, "완료")
-        st.video(output_path)
 
-        summary_text = f"[완료]\n제목: {script.get('title_ja','')}\n분위기: {content_category}\n요약: {script.get('description_ja','')}\n"
-        if video_url:
-            summary_text += f"유튜브 링크: {video_url}"
-        else:
-            summary_text += f"로컬 파일: {output_path}"
-        send_telegram_message(config.telegram_bot_token, config.telegram_admin_chat_id, summary_text)
+    _status_update(progress, status_box, 0.30, "텔레그램 승인 요청 전송")
+    approval_msg_id = send_telegram_approval_request(
+        config.telegram_bot_token, config.telegram_admin_chat_id, request_text
+    )
+    decision = wait_for_approval(config, progress, status_box, approval_message_id=approval_msg_id)
+    if decision == "swap":
+        send_telegram_message(config.telegram_bot_token, config.telegram_admin_chat_id, "🔄 교환 처리됨. 새 주제로 다시 생성합니다.")
+        _auto_jp_flow(config, progress, status_box, extra_hint=extra_hint)
         return
 
-    st.warning("사용 가능한 인기글이 더 이상 없습니다.")
-
-
-def _auto_content_flow(config: AppConfig, progress, status_box, selected_sources: List[str]) -> None:
-    """다중 소스(네이트판, 에펨코리아, DC인사이드, 보배드림, 네이버 뿜)에서 글을 수집해 숏츠 자동 생성."""
-    if not config.telegram_bot_token or not config.telegram_admin_chat_id:
-        st.error("텔레그램 봇 설정이 필요합니다. TELEGRAM_BOT_TOKEN, TELEGRAM_ADMIN_CHAT_ID를 확인하세요.")
-        return
-    manifest_items = load_manifest(config.manifest_path)
-    if not manifest_items:
-        st.error("에셋이 없습니다. 먼저 이미지를 추가하세요.")
-        return
-
-    src_label = ", ".join(selected_sources)
-    _status_update(progress, status_box, 0.05, f"글 수집 중 ({src_label})")
+    # ── TTS 생성 ─────────────────────────────────────────
+    now = datetime.utcnow().strftime("%Y%m%d_%H%M%S")
+    audio_path = os.path.join(config.output_dir, f"tts_{now}.mp3")
+    voice_id = pick_voice_id(config.openai_tts_voices)
+    _status_update(progress, status_box, 0.50, "TTS 생성 중")
     try:
-        items = fetch_all_sources(config, selected_sources)
-    except Exception as exc:
-        st.error(f"글 수집 실패: {exc}")
+        tts_openai(config, "。".join(texts), audio_path, voice=voice_id)
+    except Exception as tts_err:
+        err_msg = f"❌ TTS 생성 실패: {tts_err}"
+        st.error(err_msg)
+        send_telegram_message(config.telegram_bot_token, config.telegram_admin_chat_id, err_msg)
         return
-    if not items:
-        st.error("가져올 글이 없습니다.")
-        return
 
-    st.info(f"총 {len(items)}개 글 수집 완료 (소스: {src_label})")
-    used_data = _load_used_links(config.used_links_path)
-    trend_context = get_trend_context(config)
+    # ── 영상 렌더링 ───────────────────────────────────────
+    _status_update(progress, status_box, 0.65, "영상 렌더링 중")
+    output_path = os.path.join(config.output_dir, f"shorts_{now}.mp4")
+    render_video(
+        config=config,
+        asset_paths=assets,
+        texts=texts,
+        tts_audio_path=audio_path,
+        output_path=output_path,
+        bgm_path=bgm_path,
+        bgm_volume=config.bgm_volume,
+    )
 
-    skipped_used = 0
-    skipped_short = 0
-
-    for item in items:
-        url = item.get("url", "")
-        source = item.get("source", "")
-        if not url:
-            continue
-        if _is_used_link(used_data, url):
-            skipped_used += 1
-            print(f"[스킵-이미사용] {url}")
-            continue
-
-        _status_update(progress, status_box, 0.10, f"[{source}] 글 내용 분석 중... ({url[-30:]})")
-        try:
-            post = fetch_post_by_source(source, url, config)
-        except Exception as e:
-            print(f"[본문수집오류] {url} → {e}")
-            post = {"title": item.get("title", ""), "content": "", "source": source}
-
-        seed = f"{post.get('title','')}\n{post.get('content','')}"
-        print(f"[본문확인] source={source} len={len(seed.strip())} title={post.get('title','')[:30]}")
-
-        # 본문이 너무 짧으면 스킵 (품질 필터)
-        if len(seed.strip()) < 30:
-            skipped_short += 1
-            print(f"[스킵-짧음] len={len(seed.strip())} url={url}")
-            if skipped_short >= 3:
-                st.warning(f"본문 수집 실패가 많습니다. 수집된 {len(items)}개 중 {skipped_used}개 이미사용, {skipped_short}개 본문없음")
-            continue
-
-        # 글 분위기 카테고리 분석
-        _status_update(progress, status_box, 0.15, "글 분위기 분석 중")
-        content_category = analyze_content_category(config, seed)
-        st.info(f"[{source}] {item.get('title','')[:40]}... → 분위기: **{content_category}**")
-
-        # 스크립트 생성 (뉴스 소스면 news 프롬프트 강화)
-        is_news = "뉴스" in source
-        _status_update(progress, status_box, 0.22, "AI 스크립트 생성 중...")
-        script = generate_script(
+    # ── 유튜브 업로드 ─────────────────────────────────────
+    video_id = ""
+    video_url = ""
+    description = f"{script.get('pinned_comment', '')}\n\n{' '.join(hashtags)}"
+    if config.enable_youtube_upload:
+        _status_update(progress, status_box, 0.85, "유튜브 업로드")
+        result = upload_video(
             config=config,
-            seed_text=seed,
-            trend_context=trend_context,
-            dialect_style=config.ja_dialect_style,
-            content_category=content_category,
-            source_type="news" if is_news else "",
+            file_path=output_path,
+            title=video_title,
+            description=description,
+            tags=hashtags,
         )
+        video_id = result.get("video_id", "")
+        video_url = result.get("video_url", "")
+    else:
+        _status_update(progress, status_box, 0.85, "유튜브 업로드(스킵)")
 
-        # BGM 선정
-        ai_bgm_query = script.get("bgm_query")
-        if isinstance(ai_bgm_query, list):
-            ai_bgm_query = " ".join(ai_bgm_query)
-        ai_bgm_query = ai_bgm_query or ""
-        _status_update(progress, status_box, 0.30, f"BGM 선정 중 (키워드: {ai_bgm_query or content_category})")
-        bgm_path = get_or_download_bgm(config, content_category, custom_query=ai_bgm_query)
-        if bgm_path:
-            st.info(f"BGM: {os.path.basename(bgm_path)} (쿼리: {ai_bgm_query or content_category})")
-        else:
-            bgm_path = pick_bgm_path(config)
+    # ── 로그 기록 ─────────────────────────────────────────
+    log_row = {
+        "date_jst": datetime.utcnow().strftime("%Y-%m-%d %H:%M:%S"),
+        "title_ja": video_title,
+        "topic_theme": topic_theme,
+        "hashtags_ja": " ".join(hashtags),
+        "mood": mood,
+        "pinned_comment": pinned,
+        "voice_id": voice_id,
+        "video_path": output_path,
+        "youtube_video_id": video_id,
+        "youtube_url": video_url,
+        "status": "ok",
+        "error": "",
+    }
+    try:
+        append_publish_log(config, log_row)
+    except Exception:
+        pass
+    _write_local_log(os.path.join(config.output_dir, "runs.jsonl"), log_row)
 
-        texts = [beat.get("text", "") for beat in script.get("beats", [])]
-        beat_tags = [beat.get("tag", "") for beat in script.get("beats", [])]
+    _status_update(progress, status_box, 1.0, "완료")
+    st.video(output_path)
 
-        # 에셋 선택
-        assets = []
-        asset_cats = []
-        for tag in beat_tags:
-            asset = pick_asset(manifest_items, [tag])
-            if not asset:
-                asset = pick_asset_by_category(manifest_items, content_category)
-            if asset:
-                assets.append(asset.path)
-                tag_summary = ", ".join(asset.tags) if asset.tags else content_category
-                asset_cats.append(tag_summary)
-
-        if not assets:
-            st.error("태그에 맞는 에셋이 없습니다.")
-            return
-
-        # 텔레그램 미리보기 구성
-        beats = script.get("beats", [])
-        beats_preview = ""
-        for idx, beat in enumerate(beats, 1):
-            tag = beat.get("tag", "")
-            txt_ko = beat.get("text_ko", "")
-            txt_ja = beat.get("text", "")
-            cat_label = asset_cats[min(idx - 1, len(asset_cats) - 1)] if asset_cats else content_category
-            beats_preview += (
-                f"  {idx}. [{tag}]\n"
-                f"     KO: {txt_ko}\n"
-                f"     JA: {txt_ja}\n"
-                f"     사진 카테고리: {cat_label}\n"
-            )
-
-        beats_count_actual = len(beats)
-        bgm_display = os.path.basename(bgm_path) if bgm_path else "없음"
-        bgm_query_display = ai_bgm_query if ai_bgm_query else content_category
-        request_text = (
-            f"[ 승인 요청 ] [{source}]\n"
-            f"━━━━━━━━━━━━━━━━━━━━\n"
-            f"출처 글: {post.get('title', '')}\n"
-            f"링크: {url}\n"
-            f"분위기: {content_category}  |  beats: {beats_count_actual}개\n"
-            f"BGM: {bgm_display}  (키워드: {bgm_query_display})\n"
-            f"━━━━━━━━━━━━━━━━━━━━\n"
-            f"제목 KO: {script.get('title_ko', '')}\n"
-            f"제목 JA: {script.get('title_ja', '')}\n"
-            f"해시태그: {' '.join(script.get('hashtags_ja', []))}\n"
-            f"━━━━━━━━━━━━━━━━━━━━\n"
-            f"대본 미리보기 ({beats_count_actual}컷)\n"
-            f"{beats_preview}"
-            f"━━━━━━━━━━━━━━━━━━━━\n"
-            f"아래 버튼으로 응답해주세요."
-        )
-
-        # 대표 사진 미리보기 전송
-        if assets and os.path.exists(assets[0]):
-            try:
-                photo_api = f"https://api.telegram.org/bot{config.telegram_bot_token}/sendPhoto"
-                with open(assets[0], "rb") as photo_file:
-                    requests.post(
-                        photo_api,
-                        data={"chat_id": config.telegram_admin_chat_id, "caption": f"[{source}] 대표 사진 미리보기"},
-                        files={"photo": photo_file},
-                        timeout=30,
-                    )
-            except Exception:
-                pass
-
-        approval_msg_id = send_telegram_approval_request(
-            config.telegram_bot_token, config.telegram_admin_chat_id, request_text
-        )
-        decision = wait_for_approval(config, progress, status_box, approval_message_id=approval_msg_id)
-        if decision == "swap":
-            _mark_used_link(config.used_links_path, url, "swap", post.get("title", ""))
-            send_telegram_message(config.telegram_bot_token, config.telegram_admin_chat_id, "🔄 교환 처리됨. 다음 인기글로 진행합니다.")
-            continue
-
-        now = datetime.utcnow().strftime("%Y%m%d_%H%M%S")
-        audio_path = os.path.join(config.output_dir, f"tts_{now}.mp3")
-        voice_id = pick_voice_id(config.openai_tts_voices)
-        try:
-            tts_openai(config, "。".join(texts), audio_path, voice=voice_id)
-        except Exception as tts_err:
-            err_msg = f"❌ TTS 생성 실패: {tts_err}\n\nOpenAI API 키가 잘못되었거나 크레딧이 부족할 수 있습니다."
-            st.error(err_msg)
-            send_telegram_message(config.telegram_bot_token, config.telegram_admin_chat_id, err_msg)
-            _mark_used_link(config.used_links_path, url, "error", post.get("title", ""))
-            continue
-
-        _status_update(progress, status_box, 0.6, "영상 렌더링")
-        output_path = os.path.join(config.output_dir, f"shorts_{now}.mp4")
-        render_video(
-            config=config,
-            asset_paths=assets,
-            texts=texts,
-            tts_audio_path=audio_path,
-            output_path=output_path,
-            bgm_path=bgm_path,
-            bgm_volume=config.bgm_volume,
-        )
-
-        video_id = ""
-        video_url = ""
-        if config.enable_youtube_upload:
-            _status_update(progress, status_box, 0.85, "유튜브 업로드")
-            result = upload_video(
-                config=config,
-                file_path=output_path,
-                title=script.get("title_ja", ""),
-                description=script.get("description_ja", "") + "\n\n" + " ".join(script.get("hashtags_ja", [])),
-                tags=script.get("hashtags_ja", []),
-            )
-            video_id = result.get("video_id", "")
-            video_url = result.get("video_url", "")
-        else:
-            _status_update(progress, status_box, 0.85, "유튜브 업로드(스킵)")
-
-        log_row = {
-            "date_jst": datetime.utcnow().strftime("%Y-%m-%d %H:%M:%S"),
-            "title_ja": script.get("title_ja", ""),
-            "hashtags_ja": " ".join(script.get("hashtags_ja", [])),
-            "template_id": "default",
-            "asset_ids": ",".join([a for a in assets]),
-            "voice_id": voice_id,
-            "video_path": output_path,
-            "youtube_video_id": video_id,
-            "youtube_url": video_url,
-            "source": source,
-            "source_url": url,
-            "status": "ok",
-            "error": "",
-        }
-        try:
-            append_publish_log(config, log_row)
-        except Exception:
-            pass
-        _write_local_log(os.path.join(config.output_dir, "runs.jsonl"), log_row)
-        _mark_used_link(config.used_links_path, url, "approved", post.get("title", ""))
-        _status_update(progress, status_box, 1.0, "완료")
-        st.video(output_path)
-
-        summary_text = (
-            f"[완료] [{source}]\n"
-            f"제목: {script.get('title_ja','')}\n"
-            f"분위기: {content_category}\n"
-            f"요약: {script.get('description_ja','')}\n"
-        )
-        if video_url:
-            summary_text += f"유튜브 링크: {video_url}"
-        else:
-            summary_text += f"로컬 파일: {output_path}"
-        send_telegram_message(config.telegram_bot_token, config.telegram_admin_chat_id, summary_text)
-        return
-
-    st.warning(f"사용 가능한 글이 없습니다. (수집: {len(items)}개 / 이미사용: {skipped_used}개 / 본문없음: {skipped_short}개) — Streamlit Cloud 로그를 확인해주세요.")
+    summary_text = (
+        f"[완료] 일본인 타겟 숏츠\n"
+        f"주제: {topic_theme}\n"
+        f"제목: {video_title}\n"
+        f"무드: {mood}\n"
+        f"고정댓글: {pinned}\n"
+    )
+    if video_url:
+        summary_text += f"유튜브: {video_url}"
+    else:
+        summary_text += f"로컬: {output_path}"
+    send_telegram_message(config.telegram_bot_token, config.telegram_admin_chat_id, summary_text)
 
 
 def run_streamlit_app() -> None:
@@ -3158,8 +2109,8 @@ def run_streamlit_app() -> None:
             os.path.join(config.assets_dir, "inbox"),
             os.path.join(config.assets_dir, "bgm"),
             os.path.join(config.assets_dir, "bgm", "trending"),
-            # NEW: 카테고리별 BGM 디렉토리
-            *[os.path.join(config.assets_dir, "bgm", cat) for cat in CONTENT_CATEGORIES],
+            # 무드별 BGM 디렉토리 (mystery / exciting / informative)
+            *[os.path.join(config.assets_dir, "bgm", mood) for mood in BGM_MOOD_CATEGORIES],
             os.path.join(config.assets_dir, "sfx"),
             os.path.dirname(config.manifest_path),
             config.output_dir,
@@ -3192,12 +2143,12 @@ def run_streamlit_app() -> None:
     st.sidebar.subheader("선택")
     st.sidebar.markdown(
         "- `YOUTUBE_*` (자동 업로드)\n"
+        "- `PIXABAY_API_KEY` (BGM 자동 다운로드)\n"
+        "- `PEXELS_API_KEY` (이미지 자동 수집)\n"
         "- `SERPAPI_API_KEY` (트렌드 수집)\n"
-        "- `PEXELS_API_KEY` (트렌드 이미지 자동 수집)\n"
-        "- `PIXABAY_API_KEY` (BGM 자동 다운로드) ← NEW\n"
-        "- `JA_DIALECT_STYLE` (일본어 사투리 스타일)\n"
-        "- `OPENAI_VISION_MODEL` (이미지 태그 분석 모델)\n"
-        "- `BGM_MODE`, `BGM_VOLUME` (배경음악 자동 선택)"
+        "- `OPENAI_VISION_MODEL` (이미지 태그 분석)\n"
+        "- `BGM_MODE`, `BGM_VOLUME` (배경음악)\n\n"
+        "**BGM 무드 폴더:** `assets/bgm/mystery/`, `assets/bgm/exciting/`, `assets/bgm/informative/`"
     )
     missing = _missing_required(config)
     if missing:
@@ -3215,69 +2166,45 @@ def run_streamlit_app() -> None:
         progress = st.progress(0.0)
         status_box = st.empty()
 
-        st.subheader("한국 핫이슈 자동 생성 (승인 포함)")
-        all_sources = list(SOURCE_CRAWLERS.keys())
-        # 기본값: 네이트뉴스만 선택
-        default_sources = ["네이트뉴스 🔥"]
-        selected_sources = st.multiselect(
-            "수집할 소스 선택 (복수 선택 가능)",
-            options=all_sources,
-            default=default_sources,
-            help="네이트뉴스: K-POP/한류/연예 화이트리스트 필터 적용 (정치·경제·날씨 자동 제외)\n커뮤니티: 네이트판/에펨코리아/DC/보배드림 유머글",
+        st.subheader("일본인 타겟 숏츠 자동 생성 (AI 주제 자동 선정)")
+        st.caption("크롤링 없이 LLM이 매번 새로운 주제를 선정합니다. 무드(mystery/exciting/informative)에 맞게 BGM도 자동 매칭됩니다.")
+
+        extra_hint = st.text_input(
+            "주제 힌트 (선택)",
+            placeholder="예: 부산 맛집, 서울 명소, K-뷰티 팁 — 비워두면 AI가 알아서 선정",
+            help="힌트를 입력하면 LLM이 해당 방향으로 주제를 잡습니다. 비워두면 완전 랜덤.",
         )
         auto_button = st.button("자동 생성 시작", type="primary")
         if auto_button:
-            if not selected_sources:
-                st.warning("소스를 하나 이상 선택해주세요.")
-            else:
-                _auto_content_flow(config, progress, status_box, selected_sources)
+            _auto_jp_flow(config, progress, status_box, extra_hint=extra_hint)
 
         st.divider()
-        seed_text = st.text_area("아이디어/요약 입력", height=120)
-        beats_count = st.slider("문장(비트) 수", 5, 9, 7)
-        tag_filter = st.multiselect("허용 태그", options=all_tags, default=all_tags[:5])
+        st.subheader("수동 대본 생성 (힌트 입력 → AI 생성)")
+        manual_hint = st.text_area("대본 힌트/아이디어 입력", height=100, placeholder="예: 한국 편의점 신상 음료 Top 5")
+        generate_button = st.button("대본 생성")
 
-        # NEW: 수동 생성 시 카테고리 선택
-        manual_category = st.selectbox(
-            "콘텐츠 분위기 카테고리",
-            options=["(자동 감지)"] + CONTENT_CATEGORIES,
-            help="'자동 감지'를 선택하면 AI가 입력 텍스트를 분석해 카테고리를 결정합니다.",
-        )
-        generate_button = st.button("스크립트 생성")
+        if generate_button and manual_hint:
+            _status_update(progress, status_box, 0.05, "대본 생성 중")
+            try:
+                script = generate_script_jp(config, extra_hint=manual_hint)
+                st.session_state["script_jp"] = script
+                _status_update(progress, status_box, 0.2, "대본 생성 완료")
+            except Exception as exc:
+                st.error(f"대본 생성 실패: {exc}")
 
-        if generate_button and seed_text:
-            _status_update(progress, status_box, 0.05, "스크립트 생성 중")
-            # 카테고리 자동/수동 결정
-            if manual_category == "(자동 감지)":
-                detected_cat = analyze_content_category(config, seed_text)
-                st.info(f"감지된 카테고리: **{detected_cat}**")
-            else:
-                detected_cat = manual_category
-            script = generate_script(
-                config=config,
-                seed_text=seed_text,
-                beats_count=beats_count,
-                allowed_tags=tag_filter or all_tags,
-                trend_context=get_trend_context(config),
-                dialect_style=config.ja_dialect_style,
-                content_category=detected_cat,
-            )
-            st.session_state["script"] = script
-            st.session_state["detected_category"] = detected_cat
-            _status_update(progress, status_box, 0.2, "스크립트 생성 완료")
-
-        script = st.session_state.get("script")
+        script = st.session_state.get("script_jp")
         if script:
-            st.subheader("스크립트")
-            st.caption(f"분위기 카테고리: **{script.get('content_category', '-')}**")
-            title = st.text_input("제목(일본어)", value=script.get("title_ja", ""))
-            description = st.text_area("설명(일본어)", value=script.get("description_ja", ""), height=80)
-            hashtags = st.text_input(
+            st.subheader("생성된 대본")
+            st.caption(f"주제: **{script.get('topic_theme', '-')}** | 무드: **{script.get('mood', '-')}**")
+            video_title_val = st.text_input("유튜브 제목", value=script.get("video_title", ""))
+            hashtags_val = st.text_input(
                 "해시태그(공백 구분)",
-                value=_format_hashtags(script.get("hashtags_ja", [])),
+                value=" ".join(script.get("hashtags", [])),
             )
-            beats_df = pd.DataFrame(script.get("beats", []))
-            edited_beats = st.data_editor(beats_df, num_rows="fixed")
+            hook_val = st.text_input("3초 훅", value=script.get("hook_3_sec", ""))
+            body_val = st.text_area("본문 대본 (줄 구분)", value="\n".join(script.get("body_script", [])), height=150)
+            cta_val = st.text_input("구독 유도 멘트", value=script.get("cta_outro", ""))
+            pinned_val = st.text_input("고정 댓글", value=script.get("pinned_comment", ""))
 
             render_button = st.button("영상 만들기")
             if render_button:
@@ -3287,35 +2214,27 @@ def run_streamlit_app() -> None:
                 if not MOVIEPY_AVAILABLE:
                     st.error(f"MoviePy가 설치되지 않았습니다: {MOVIEPY_ERROR}")
                     return
-                beats = edited_beats.to_dict(orient="records")
-                if not beats:
-                    st.error("렌더링할 문장이 없습니다.")
-                elif not manifest_items:
+                if not manifest_items:
                     st.error("에셋이 없습니다. 먼저 이미지를 추가하세요.")
                 else:
-                    _status_update(progress, status_box, 0.1, "문장/태그 정리")
-                    texts = [beat.get("text", "") for beat in beats]
-                    beat_tags = [beat.get("tag", "") for beat in beats]
-                    detected_cat = st.session_state.get("detected_category", script.get("content_category", "humor"))
+                    body_lines = [l.strip() for l in body_val.split("\n") if l.strip()]
+                    texts = [hook_val] + body_lines + ([cta_val] if cta_val else [])
+                    if not texts:
+                        st.error("렌더링할 문장이 없습니다.")
+                    else:
+                        mood = script.get("mood", "exciting")
+                        _status_update(progress, status_box, 0.15, f"BGM 매칭 중 ({mood})")
+                        bgm_path = match_bgm_by_mood(config, mood)
 
-                    # NEW: 카테고리 기반 BGM 선택
-                    _status_update(progress, status_box, 0.15, f"BGM 선정 중 ({detected_cat})")
-                    bgm_path = get_or_download_bgm(config, detected_cat)
-                    if not bgm_path:
-                        bgm_path = pick_bgm_path(config)
-
-                    # NEW: 카테고리 기반 에셋 선택
-                    assets = []
-                    for tag in beat_tags:
-                        asset = pick_asset(manifest_items, [tag])
-                        if not asset:
-                            asset = pick_asset_by_category(manifest_items, detected_cat)
-                        if asset:
+                        mood_to_cat = {"mystery": "shocking", "exciting": "exciting", "informative": "humor"}
+                        cat = mood_to_cat.get(mood, "exciting")
+                        assets = []
+                        for _ in texts:
+                            asset = pick_asset_by_category(manifest_items, cat)
+                            if not asset:
+                                asset = random.choice(manifest_items)
                             assets.append(asset.path)
 
-                    if not assets:
-                        st.error("태그에 맞는 에셋이 없습니다.")
-                    else:
                         _status_update(progress, status_box, 0.3, "TTS 생성")
                         now = datetime.utcnow().strftime("%Y%m%d_%H%M%S")
                         audio_path = os.path.join(config.output_dir, f"tts_{now}.mp3")
@@ -3339,9 +2258,9 @@ def run_streamlit_app() -> None:
                             result = upload_video(
                                 config=config,
                                 file_path=output_path,
-                                title=title,
-                                description=description + "\n\n" + hashtags,
-                                tags=hashtags.split(),
+                                title=video_title_val,
+                                description=pinned_val + "\n\n" + hashtags_val,
+                                tags=hashtags_val.split(),
                             )
                             video_id = result.get("video_id", "")
                             video_url = result.get("video_url", "")
@@ -3349,10 +2268,11 @@ def run_streamlit_app() -> None:
                             _status_update(progress, status_box, 0.85, "유튜브 업로드(스킵)")
                         log_row = {
                             "date_jst": datetime.utcnow().strftime("%Y-%m-%d %H:%M:%S"),
-                            "title_ja": title,
-                            "hashtags_ja": hashtags,
-                            "template_id": "default",
-                            "asset_ids": ",".join([a for a in assets]),
+                            "title_ja": video_title_val,
+                            "topic_theme": script.get("topic_theme", ""),
+                            "hashtags_ja": hashtags_val,
+                            "mood": mood,
+                            "pinned_comment": pinned_val,
                             "voice_id": voice_id,
                             "video_path": output_path,
                             "youtube_video_id": video_id,
@@ -3462,16 +2382,15 @@ def run_streamlit_app() -> None:
             accept_multiple_files=True,
             key="bgm_upload",
         )
+        mood_labels = list(BGM_MOOD_CATEGORIES.keys())
         bgm_target = st.selectbox(
             "저장 위치",
-            ["일반 BGM", "트렌드 BGM"] + [f"카테고리: {cat}" for cat in CONTENT_CATEGORIES],
+            ["일반 BGM"] + [f"무드: {m}" for m in mood_labels],
         )
         if st.button("BGM 저장") and bgm_files:
-            if bgm_target == "트렌드 BGM":
-                target_dir = os.path.join(config.assets_dir, "bgm", "trending")
-            elif bgm_target.startswith("카테고리: "):
-                cat_name = bgm_target.replace("카테고리: ", "")
-                target_dir = os.path.join(config.assets_dir, "bgm", cat_name)
+            if bgm_target.startswith("무드: "):
+                mood_name = bgm_target.replace("무드: ", "")
+                target_dir = os.path.join(config.assets_dir, "bgm", mood_name)
             else:
                 target_dir = os.path.join(config.assets_dir, "bgm")
             os.makedirs(target_dir, exist_ok=True)
@@ -3481,26 +2400,28 @@ def run_streamlit_app() -> None:
                     out_file.write(file.getbuffer())
             st.success("BGM이 저장되었습니다.")
 
-        # NEW: Pixabay BGM 수동 다운로드
         st.subheader("Pixabay BGM 수동 다운로드")
         if not config.pixabay_api_key:
             st.warning("PIXABAY_API_KEY가 설정되지 않았습니다. `.streamlit/secrets.toml`에 추가하세요.")
         else:
-            pixabay_cat = st.selectbox("BGM 카테고리", CONTENT_CATEGORIES, key="pixabay_cat")
+            pixabay_mood = st.selectbox("BGM 무드", mood_labels, key="pixabay_mood")
             pixabay_count = st.slider("다운로드 개수", 1, 5, 3, key="pixabay_count")
             if st.button("Pixabay에서 BGM 다운로드"):
-                bgm_out_dir = os.path.join(config.assets_dir, "bgm", pixabay_cat)
+                mood_info = BGM_MOOD_CATEGORIES[pixabay_mood]
+                bgm_out_dir = os.path.join(config.assets_dir, "bgm", pixabay_mood)
+                query = random.choice(mood_info["pixabay_queries"])
                 downloaded_bgms = []
                 for _ in range(pixabay_count):
                     path = fetch_bgm_from_pixabay(
                         api_key=config.pixabay_api_key,
-                        category=pixabay_cat,
+                        category=pixabay_mood,
                         output_dir=bgm_out_dir,
+                        custom_query=query,
                     )
                     if path:
                         downloaded_bgms.append(path)
                 if downloaded_bgms:
-                    st.success(f"{len(downloaded_bgms)}개 BGM을 `bgm/{pixabay_cat}/`에 저장했습니다.")
+                    st.success(f"{len(downloaded_bgms)}개 BGM을 `bgm/{pixabay_mood}/`에 저장했습니다.")
                     for p in downloaded_bgms:
                         st.audio(p)
                 else:
@@ -3888,39 +2809,29 @@ def run_streamlit_app() -> None:
             st.info("아직 로그가 없습니다.")
 
 
-def run_batch(count: int, seed: str, beats: int) -> None:
+def run_batch(count: int, seed: str = "", beats: int = 7) -> None:
     config = load_config()
     manifest_items = load_manifest(config.manifest_path)
     if not manifest_items:
         raise RuntimeError("에셋이 없습니다. 먼저 이미지를 추가하세요.")
     for index in range(count):
-        content_category = analyze_content_category(config, seed)
-        script = generate_script(
-            config,
-            seed,
-            beats_count=beats,
-            trend_context=get_trend_context(config),
-            dialect_style=config.ja_dialect_style,
-            content_category=content_category,
-        )
-        beats_list = script.get("beats", [])
-        texts = [beat.get("text", "") for beat in beats_list]
-        beat_tags = [beat.get("tag", "") for beat in beats_list]
+        script = generate_script_jp(config, extra_hint=seed)
+        mood = script.get("mood", "exciting")
+        texts = _script_to_beats(script)
+        mood_to_cat = {"mystery": "shocking", "exciting": "exciting", "informative": "humor"}
+        cat = mood_to_cat.get(mood, "exciting")
         assets = []
-        for tag in beat_tags:
-            asset = pick_asset(manifest_items, [tag])
+        for _ in texts:
+            asset = pick_asset_by_category(manifest_items, cat)
             if not asset:
-                asset = pick_asset_by_category(manifest_items, content_category)
-            if asset:
-                assets.append(asset.path)
+                asset = random.choice(manifest_items)
+            assets.append(asset.path)
         now = datetime.utcnow().strftime("%Y%m%d_%H%M%S")
         audio_path = os.path.join(config.output_dir, f"tts_{now}_{index}.mp3")
         voice_id = pick_voice_id(config.openai_tts_voices)
         tts_openai(config, "。".join(texts), audio_path, voice=voice_id)
         output_path = os.path.join(config.output_dir, f"shorts_{now}_{index}.mp4")
-        bgm_path = get_or_download_bgm(config, content_category)
-        if not bgm_path:
-            bgm_path = pick_bgm_path(config)
+        bgm_path = match_bgm_by_mood(config, mood)
         render_video(
             config=config,
             asset_paths=assets,
@@ -3936,18 +2847,19 @@ def run_batch(count: int, seed: str, beats: int) -> None:
             result = upload_video(
                 config=config,
                 file_path=output_path,
-                title=script.get("title_ja", ""),
-                description=script.get("description_ja", ""),
-                tags=script.get("hashtags_ja", []),
+                title=script.get("video_title", ""),
+                description=script.get("pinned_comment", "") + "\n\n" + " ".join(script.get("hashtags", [])),
+                tags=script.get("hashtags", []),
             )
             video_id = result.get("video_id", "")
             video_url = result.get("video_url", "")
         log_row = {
             "date_jst": datetime.utcnow().strftime("%Y-%m-%d %H:%M:%S"),
-            "title_ja": script.get("title_ja", ""),
-            "hashtags_ja": " ".join(script.get("hashtags_ja", [])),
-            "template_id": "default",
-            "asset_ids": ",".join([a for a in assets]),
+            "title_ja": script.get("video_title", ""),
+            "topic_theme": script.get("topic_theme", ""),
+            "hashtags_ja": " ".join(script.get("hashtags", [])),
+            "mood": mood,
+            "pinned_comment": script.get("pinned_comment", ""),
             "voice_id": voice_id,
             "video_path": output_path,
             "youtube_video_id": video_id,
