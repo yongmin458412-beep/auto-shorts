@@ -5,6 +5,7 @@ moviepy==1.0.3
 imageio-ffmpeg
 Pillow
 numpy
+pandas
 gspread
 google-auth
 google-api-python-client
