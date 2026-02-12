@@ -458,6 +458,8 @@ class AppConfig:
     approve_keywords: List[str]
     swap_keywords: List[str]
     pixabay_api_key: str
+    use_bg_videos: bool
+    render_threads: int
 
 
 def load_config() -> AppConfig:
@@ -477,6 +479,8 @@ def load_config() -> AppConfig:
         or "data/state/auto_run_state.json",
         "/tmp/auto_shorts_state/auto_run_state.json",
     )
+    pixabay_api_key = (_get_secret("PIXABAY_API_KEY", "") or "").strip()
+    pexels_api_key = (_get_secret("PEXELS_API_KEY", "") or "").strip()
     return AppConfig(
         openai_api_key=_get_secret("OPENAI_API_KEY", "") or "",
         openai_model=_get_secret("OPENAI_MODEL", "gpt-4.1-mini") or "gpt-4.1-mini",
@@ -500,7 +504,7 @@ def load_config() -> AppConfig:
         youtube_refresh_token=_get_secret("YOUTUBE_REFRESH_TOKEN", "") or "",
         youtube_privacy_status=_get_secret("YOUTUBE_PRIVACY_STATUS", "public") or "public",
         serpapi_api_key=_get_secret("SERPAPI_API_KEY", "") or "",
-        pexels_api_key=_get_secret("PEXELS_API_KEY", "") or "",
+        pexels_api_key=pexels_api_key,
         ja_dialect_style=_get_secret("JA_DIALECT_STYLE", "") or "",
         bgm_mode=_get_secret("BGM_MODE", "off") or "off",
         bgm_volume=float(_get_secret("BGM_VOLUME", "0.12") or 0.12),
@@ -519,7 +523,9 @@ def load_config() -> AppConfig:
         telegram_debug_logs=_get_bool("TELEGRAM_DEBUG_LOGS", True),
         approve_keywords=_get_list("APPROVE_KEYWORDS") or ["승인", "approve", "ok", "yes"],
         swap_keywords=_get_list("SWAP_KEYWORDS") or ["교환", "swap", "change", "next"],
-        pixabay_api_key=_get_secret("PIXABAY_API_KEY", "") or "",
+        pixabay_api_key=pixabay_api_key,
+        use_bg_videos=_get_bool("USE_BG_VIDEOS", True),
+        render_threads=int(_get_secret("RENDER_THREADS", "2") or 2),
     )
 
 
@@ -696,6 +702,7 @@ def fetch_bgm_from_pixabay(
                 _telemetry_log(message, config)
             except Exception:
                 pass
+        _append_bgm_debug(message)
 
     try:
         # Pixabay music API endpoint
@@ -703,6 +710,7 @@ def fetch_bgm_from_pixabay(
             "key": api_key,
             "q": query,
             "per_page": 10,
+            "safesearch": "true",
         }
         music_response = requests.get(
             "https://pixabay.com/api/music/",
@@ -1100,6 +1108,7 @@ def match_bgm_by_mood(config: AppConfig, mood: str) -> Optional[str]:
 
     # Pixabay 자동 다운로드 (API 키 있을 때만)
     if config.pixabay_api_key:
+        _append_bgm_debug(f"Pixabay BGM 시도 (mood={mood})")
         _telemetry_log(f"Pixabay BGM 다운로드 시도 (mood={mood})", config)
         query_pool = BGM_CATEGORY_KEYWORDS.get(mood, [])
         custom_query = random.choice(query_pool) if query_pool else ""
@@ -1112,8 +1121,10 @@ def match_bgm_by_mood(config: AppConfig, mood: str) -> Optional[str]:
         )
         if downloaded and os.path.exists(downloaded):
             return downloaded
+        _append_bgm_debug("Pixabay BGM 결과 없음")
         _telemetry_log("Pixabay BGM 다운로드 실패/결과 없음", config)
     else:
+        _append_bgm_debug("PIXABAY_API_KEY 미설정")
         _telemetry_log("PIXABAY_API_KEY 미설정: BGM 자동 다운로드 생략", config)
 
     # 로컬 일반 폴더 폴백
@@ -2064,16 +2075,33 @@ def render_video(
 
     video = video.set_audio(audio)
     os.makedirs(os.path.dirname(output_path) or ".", exist_ok=True)
-    video.write_videofile(
-        output_path,
-        codec="libx264",
-        audio_codec="aac",
-        fps=config.fps,
-        threads=4,
-        logger=None,
-    )
-    audio_clip.close()
-    video.close()
+    try:
+        video.write_videofile(
+            output_path,
+            codec="libx264",
+            audio_codec="aac",
+            fps=config.fps,
+            threads=max(1, int(getattr(config, "render_threads", 2))),
+            preset="ultrafast",
+            logger=None,
+        )
+    except Exception as exc:
+        try:
+            err_path = "/tmp/auto_shorts_render_error.log"
+            with open(err_path, "w", encoding="utf-8") as file:
+                file.write(str(exc))
+        except Exception:
+            pass
+        raise
+    finally:
+        try:
+            audio_clip.close()
+        except Exception:
+            pass
+        try:
+            video.close()
+        except Exception:
+            pass
     return output_path
 
 
@@ -2483,6 +2511,17 @@ def _telemetry_log(message: str, config: Optional[AppConfig] = None) -> bool:
         return False
 
 
+def _append_bgm_debug(message: str) -> None:
+    """BGM 디버그 메시지를 session_state에 저장 (로그 탭 표시용)."""
+    try:
+        ts = datetime.utcnow().strftime("%H:%M:%S")
+        logs = st.session_state.get("bgm_debug_logs", [])
+        logs.append(f"{ts} {message}")
+        st.session_state["bgm_debug_logs"] = logs[-60:]
+    except Exception:
+        pass
+
+
 def send_telegram_approval_request(
     token: str,
     chat_id: str,
@@ -2876,7 +2915,7 @@ def _auto_jp_flow(config: AppConfig, progress, status_box, extra_hint: str = "")
         bg_video_paths = [None] * len(texts)
         bg_image_paths = generated_bg_paths
         _telemetry_log("생성 배경 이미지 사용", config)
-    elif config.pixabay_api_key or config.pexels_api_key:
+    elif (config.pixabay_api_key or config.pexels_api_key) and config.use_bg_videos:
         _telemetry_log(f"배경 영상 다운로드 시작 ({len(unique_kws)}개 키워드)", config)
         _status_update(progress, status_box, 0.22, f"배경 영상 다운로드 중 ({len(unique_kws)}개 키워드, Pixabay 우선)")
         kw_to_path: Dict[str, Optional[str]] = {}
@@ -3110,7 +3149,13 @@ def run_streamlit_app() -> None:
     st.sidebar.write(f"자동 업로드: {'켜짐' if config.enable_youtube_upload else '꺼짐'}")
     st.sidebar.write(f"MoviePy 사용 가능: {'예' if MOVIEPY_AVAILABLE else '아니오'}")
     st.sidebar.write(f"BGM 모드: {config.bgm_mode or 'off'}")
-    st.sidebar.write(f"Pixabay BGM: {'연결됨' if config.pixabay_api_key else '미설정'}")
+    if config.pixabay_api_key:
+        key_tail = config.pixabay_api_key[-4:] if len(config.pixabay_api_key) >= 4 else config.pixabay_api_key
+        st.sidebar.write(f"Pixabay BGM: 설정됨 (****{key_tail})")
+    else:
+        st.sidebar.write("Pixabay BGM: 미설정")
+    st.sidebar.write(f"배경 영상 사용: {'예' if config.use_bg_videos else '아니오'}")
+    st.sidebar.write(f"렌더 스레드: {config.render_threads}")
     if not MOVIEPY_AVAILABLE:
         st.sidebar.error(f"MoviePy 오류: {MOVIEPY_ERROR}")
 
@@ -3135,7 +3180,9 @@ def run_streamlit_app() -> None:
         "- `PEXELS_API_KEY` (이미지 자동 수집)\n"
         "- `SERPAPI_API_KEY` (트렌드 수집)\n"
         "- `OPENAI_VISION_MODEL` (이미지 태그 분석)\n"
-        "- `BGM_MODE`, `BGM_VOLUME` (배경음악)\n\n"
+        "- `BGM_MODE`, `BGM_VOLUME` (배경음악)\n"
+        "- `USE_BG_VIDEOS` (배경 영상 사용 여부)\n"
+        "- `RENDER_THREADS` (렌더링 스레드 수)\n\n"
         "**BGM 무드 폴더:** `assets/bgm/mystery_suspense/`, `assets/bgm/fast_exciting/`"
     )
     missing = _missing_required(config)
@@ -3256,7 +3303,7 @@ def run_streamlit_app() -> None:
                             st.warning(
                                 "BGM 파일을 찾지 못했습니다. "
                                 "assets/bgm/mystery_suspense 또는 assets/bgm/fast_exciting 폴더에 "
-                                "BGM 파일을 넣어주세요."
+                                "BGM 파일을 넣어주세요. (PIXABAY_API_KEY가 있으면 자동 다운로드 시도)"
                             )
                         roles = _script_to_roles(script)
                         caption_styles = _build_caption_styles(roles, len(texts))
@@ -3285,7 +3332,7 @@ def run_streamlit_app() -> None:
                         if gen_bg_manual:
                             bg_imgs_manual = gen_bg_manual
                             _telemetry_log("수동 렌더링: 생성 배경 이미지 사용", config)
-                        elif config.pixabay_api_key or config.pexels_api_key:
+                        elif (config.pixabay_api_key or config.pexels_api_key) and config.use_bg_videos:
                             _status_update(progress, status_box, 0.25, "배경 영상 다운로드 중 (Pixabay 우선)")
                             _kws_m = _script_to_visual_keywords(script)
                             _unique_kws_m = list(dict.fromkeys(_kws_m))
@@ -3871,6 +3918,46 @@ def run_streamlit_app() -> None:
 
         st.divider()
 
+        st.subheader("Pixabay BGM 디버그")
+        if st.button("🎵 Pixabay BGM 테스트"):
+            if not config.pixabay_api_key:
+                st.error("PIXABAY_API_KEY가 없습니다.")
+            else:
+                test_path = fetch_bgm_from_pixabay(
+                    api_key=config.pixabay_api_key,
+                    category="mystery_suspense",
+                    output_dir=os.path.join(config.assets_dir, "bgm", "mystery_suspense"),
+                    custom_query="suspense",
+                    config=config,
+                )
+                if test_path and os.path.exists(test_path):
+                    st.success(f"테스트 성공: {os.path.basename(test_path)}")
+                    st.audio(test_path)
+                else:
+                    st.error("테스트 실패: Pixabay 응답이 없거나 다운로드 실패")
+
+        bgm_logs = st.session_state.get("bgm_debug_logs", [])
+        if bgm_logs:
+            st.caption("최근 BGM 디버그 로그")
+            st.code("\n".join(bgm_logs[-20:]))
+
+        st.divider()
+
+        st.subheader("최근 에러 로그")
+        err_paths = ["/tmp/auto_shorts_error.log", "/tmp/auto_shorts_render_error.log"]
+        shown = False
+        for ep in err_paths:
+            if os.path.exists(ep):
+                shown = True
+                st.caption(ep)
+                try:
+                    with open(ep, "r", encoding="utf-8") as file:
+                        st.code(file.read()[-4000:])
+                except Exception as exc:
+                    st.error(f"로그 읽기 실패: {exc}")
+        if not shown:
+            st.info("에러 로그 파일이 없습니다.")
+
         # ── 실행 로그 ────────────────────────────────────────────────
         local_log_path = os.path.join(config.output_dir, "runs.jsonl")
         if os.path.exists(local_log_path):
@@ -3925,7 +4012,7 @@ def run_batch(count: int, seed: str = "", beats: int = 7) -> None:
         gen_bg_b = _get_generated_bg_paths(config, len(texts))
         if gen_bg_b:
             bg_imgs_b = gen_bg_b
-        elif config.pixabay_api_key or config.pexels_api_key:
+        elif (config.pixabay_api_key or config.pexels_api_key) and config.use_bg_videos:
             _unique_b = list(dict.fromkeys(visual_kws))
             _kw_path_b: Dict[str, Optional[str]] = {}
             _kw_img_b: Dict[str, Optional[str]] = {}
