@@ -690,20 +690,20 @@ def _check_story_quality(items: List[Dict[str, Any]]) -> List[str]:
         if txt and not _ends_eum(txt):
             issues.append(f"{label} 음슴체 미준수")
 
-    # Hook 강한 시작
-    if not re.search(r"(미친|대박|개|충격)", hook):
+    # Hook 강한 시작 (레전드/충격 키워드 포함)
+    if not re.search(r"(미친|대박|개|충격|레전드|역대급|실화)", hook):
         issues.append("Hook 임팩트 부족")
-    # 위기/문제
-    if not re.search(r"(문제|위기|난관|고민)", problem):
+    # 위기/문제 (속임/함정/조작 계열 포함)
+    if not re.search(r"(문제|위기|난관|고민|함정|꼼수|조작|사기|속임|뒤통수|논란)", problem):
         issues.append("Problem 내용 약함")
-    # 시도/실패
-    if not re.search(r"(시도|해봤|했는데|실패|욕|반응|최악)", failure):
+    # 시도/실패 (실패/욕/반응 최악)
+    if not re.search(r"(시도|해봤|했는데|실패|욕|반응|최악|망함|폭망)", failure):
         issues.append("Failure 내용 약함")
-    # 반전/성공
-    if not re.search(r"(근데|그런데|하지만|반전|성공|대박)", success):
+    # 반전/성공 (정반대/알고보니)
+    if not re.search(r"(근데|그런데|하지만|반전|정반대|알고 ?보니|실화|대박)", success):
         issues.append("Success 반전 부족")
     # 미친 포인트
-    if not re.search(r"(미친 포인트|핵심|포인트)", point):
+    if not re.search(r"(미친 포인트|핵심|포인트|결정타)", point):
         issues.append("Point 문장 약함")
     # 마지막 1인칭 혼잣말
     if not re.search(r"(아\\.|아\\s|해야겠|크크|ㅋㅋ)", reaction):
@@ -968,20 +968,30 @@ JP_CONTENT_THEMES: List[str] = [
     "메리 셀레스트호 유령선 미스터리",
 ]
 
+# 반응형 고정댓글 후보 (랜덤 선택)
+PINNED_COMMENT_VARIANTS: List[str] = [
+    "너 이거 믿음? 댓글로 알려줘.",
+    "이거 보고도 믿는 사람 있음? 의견 ㄱ",
+    "이게 진짜였다고 생각함? 반박 환영.",
+    "너라면 속았음? 솔직히 말해줘.",
+    "이거 실화라고 봄? 댓글 부탁함.",
+]
+
 # 시스템 프롬프트 (LLM에 직접 전달)
 JP_SHORTS_SYSTEM_PROMPT: str = """너는 유튜브 쇼츠 채널 '몰랐숏'의 메인 작가야. 너의 임무는 지루한 정보를 "미친 스토리텔링"으로 바꾸는 것임. 아래 규칙을 철저히 지켜서 대본을 작성함.
 
 [스타일 가이드]
 1) 말투: 음슴체 필수. 문장 끝을 '~다/~요'가 아닌 '~음/~임/~함'으로 마무리함.
-2) 구어체 + 인터넷 용어 섞기: '미친 간식', '대박난', '개이득' 같은 표현을 자연스럽게 사용함.
+2) 구어체 + 인터넷 용어 섞기: '미친 간식', '대박난', '개이득', '레전드급', '역대급' 같은 표현을 자연스럽게 사용함.
 3) 마지막 한 마디는 1인칭 혼잣말: '아.. ~해야겠는데 크크'처럼 가볍게 끝냄.
 4) 교과서/장문/시적인 표현 금지. 바로 본론 시작, 썰 푸는 느낌 유지.
+5) 강도: Hook/Problem/Success는 센 단어로 밀어붙임. 충격/함정/조작/정반대 느낌 살림.
 
 [스토리 아크: 반드시 6단계]
-1) Hook: '~~해서 대박난 미친 ~~' 같은 강한 한 줄로 시작함.
-2) 위기/문제: 주인공의 딜레마/문제를 짧게 설명함.
-3) 시도와 실패: 1차 시도 후 반응이 최악이었음을 보여줌.
-4) 반전/성공: 뜻밖의 계기/사용법으로 대성공 전환함.
+1) Hook: '~~해서 대박난 미친 ~~', '이거 실화냐' 같은 강한 한 줄로 시작함.
+2) 위기/문제: 함정/꼼수/조작/논란 같은 표현을 섞어 짧게 때림.
+3) 시도와 실패: 1차 시도 후 반응이 최악/폭망이었음을 보여줌.
+4) 반전/성공: "근데 알고 보니 정반대였음" 같은 반전 문장 필수.
 5) 미친 포인트: 성공의 핵심을 '진짜 미친 포인트는...'으로 요약함.
 6) Reaction Outro: 1인칭 혼잣말로 마무리함. (예: '아.. 커피 위에 올려 먹어야겠는데 크크')
 
@@ -1031,6 +1041,7 @@ def generate_script_jp(
     user_text = (
         "아래 주제 풀에서 영감을 받아, 몰랐숏 톤으로 새로운 대본을 작성하세요.\n"
         "반드시 Hook → 위기/문제 → 시도와 실패 → 반전/성공 → 미친 포인트 → Reaction Outro의 6단 구조를 지키고,\n"
+        "Hook/문제/반전은 더 세게(충격/함정/정반대 느낌) 작성하세요.\n"
         "음슴체/구어체/인터넷 용어를 섞어 작성한 뒤 순수 JSON만 출력하세요.\n\n"
         f"[주제 풀 예시]\n{theme_pool}\n\n"
         + (f"[추가 힌트]\n{extra_hint}\n\n" if extra_hint else "")
@@ -1090,9 +1101,9 @@ def generate_script_jp(
         if meta.get("bgm_mood") not in BGM_MOOD_CATEGORIES:
             meta["bgm_mood"] = "mystery_suspense"
         if not meta.get("pinned_comment"):
-            meta["pinned_comment"] = "너 이거 믿음? 댓글로 알려줘."
+            meta["pinned_comment"] = random.choice(PINNED_COMMENT_VARIANTS)
         if not meta.get("pinned_comment_ko"):
-            meta["pinned_comment_ko"] = "너 이거 믿음? 댓글로 알려줘."
+            meta["pinned_comment_ko"] = meta["pinned_comment"]
         # 해시태그 최소 4개 유지
         if isinstance(meta.get("hashtags"), list) and len(meta["hashtags"]) < 4:
             defaults = ["#몰랐숏", "#폭로", "#충격", "#반전", "#미스터리"]
@@ -1822,6 +1833,53 @@ def _apply_korean_template(image: Image.Image, canvas_width: int, canvas_height:
     return Image.alpha_composite(image.convert("RGBA"), overlay).convert("RGB")
 
 
+def _apply_korean_thumbnail_style(
+    image: Image.Image,
+    canvas_width: int,
+    canvas_height: int,
+) -> Image.Image:
+    """썸네일 전용: 강한 컬러/강조 요소를 추가해 한국 쇼츠 감성 강화."""
+    overlay = Image.new("RGBA", (canvas_width, canvas_height), (0, 0, 0, 0))
+    draw = ImageDraw.Draw(overlay)
+
+    red = (255, 60, 60, 200)
+    yellow = (255, 210, 0, 170)
+
+    # 상단 대각 리본
+    ribbon_h = int(canvas_height * 0.18)
+    ribbon_w = int(canvas_width * 0.78)
+    draw.polygon(
+        [
+            (0, 0),
+            (ribbon_w, 0),
+            (int(ribbon_w * 0.86), ribbon_h),
+            (0, ribbon_h),
+        ],
+        fill=red,
+    )
+    # 하단 대각 라이트
+    band_h = int(canvas_height * 0.18)
+    band_w = int(canvas_width * 0.8)
+    draw.polygon(
+        [
+            (canvas_width - band_w, canvas_height - int(band_h * 0.6)),
+            (canvas_width, canvas_height - band_h),
+            (canvas_width, canvas_height),
+            (canvas_width - int(band_w * 0.2), canvas_height),
+        ],
+        fill=yellow,
+    )
+
+    # 강한 프레임
+    frame = max(8, int(canvas_width * 0.01))
+    draw.rectangle(
+        [frame, frame, canvas_width - frame, canvas_height - frame],
+        outline=(255, 255, 255, 120),
+        width=max(2, frame // 2),
+    )
+    return Image.alpha_composite(image.convert("RGBA"), overlay).convert("RGB")
+
+
 def generate_thumbnail_image(
     config: AppConfig,
     bg_image_path: str,
@@ -1836,6 +1894,8 @@ def generate_thumbnail_image(
     base = _fit_image_to_canvas(base, (W, H))
     if config.use_korean_template:
         base = _apply_korean_template(base, W, H)
+    # 썸네일 전용 강한 스타일
+    base = _apply_korean_thumbnail_style(base, W, H)
 
     main_text = hook_text if config.thumbnail_use_hook else title_text
     main_text = _shorten_caption_text(main_text, max_chars=config.thumbnail_max_chars)
@@ -1843,17 +1903,19 @@ def generate_thumbnail_image(
     if main_text != title_text and title_text:
         sub_text = _shorten_caption_text(title_text, max_chars=max(14, config.thumbnail_max_chars))
 
-    # 텍스트 배경 박스
+    # 텍스트 배경 박스 (강한 대비)
     overlay = Image.new("RGBA", (W, H), (0, 0, 0, 0))
     draw = ImageDraw.Draw(overlay)
     pad = 30
-    box_h = int(H * 0.32)
-    draw.rectangle([0, H - box_h, W, H], fill=(0, 0, 0, 160))
+    box_h = int(H * 0.34)
+    draw.rectangle([0, H - box_h, W, H], fill=(0, 0, 0, 175))
+    accent_h = max(10, int(H * 0.014))
+    draw.rectangle([0, H - box_h, W, H - box_h + accent_h], fill=(255, 60, 60, 230))
 
     # 텍스트 렌더링
-    font_main = _load_font(config.font_path, int(W * 0.08))
-    font_sub = _load_font(config.font_path, int(W * 0.045))
-    lines = _wrap_cjk_text(main_text, W - pad * 2, int(W * 0.08))
+    font_main = _load_font(config.font_path, int(W * 0.095))
+    font_sub = _load_font(config.font_path, int(W * 0.05))
+    lines = _wrap_cjk_text(main_text, W - pad * 2, int(W * 0.095))
     y = H - box_h + pad
     for line in lines:
         try:
@@ -1861,8 +1923,24 @@ def generate_thumbnail_image(
         except Exception:
             lw = len(line) * int(W * 0.08)
         x = max(pad, (W - lw) // 2)
-        draw.text((x, y), line, font=font_main, fill=(255, 255, 255), stroke_width=5, stroke_fill=(0, 0, 0))
-        y += int(W * 0.09)
+        # 강조 배경
+        rect_pad = 14
+        rect = [x - rect_pad, y - 6, x + lw + rect_pad, y + int(W * 0.1)]
+        if hasattr(draw, "rounded_rectangle"):
+            draw.rounded_rectangle(rect, radius=18, fill=(255, 60, 60, 90))
+        else:
+            draw.rectangle(rect, fill=(255, 60, 60, 90))
+        # 그림자 + 두꺼운 스트로크
+        draw.text((x + 3, y + 3), line, font=font_main, fill=(0, 0, 0, 180))
+        draw.text(
+            (x, y),
+            line,
+            font=font_main,
+            fill=(255, 242, 120),
+            stroke_width=7,
+            stroke_fill=(0, 0, 0),
+        )
+        y += int(W * 0.1)
 
     if sub_text:
         y += int(W * 0.02)
@@ -1871,7 +1949,8 @@ def generate_thumbnail_image(
         except Exception:
             lw = len(sub_text) * int(W * 0.045)
         x = max(pad, (W - lw) // 2)
-        draw.text((x, y), sub_text, font=font_sub, fill=(255, 220, 120), stroke_width=3, stroke_fill=(0, 0, 0))
+        draw.text((x + 2, y + 2), sub_text, font=font_sub, fill=(0, 0, 0, 160))
+        draw.text((x, y), sub_text, font=font_sub, fill=(255, 255, 255), stroke_width=4, stroke_fill=(0, 0, 0))
 
     thumb = Image.alpha_composite(base.convert("RGBA"), overlay).convert("RGB")
     os.makedirs(os.path.dirname(output_path) or ".", exist_ok=True)
