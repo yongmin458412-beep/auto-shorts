@@ -1049,6 +1049,92 @@ JP_SHORTS_SYSTEM_PROMPT: str = """너는 유튜브 쇼츠 채널 '몰랐숏'의 
 """
 
 
+def generate_viral_script() -> Dict[str, Any]:
+    client = OpenAI()
+
+    system_message = """당신은 현재 일본 유튜브 쇼츠 트렌드를 섭렵한 **'바이럴 마케팅 천재'**이자 **'현대 미스터리 스토리텔러'**입니다.
+당신의 임무는 1) **클릭을 안 할 수 없는 썸네일/제목**을 설계하고, 2) **현대 문명 속 충격적인 비하인드 스토리**로 시청자를 붙잡아두며, 3) **댓글 창을 폭발시키는 질문**을 던지는 것입니다.
+
+### 1. 주제 선정 (Modern & Mystery)
+- **소재:** 100년 전 역사가 아닌, **지금 당장** 우리가 쓰는 앱, 먹는 음식, 입는 브랜드(Nike, McDonald's, Instagram, Ramen 등).
+- **각도:** "이게 원래 마약이었다고?", "이게 원래 군사용이었다고?" 식의 **일상 속 배신감**을 주는 소재.
+
+### 2. 메타데이터 전략 (일본 트렌드 반영)
+- **썸네일 텍스트:** 영상 첫 화면에 크게 박힐 텍스트. 5~8글자 이내의 일본어. (예: 閲覧注意, 99%が誤解, 衝撃の正体)
+- **해시태그:** 대형 키워드(#雑学)와 니치 키워드(#裏話)를 섞어서 알고리즘 타겟팅.
+- **고정 댓글:** 시청자가 자기 경험을 말하고 싶어서 안달 나게 만드는 질문. (논쟁 유발 or 공감 유도)
+
+### 3. 대본 작성 (몰랐숏 스타일)
+- **말투:** 일본어 반말(Tameguchi). 빠르고 시니컬하게. (~Desu/Masu 절대 금지)
+- **흐름:**
+    1. **Hook:** "너 이거 쓰면서도 몰랐지?" (무시/도발)
+    2. **Secret:** "사실 이거 원래 ㅇㅇㅇ였어." (충격)
+    3. **Twist:** "근데 어떤 천재가 이걸 바꿔서 대박 난 거야." (전환)
+    4. **Outro:** "아, 나도 하나 사러 가야겠다." (1인칭 혼잣말 엔딩)
+
+### 4. JSON 출력 형식 (파이썬 연동용 - 엄격 준수)
+반드시 아래 JSON 포맷으로만 응답하세요.
+
+{
+  "meta": {
+    "topic_en": "주제 키워드 (영어)",
+    "title_ja": "일본어 제목 (클릭을 부르는 어그로성 제목, 예: 【衝撃】マックのポテトが美味すぎる恐ろしい理由)",
+    "thumbnail_text_ja": "썸네일용 텍스트 (짧고 강렬하게, 예: 中毒の正体)",
+    "hashtags": ["#雑学", "#都市伝説", "#衝撃", "#ライフハック", "#裏話"],
+    "pinned_comment_ja": "고정 댓글 (시청자 참여 유도, 예: あなたはマック派？モス派？コメントで教えて！)",
+    "bgm_mood": "mystery_suspense"
+  },
+  "shorts_script": [
+    {
+      "order": 1,
+      "role": "hook",
+      "duration": "4s",
+      "txt_ja": "일본어 대본 (시청자가 지금 쓰고 있는 물건 지적)",
+      "txt_ko": "한국어 번역 (확인용)",
+      "visual_keyword_en": "close up of modern product (specific brand or item)"
+    },
+    {
+      "order": 2,
+      "role": "secret",
+      "duration": "10s",
+      "txt_ja": "일본어 대본 (충격적인 과거/비밀 폭로)",
+      "txt_ko": "한국어 번역",
+      "visual_keyword_en": "black and white or shocking contrast image (e.g., war, chemical, trash)"
+    },
+    {
+      "order": 3,
+      "role": "twist",
+      "duration": "15s",
+      "txt_ja": "일본어 대본 (성공의 반전 포인트)",
+      "txt_ko": "한국어 번역",
+      "visual_keyword_en": "money falling or people cheering or factory production"
+    },
+    {
+      "order": 4,
+      "role": "outro",
+      "duration": "5s",
+      "txt_ja": "일본어 대본 (친구 같은 1인칭 혼잣말)",
+      "txt_ko": "한국어 번역 (예: 아.. 소름 돋네..)",
+      "visual_keyword_en": "person shrugging or looking surprised or eating product"
+    }
+  ]
+}
+"""
+
+    user_message = "현대인들이 흥미로워할 랜덤 주제 하나를 선정해서 작성해줘."
+
+    response = client.responses.create(
+        model="gpt-4o",
+        input=[
+            {"role": "system", "content": system_message},
+            {"role": "user", "content": user_message},
+        ],
+        response_format={"type": "json_object"},
+    )
+    output_text = getattr(response, "output_text", "") or ""
+    return json.loads(output_text)
+
+
 def generate_script_jp(
     config: AppConfig,
     extra_hint: str = "",
