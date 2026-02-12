@@ -471,6 +471,14 @@ class AppConfig:
     use_minecraft_parkour_bg: bool
     tts_provider: str
     use_japanese_caption_style: bool
+    linktree_url: str
+    enable_pinned_comment: bool
+    # 플랫폼: instagram(기본), youtube, tiktok(준비)
+    upload_platform: str
+    enable_instagram_upload: bool
+    instagram_access_token: str
+    instagram_user_id: str
+    instagram_use_popular_audio: bool
 
 
 def load_config() -> AppConfig:
@@ -518,7 +526,7 @@ def load_config() -> AppConfig:
         serpapi_api_key=_get_secret("SERPAPI_API_KEY", "") or "",
         pexels_api_key=pexels_api_key,
         ja_dialect_style=_get_secret("JA_DIALECT_STYLE", "") or "",
-        bgm_mode=_get_secret("BGM_MODE", "off") or "off",
+        bgm_mode=_get_secret("BGM_MODE", "auto") or "auto",  # 기본값 auto: BGM 자동 선택
         bgm_volume=float(_get_secret("BGM_VOLUME", "0.2") or 0.2),  # 일본 쇼츠: TTS 가독성 위해 20%
         asset_overlay_mode=_get_secret("ASSET_OVERLAY_MODE", "off") or "off",
         max_video_duration_sec=float(_get_secret("MAX_VIDEO_DURATION_SEC", "59") or 59),
@@ -536,7 +544,7 @@ def load_config() -> AppConfig:
         approve_keywords=_get_list("APPROVE_KEYWORDS") or ["승인", "approve", "ok", "yes"],
         swap_keywords=_get_list("SWAP_KEYWORDS") or ["교환", "swap", "change", "next"],
         pixabay_api_key=pixabay_api_key,
-        use_bg_videos=_get_bool("USE_BG_VIDEOS", False),
+        use_bg_videos=_get_bool("USE_BG_VIDEOS", True),  # 기본값 True: 배경영상 항상 활성화
         render_threads=int(_get_secret("RENDER_THREADS", "2") or 2),
         use_korean_template=_get_bool("USE_KOREAN_TEMPLATE", True),
         caption_max_chars=int(_get_secret("CAPTION_MAX_CHARS", "18") or 18),
@@ -547,6 +555,13 @@ def load_config() -> AppConfig:
         use_minecraft_parkour_bg=_get_bool("USE_MINECRAFT_PARKOUR_BG", True),
         tts_provider=(_get_secret("TTS_PROVIDER", "") or "openai").strip().lower() or "openai",
         use_japanese_caption_style=_get_bool("USE_JAPANESE_CAPTION_STYLE", True),
+        linktree_url=(_get_secret("LINKTREE_URL", "") or "").strip(),
+        enable_pinned_comment=_get_bool("ENABLE_PINNED_COMMENT", False),
+        upload_platform=(_get_secret("UPLOAD_PLATFORM", "instagram") or "instagram").strip().lower(),
+        enable_instagram_upload=_get_bool("ENABLE_INSTAGRAM_UPLOAD", True),
+        instagram_access_token=(_get_secret("INSTAGRAM_ACCESS_TOKEN", "") or "").strip(),
+        instagram_user_id=(_get_secret("INSTAGRAM_USER_ID", "") or "").strip(),
+        instagram_use_popular_audio=_get_bool("INSTAGRAM_USE_POPULAR_AUDIO", True),
     )
 
 
@@ -2100,13 +2115,13 @@ def _draw_subtitle(
     else:
         progress = 0.0
 
-    # 폰트 크기: 1080px 기준 72px (가독성 향상)
-    font_size = max(52, canvas_width // 15)
+    # 폰트 크기: 1080px 기준 78px (일본어 가독성 위해 기존 72px에서 상향)
+    font_size = max(58, canvas_width // 14)
     font = _load_font(font_path, font_size)
-    pad_x = int(canvas_width * 0.06)
+    pad_x = int(canvas_width * 0.05)
     max_text_w = canvas_width - pad_x * 2
     lines = _wrap_cjk_text(text, max_text_w, font_size)
-    line_h = font_size + 12
+    line_h = font_size + 14
     total_h = line_h * len(lines) + 20
     # ── Shorts 안전 영역: 화면 55% 지점을 자막 중앙으로 ──
     # 하단 UI 안전선: canvas_height * 0.68 이하
@@ -2121,29 +2136,31 @@ def _draw_subtitle(
         box_fill = (255, 232, 92, 220)
         text_fill = (25, 20, 0)
         stroke_fill = (0, 0, 0)
-        stroke_width = 2
+        stroke_width = 3
     elif is_japanese_variety:
-        # 일본 예능 자막: 노란색 글씨 + 검은색 테두리 (Stroke 효과 강화)
-        box_fill = (0, 0, 0, 0)  # 배경 박스 없음 (자막만)
-        text_fill = (255, 235, 59)  # 노란색 (#FFEB3B)
+        # 일본 예능 자막: 순백+노란색 그라데이션 글씨 + 강화된 검정 테두리
+        box_fill = (0, 0, 0, 0)   # 배경 박스 없음 (자막만)
+        text_fill = (255, 240, 0)  # 선명한 노란색
         stroke_fill = (0, 0, 0)
-        stroke_width = 6  # 굵은 검정 테두리
+        stroke_width = 10          # 기존 6 → 10으로 강화 (일본 예능 TV 스타일)
     else:
-        box_fill = (0, 0, 0, 170)
+        box_fill = (0, 0, 0, 185)
         text_fill = (255, 255, 255)
         stroke_fill = (0, 0, 0)
-        stroke_width = 3
+        stroke_width = 4
 
-    # 애니메이션: 팝업 + 살짝 위/아래 이동 + 페이드 아웃
+    # 애니메이션: 팝업(scale) + 튀어오르기(bounce) + 페이드아웃 + 새벽 빛 효과(glow)
     scale = 1.0
     y_bounce = 0
     alpha_mul = 1.0
+    glow_alpha = 0  # 텍스트 주변 발광 효과 강도
     if duration and t is not None and duration > 0:
-        pop_t = min(max(progress / 0.15, 0.0), 1.0)
-        scale = 0.92 + 0.08 * pop_t
-        y_bounce = int((1.0 - pop_t) * 12)
-        if progress > 0.85:
-            alpha_mul = max(0.0, 1.0 - (progress - 0.85) / 0.15)
+        pop_t = min(max(progress / 0.12, 0.0), 1.0)  # 팝인 속도 약간 빠르게
+        scale = 0.88 + 0.12 * pop_t                   # 스케일 범위 확대 (0.88→1.0)
+        y_bounce = int((1.0 - pop_t) * 16)            # 바운스 높이 증가
+        glow_alpha = int(max(0, (1.0 - pop_t)) * 80)  # 팝인 초반 발광
+        if progress > 0.82:
+            alpha_mul = max(0.0, 1.0 - (progress - 0.82) / 0.18)  # 페이드아웃 구간 확대
 
     # 반투명 배경 박스 (japanese_variety는 박스 없음, reaction은 말풍선)
     box_pad = 18
@@ -2188,6 +2205,20 @@ def _draw_subtitle(
         except Exception:
             lw = len(line) * scaled_size
         lx = max(pad_x, (canvas_width - lw) // 2)
+
+        # japanese_variety 스타일: glow(발광) 레이어 먼저 그려서 텍스트 존재감 강화
+        if is_japanese_variety and glow_alpha > 0:
+            glow_size = max(20, scaled_size + 4)
+            glow_font = _load_font(font_path, glow_size)
+            draw.text(
+                (lx - 1, y + y_bounce - 1),
+                line,
+                font=glow_font,
+                fill=(255, 255, 150, glow_alpha),
+                stroke_width=stroke_width + 4,
+                stroke_fill=(255, 220, 0, glow_alpha),
+            )
+
         draw.text(
             (lx, y + y_bounce),
             line,
@@ -2541,83 +2572,132 @@ def fetch_youtube_minecraft_parkour_video(
     output_dir: str,
     canvas_w: int = 1080,
     canvas_h: int = 1920,
+    target_count: int = 3,  # 최대 확보할 파일 수 (세그먼트 다양화용)
 ) -> Optional[str]:
     """
-    YouTube에서 'Minecraft Parkour No Copyright gameplay' 키워드로 검색하여
-    조회수가 높고 1분 이상인 영상을 yt-dlp로 다운로드합니다.
-    - 1080p 이상 선호, 쇼츠 비율(9:16) 크롭 시 중앙이 잘리지 않도록 처리 (render 단계에서 crop)
-    - output_dir에 이미 파일이 있으면 스킵
+    YouTube에서 Minecraft Parkour No Copyright 영상을 yt-dlp로 다운로드합니다.
+    - 검색어를 여러 개 순환하여 다양한 영상 확보 (세그먼트마다 다른 영상 사용 가능)
+    - 1080p 이상 우선 다운로드 (쇼츠 9:16 크롭 시 화질 손실 최소화)
+    - output_dir에 target_count개 이상 파일이 있으면 스킵
     - 반환: 다운로드된 파일 경로 또는 None
     """
     os.makedirs(output_dir, exist_ok=True)
-    # 기존 파일이 있으면 첫 번째 파일 재사용 (스킵)
-    for f in os.listdir(output_dir):
-        if f.lower().endswith((".mp4", ".mkv", ".webm")):
-            existing = os.path.join(output_dir, f)
-            if os.path.getsize(existing) > 100000:  # 100KB 이상
-                return existing
+
+    # 기존 파일 목록 확인
+    existing_files = [
+        os.path.join(output_dir, f)
+        for f in os.listdir(output_dir)
+        if f.lower().endswith((".mp4", ".mkv", ".webm"))
+        and os.path.getsize(os.path.join(output_dir, f)) > 500000  # 500KB 이상만 유효
+    ]
+    if len(existing_files) >= target_count:
+        # 이미 충분한 파일이 있으면 랜덤 반환
+        return random.choice(existing_files)
+    if existing_files:
+        # 일부 있으면 첫 번째 반환하되 추가 다운로드는 계속 진행
+        result_path = existing_files[0]
+    else:
+        result_path = None
 
     try:
         import yt_dlp
     except ImportError:
-        return None
+        return result_path
 
-    search_url = "ytsearch20:Minecraft Parkour No Copyright gameplay"
-    ydl_opts_info = {
-        "quiet": True,
-        "no_warnings": True,
-        "extract_flat": False,
-        "noplaylist": False,
-    }
-    try:
-        with yt_dlp.YoutubeDL(ydl_opts_info) as ydl:
-            info = ydl.extract_info(search_url, download=False)
-    except Exception:
-        return None
+    # 다양한 검색어 풀 (매번 다른 영상 확보)
+    search_queries = [
+        "Minecraft Parkour No Copyright gameplay 1080p",
+        "Minecraft Parkour free to use gameplay",
+        "Minecraft Parkour no copyright background",
+        "Minecraft satisfying parkour gameplay no copyright",
+        "Minecraft Parkour gameplay copyright free HD",
+    ]
 
-    entries = info.get("entries") or []
-    # 1분(60초) 이상, duration/view_count 있는 것만 필터, 조회수 높은 순 정렬
-    candidates = []
-    for e in entries:
-        if not e:
+    # 아직 확보 못한 만큼 다운로드 시도
+    needed = target_count - len(existing_files)
+    downloaded_this_run: List[str] = []
+
+    for query in search_queries:
+        if len(downloaded_this_run) >= needed:
+            break
+
+        search_url = f"ytsearch15:{query}"
+        ydl_opts_info = {
+            "quiet": True,
+            "no_warnings": True,
+            "extract_flat": True,  # 메타데이터만 빠르게 수집
+            "noplaylist": False,
+        }
+        try:
+            with yt_dlp.YoutubeDL(ydl_opts_info) as ydl:
+                info = ydl.extract_info(search_url, download=False)
+        except Exception:
             continue
-        dur = e.get("duration") or 0
-        views = e.get("view_count") or e.get("play_count") or 0
-        vid = e.get("id") or e.get("url")
-        if vid and dur >= 60:
-            candidates.append((views, dur, e))
 
-    if not candidates:
-        return None
+        entries = info.get("entries") or []
+        candidates = []
+        for e in entries:
+            if not e:
+                continue
+            dur = e.get("duration") or 0
+            views = e.get("view_count") or e.get("play_count") or 0
+            vid_id = e.get("id") or ""
+            # 이미 다운로드된 파일 ID는 스킵
+            already = any(vid_id in f for f in existing_files + downloaded_this_run)
+            if vid_id and dur >= 60 and not already:
+                candidates.append((views, dur, e))
 
-    candidates.sort(key=lambda x: x[0], reverse=True)
-    best = candidates[0][2]
-    video_url = best.get("webpage_url") or best.get("url")
-    if not video_url and best.get("id"):
-        video_url = f"https://www.youtube.com/watch?v={best['id']}"
+        if not candidates:
+            continue
 
-    if not video_url:
-        return None
+        # 조회수 높은 순 정렬 후 상위 3개 중 랜덤 선택 (다양성 확보)
+        candidates.sort(key=lambda x: x[0], reverse=True)
+        pick = random.choice(candidates[:3])
+        best = pick[2]
+        video_url = best.get("webpage_url") or best.get("url")
+        if not video_url and best.get("id"):
+            video_url = f"https://www.youtube.com/watch?v={best['id']}"
+        if not video_url:
+            continue
 
-    out_tmpl = os.path.join(output_dir, "minecraft_parkour_%(id)s.%(ext)s")
-    ydl_opts_dl = {
-        "format": "bestvideo[height>=720][ext=mp4]/bestvideo[height>=720]/bestvideo[ext=mp4]/best[ext=mp4]/best",
-        "outtmpl": out_tmpl,
-        "merge_output_format": "mp4",
-        "quiet": True,
-        "no_warnings": True,
-    }
-    try:
-        with yt_dlp.YoutubeDL(ydl_opts_dl) as ydl:
-            ydl.download([video_url])
-    except Exception:
-        return None
+        out_tmpl = os.path.join(output_dir, "minecraft_parkour_%(id)s.%(ext)s")
+        ydl_opts_dl = {
+            # 1080p 이상 우선, 없으면 720p, 최후엔 최고화질
+            "format": (
+                "bestvideo[height>=1080][ext=mp4]+bestaudio[ext=m4a]/"
+                "bestvideo[height>=1080]+bestaudio/"
+                "bestvideo[height>=720][ext=mp4]+bestaudio[ext=m4a]/"
+                "bestvideo[height>=720]+bestaudio/"
+                "best[ext=mp4]/best"
+            ),
+            "outtmpl": out_tmpl,
+            "merge_output_format": "mp4",
+            "quiet": True,
+            "no_warnings": True,
+            "socket_timeout": 60,
+        }
+        try:
+            with yt_dlp.YoutubeDL(ydl_opts_dl) as ydl:
+                ydl.download([video_url])
+        except Exception:
+            continue
 
-    # 다운로드된 파일 찾기
-    for f in os.listdir(output_dir):
-        if f.startswith("minecraft_parkour_") and f.lower().endswith((".mp4", ".mkv", ".webm")):
-            return os.path.join(output_dir, f)
-    return None
+        # 새로 다운로드된 파일 찾기
+        for f in os.listdir(output_dir):
+            full = os.path.join(output_dir, f)
+            if (
+                f.startswith("minecraft_parkour_")
+                and f.lower().endswith((".mp4", ".mkv", ".webm"))
+                and full not in existing_files
+                and full not in downloaded_this_run
+                and os.path.getsize(full) > 500000
+            ):
+                downloaded_this_run.append(full)
+                if result_path is None:
+                    result_path = full
+                break
+
+    return result_path
 
 
 def fetch_youtube_minecraft_bgm(output_dir: str) -> Optional[str]:
@@ -2793,6 +2873,20 @@ def render_video(
     # 전역 fallback 영상
     global_bg_vid = _get_vid(bg_video_path)
 
+    # 세그먼트별 다른 배경영상 자동 선택:
+    # bg_video_path가 폴더 내 여러 파일 중 하나라면, 같은 폴더의 모든 파일을 풀로 사용
+    _bg_video_pool: List[str] = []
+    if bg_video_path and os.path.exists(bg_video_path):
+        _bg_dir = os.path.dirname(bg_video_path)
+        _bg_video_pool = [
+            os.path.join(_bg_dir, f)
+            for f in os.listdir(_bg_dir)
+            if f.lower().endswith((".mp4", ".mkv", ".webm"))
+            and os.path.getsize(os.path.join(_bg_dir, f)) > 500000
+        ]
+    if not _bg_video_pool and bg_video_path:
+        _bg_video_pool = [bg_video_path]
+
     vid_offset = 0.0
     for index, text in enumerate(texts):
         asset_path = asset_paths[min(index, len(asset_paths) - 1)]
@@ -2807,8 +2901,10 @@ def render_video(
             style = "japanese_variety"
         cap_text = caption_texts[index] if index < len(caption_texts) else text
 
-        # 세그먼트별 영상 우선, 없으면 전역 fallback
+        # 세그먼트별 영상 우선, 없으면 풀에서 랜덤 선택 (매 세그먼트마다 다른 영상으로 다양화)
         seg_path = (bg_video_paths[index] if bg_video_paths and index < len(bg_video_paths) else None)
+        if not seg_path and _bg_video_pool:
+            seg_path = random.choice(_bg_video_pool)
         bg_vid = _get_vid(seg_path) or global_bg_vid
 
         # 클로저 캡처 (Python for-loop 캡처 이슈 방지)
@@ -2871,18 +2967,54 @@ def render_video(
 
     video = concatenate_videoclips(clips, method="compose").set_fps(config.fps)
 
-    # BGM 처리
+    # ── 영상 시작/끝 fade-in / fade-out 효과 ──────────────────────────
+    total_dur = video.duration
+    fade_sec = min(0.4, total_dur * 0.04)  # 전체 길이의 4% 또는 최대 0.4초
+    try:
+        video = video.fx(vfx.fadein, fade_sec).fx(vfx.fadeout, fade_sec)
+    except Exception:
+        pass  # fade 실패 시 원본 유지
+
+    # ── BGM 처리 + Audio Ducking ───────────────────────────────────────
+    # Audio Ducking: TTS 발화 구간에서 BGM 볼륨을 자동으로 낮춰 TTS 가독성 확보
     if bgm_path and os.path.exists(bgm_path):
         from moviepy.editor import concatenate_audioclips
-        bgm_raw = AudioFileClip(bgm_path).volumex(bgm_volume)
+
+        bgm_raw = AudioFileClip(bgm_path)
+        # BGM을 TTS 길이만큼 루프
         if bgm_raw.duration < audio_clip.duration:
             n_loops = int(audio_clip.duration / bgm_raw.duration) + 2
-            bgm_clip = concatenate_audioclips([bgm_raw] * n_loops).subclip(0, audio_clip.duration)
+            bgm_full = concatenate_audioclips([bgm_raw] * n_loops).subclip(0, audio_clip.duration)
         else:
-            bgm_clip = bgm_raw.subclip(0, audio_clip.duration)
-        audio = CompositeAudioClip([audio_clip, bgm_clip])
+            bgm_full = bgm_raw.subclip(0, audio_clip.duration)
+
+        # Audio Ducking: TTS 볼륨 기준으로 BGM 볼륨을 동적 감쇠
+        # - TTS 발화 시: BGM을 bgm_volume(20%)로 유지
+        # - 무음 구간: BGM을 bgm_volume * 1.5(30%)로 살짝 올림 (자연스러운 전환)
+        duck_vol = float(bgm_volume)       # 발화 중 BGM 볼륨
+        fill_vol = min(duck_vol * 1.5, 0.35)  # 무음 구간 BGM 볼륨
+
+        def _ducking_vol_func(t: float) -> float:
+            """TTS 오디오 진폭에 따라 BGM 볼륨 동적 조절 (Audio Ducking)."""
+            try:
+                chunk = audio_clip.get_frame(t)
+                # 모노/스테레오 모두 처리
+                amp = float(np.abs(chunk).mean()) if hasattr(chunk, "__len__") else 0.0
+                # 진폭이 0.01 이상이면 TTS 발화 중 → ducking 적용
+                return duck_vol if amp > 0.01 else fill_vol
+            except Exception:
+                return duck_vol
+
+        bgm_ducked = bgm_full.fl(lambda gf, t: gf(t) * _ducking_vol_func(t), keep_duration=True)
+        audio = CompositeAudioClip([audio_clip, bgm_ducked])
     else:
         audio = audio_clip
+
+    # BGM에도 fade-in/out 적용 (영상 fade와 일치)
+    try:
+        audio = audio.audio_fadein(fade_sec).audio_fadeout(fade_sec)
+    except Exception:
+        pass
 
     video = video.set_audio(audio)
     os.makedirs(os.path.dirname(output_path) or ".", exist_ok=True)
@@ -3100,6 +3232,83 @@ def set_video_thumbnail(config: AppConfig, video_id: str, thumbnail_path: str) -
         return True
     except Exception:
         return False
+
+
+# 댓글 작성에 필요한 scope (토큰 재발급 시 포함 필요)
+YOUTUBE_COMMENT_SCOPE = "https://www.googleapis.com/auth/youtube.force-ssl"
+
+
+def insert_video_comment(
+    config: AppConfig,
+    video_id: str,
+    comment_text: str,
+) -> bool:
+    """
+    영상에 댓글 작성. (고정은 YouTube Studio에서 수동)
+    scope에 youtube.force-ssl 포함 필요.
+    """
+    if not video_id or not comment_text:
+        return False
+    if not all([config.youtube_client_id, config.youtube_client_secret, config.youtube_refresh_token]):
+        return False
+    try:
+        credentials = Credentials(
+            token=None,
+            refresh_token=config.youtube_refresh_token,
+            token_uri="https://oauth2.googleapis.com/token",
+            client_id=config.youtube_client_id,
+            client_secret=config.youtube_client_secret,
+            scopes=[
+                "https://www.googleapis.com/auth/youtube.upload",
+                YOUTUBE_COMMENT_SCOPE,
+            ],
+        )
+        youtube = build("youtube", "v3", credentials=credentials)
+        body = {
+            "snippet": {
+                "videoId": video_id,
+                "topLevelComment": {"snippet": {"textOriginal": comment_text[:5000]}},
+            }
+        }
+        request = youtube.commentThreads().insert(part="snippet", body=body)
+        request.execute()
+        return True
+    except Exception:
+        return False
+
+
+def _pick_product_number_for_short(config: AppConfig) -> str:
+    """제품 목록에서 랜덤 제품번호 선택. (링크트리 고정댓글용)"""
+    try:
+        from products import load_products
+        products = load_products()
+        if products:
+            return random.choice(products).number
+    except Exception:
+        pass
+    return ""
+
+
+def build_pinned_comment_with_voting(
+    product_number: str,
+    linktree_url: str,
+    pinned_base: str = "",
+) -> str:
+    """
+    제품번호 + 링크트리 + 투표 유도 문구로 고정댓글 텍스트 생성.
+    프로필 자기소개에 링크트리 URL, DM으로 제품번호 발송 시 링크 반환.
+    """
+    parts = []
+    if product_number and linktree_url:
+        search_url = linktree_url.rstrip("/") + (f"?q={product_number}" if "?" not in linktree_url else f"&q={product_number}")
+        parts.append(f"📦 제품 [{product_number}] → {search_url}")
+        parts.append("DM으로 제품번호 보내시면 링크 전달해드려요!")
+    if pinned_base:
+        parts.append("")
+        parts.append(pinned_base)
+    parts.append("")
+    parts.append("👍 이 숏츠 어떠세요? 좋아요 눌러주세요!")
+    return "\n".join(parts).strip()
 
 
 def build_google_oauth_url(
@@ -3721,6 +3930,11 @@ def _missing_required(config: AppConfig) -> List[str]:
         missing.append("GOOGLE_SERVICE_ACCOUNT_JSON")
     if not config.font_path:
         missing.append("FONT_PATH")
+    if getattr(config, "enable_instagram_upload", False):
+        if not getattr(config, "instagram_access_token", ""):
+            missing.append("INSTAGRAM_ACCESS_TOKEN")
+        if not getattr(config, "instagram_user_id", ""):
+            missing.append("INSTAGRAM_USER_ID")
     if config.enable_youtube_upload:
         if not config.youtube_client_id:
             missing.append("YOUTUBE_CLIENT_ID")
@@ -3790,6 +4004,12 @@ def _auto_jp_flow(config: AppConfig, progress, status_box, extra_hint: str = "")
     caption_styles = _build_caption_styles(roles, len(texts))
     caption_texts = _build_caption_texts(texts, config.caption_max_chars)
     texts_ko_norm = _normalize_ko_lines(texts_ko, texts)
+
+    # 인스타그램 인기 오디오 스타일: BGM을 fast_exciting 쪽으로 편향
+    if getattr(config, "instagram_use_popular_audio", False) and mood == "mystery_suspense":
+        if random.random() < 0.5:
+            mood = "fast_exciting"
+            _telemetry_log("인기 오디오 스타일 적용: fast_exciting", config)
 
     st.info(f"제목: **{video_title}** | 무드: **{mood}**")
 
@@ -4033,12 +4253,46 @@ def _auto_jp_flow(config: AppConfig, progress, status_box, extra_hint: str = "")
         except Exception as thumb_err:
             _telemetry_log(f"썸네일 생성 실패: {thumb_err}", config)
 
-    # ── 유튜브 업로드 ─────────────────────────────────────
+    # ── 플랫폼 업로드 (Instagram 우선, YouTube/TikTok) ─────
     video_id = ""
     video_url = ""
     upload_error = ""
     upload_reason = ""
-    if config.enable_youtube_upload:
+    if getattr(config, "enable_instagram_upload", False) and config.instagram_access_token and config.instagram_user_id:
+        _telemetry_log("인스타그램 릴스 업로드 시작", config)
+        _status_update(progress, status_box, 0.85, "인스타그램 릴스 업로드")
+        try:
+            from platforms.instagram import add_instagram_comment, upload_instagram_reel
+            caption_ig = f"{video_title}\n\n{description}"
+            result = upload_instagram_reel(
+                access_token=config.instagram_access_token,
+                ig_user_id=config.instagram_user_id,
+                video_path=output_path,
+                caption=caption_ig,
+            )
+            if result.get("success"):
+                video_id = result.get("media_id", "")
+                video_url = f"https://www.instagram.com/reel/{video_id}" if video_id else ""
+                _telemetry_log(f"인스타그램 릴스 업로드 완료: {video_id}", config)
+                if getattr(config, "enable_pinned_comment", False) and config.linktree_url and video_id:
+                    product_number = meta.get("product_number", "") or _pick_product_number_for_short(config)
+                    if product_number:
+                        comment_text = build_pinned_comment_with_voting(
+                            product_number, config.linktree_url, pinned_base=pinned
+                        )
+                        if add_instagram_comment(
+                            config.instagram_access_token, video_id, comment_text
+                        ):
+                            _telemetry_log(f"인스타 고정댓글 작성 완료 (제품 {product_number})", config)
+            else:
+                upload_error = result.get("error", "알 수 없는 오류")
+                _telemetry_log(f"인스타그램 업로드 실패: {upload_error}", config)
+                send_telegram_message(config.telegram_bot_token, config.telegram_admin_chat_id, f"❌ 인스타 업로드 실패: {upload_error}")
+        except Exception as ig_err:
+            upload_error = str(ig_err)
+            _telemetry_log(f"인스타그램 업로드 예외: {ig_err}", config)
+            send_telegram_message(config.telegram_bot_token, config.telegram_admin_chat_id, f"❌ 인스타 업로드 오류: {ig_err}")
+    elif config.enable_youtube_upload:
         _telemetry_log("유튜브 업로드 시작", config)
         _status_update(progress, status_box, 0.85, "유튜브 업로드")
         result = upload_video(
@@ -4068,6 +4322,17 @@ def _auto_jp_flow(config: AppConfig, progress, status_box, extra_hint: str = "")
                     _telemetry_log("썸네일 업로드 완료", config)
                 else:
                     _telemetry_log("썸네일 업로드 실패", config)
+            # 고정댓글 + 투표 유도 (제품번호, 링크트리)
+            if getattr(config, "enable_pinned_comment", False) and config.linktree_url and video_id:
+                product_number = meta.get("product_number", "") or _pick_product_number_for_short(config)
+                if product_number:
+                    comment_text = build_pinned_comment_with_voting(
+                        product_number, config.linktree_url, pinned_base=pinned
+                    )
+                    if insert_video_comment(config, video_id, comment_text):
+                        _telemetry_log(f"고정댓글 작성 완료 (제품 {product_number})", config)
+                    else:
+                        _telemetry_log("고정댓글 작성 실패 (youtube.force-ssl scope 필요)", config)
     else:
         _status_update(progress, status_box, 0.85, "유튜브 업로드(스킵)")
         _telemetry_log("유튜브 업로드 스킵", config)
@@ -4084,6 +4349,8 @@ def _auto_jp_flow(config: AppConfig, progress, status_box, extra_hint: str = "")
         "video_path": output_path,
         "youtube_video_id": video_id,
         "youtube_url": video_url,
+        "instagram_media_id": video_id if getattr(config, "enable_instagram_upload", False) else "",
+        "platform": "instagram" if getattr(config, "enable_instagram_upload", False) else "youtube",
         "status": "ok" if not upload_error else "error",
         "error": upload_error,
     }
@@ -4145,7 +4412,8 @@ def run_streamlit_app() -> None:
 
     st.sidebar.title("숏츠 자동화 스튜디오")
     st.sidebar.subheader("상태")
-    st.sidebar.write(f"자동 업로드: {'켜짐' if config.enable_youtube_upload else '꺼짐'}")
+    st.sidebar.write(f"인스타그램 업로드: {'켜짐' if getattr(config, 'enable_instagram_upload', False) else '꺼짐'}")
+    st.sidebar.write(f"유튜브 업로드: {'켜짐' if config.enable_youtube_upload else '꺼짐'}")
     st.sidebar.write(f"MoviePy 사용 가능: {'예' if MOVIEPY_AVAILABLE else '아니오'}")
     st.sidebar.write(f"BGM 모드: {config.bgm_mode or 'off'}")
     if config.pixabay_api_key:
@@ -4287,6 +4555,13 @@ def run_streamlit_app() -> None:
                         st.text(f"[{i+1}] {role}: {kw}")
 
             pinned_val = st.text_input("고정 댓글", value=_meta.get("pinned_comment", script.get("pinned_comment", "")))
+            product_number_val = st.text_input(
+                "제품번호 (링크트리/DM용, 비워두면 자동 선택)",
+                value=_meta.get("product_number", ""),
+                placeholder="예: 001",
+            )
+            if product_number_val:
+                _meta["product_number"] = product_number_val
 
             render_button = st.button("영상 만들기")
             if render_button:
@@ -4459,7 +4734,30 @@ def run_streamlit_app() -> None:
                     video_url = ""
                     upload_error = ""
                     upload_reason = ""
-                    if config.enable_youtube_upload:
+                    if getattr(config, "enable_instagram_upload", False) and config.instagram_access_token and config.instagram_user_id:
+                        _status_update(progress, status_box, 0.85, "인스타그램 릴스 업로드")
+                        try:
+                            from platforms.instagram import add_instagram_comment, upload_instagram_reel
+                            cap_ig = f"{video_title_val}\n\n{pinned_val}\n\n{hashtags_val}"
+                            result = upload_instagram_reel(
+                                config.instagram_access_token,
+                                config.instagram_user_id,
+                                output_path,
+                                caption=cap_ig,
+                            )
+                            if result.get("success"):
+                                video_id = result.get("media_id", "")
+                                video_url = f"https://www.instagram.com/reel/{video_id}" if video_id else ""
+                                if getattr(config, "enable_pinned_comment", False) and config.linktree_url and video_id:
+                                    pn = _meta.get("product_number", "") or _pick_product_number_for_short(config)
+                                    if pn:
+                                        comment_text = build_pinned_comment_with_voting(pn, config.linktree_url, pinned_base=pinned_val)
+                                        add_instagram_comment(config.instagram_access_token, video_id, comment_text)
+                            else:
+                                upload_error = result.get("error", "알 수 없는 오류")
+                        except Exception as e:
+                            upload_error = str(e)
+                    elif config.enable_youtube_upload:
                         _status_update(progress, status_box, 0.85, "유튜브 업로드")
                         result = upload_video(
                             config=config,
@@ -4487,6 +4785,13 @@ def run_streamlit_app() -> None:
                                     _telemetry_log("수동 썸네일 업로드 완료", config)
                                 else:
                                     _telemetry_log("수동 썸네일 업로드 실패", config)
+                            if getattr(config, "enable_pinned_comment", False) and config.linktree_url and video_id:
+                                product_number = _meta.get("product_number", "") or _pick_product_number_for_short(config)
+                                if product_number:
+                                    comment_text = build_pinned_comment_with_voting(
+                                        product_number, config.linktree_url, pinned_base=pinned_val
+                                    )
+                                    insert_video_comment(config, video_id, comment_text)
                     else:
                         _status_update(progress, status_box, 0.85, "유튜브 업로드(스킵)")
                     if video_url:
@@ -5220,7 +5525,29 @@ def run_batch(count: int, seed: str = "", beats: int = 7) -> None:
         _pinned_b = _meta_b.get("pinned_comment", script.get("pinned_comment", ""))
         upload_error = ""
         upload_reason = ""
-        if config.enable_youtube_upload:
+        if getattr(config, "enable_instagram_upload", False) and config.instagram_access_token and config.instagram_user_id:
+            try:
+                from platforms.instagram import add_instagram_comment, upload_instagram_reel
+                cap_b = f"{_title_b}\n\n{_pinned_b}\n\n" + " ".join(_hashtags_b)
+                result = upload_instagram_reel(
+                    config.instagram_access_token,
+                    config.instagram_user_id,
+                    output_path,
+                    caption=cap_b,
+                )
+                if result.get("success"):
+                    video_id = result.get("media_id", "")
+                    video_url = f"https://www.instagram.com/reel/{video_id}" if video_id else ""
+                    if getattr(config, "enable_pinned_comment", False) and config.linktree_url and video_id:
+                        pn = _meta_b.get("product_number", "") or _pick_product_number_for_short(config)
+                        if pn:
+                            ct = build_pinned_comment_with_voting(pn, config.linktree_url, pinned_base=_pinned_b)
+                            add_instagram_comment(config.instagram_access_token, video_id, ct)
+                else:
+                    upload_error = result.get("error", "알 수 없는 오류")
+            except Exception as e:
+                upload_error = str(e)
+        elif config.enable_youtube_upload:
             result = upload_video(
                 config=config,
                 file_path=output_path,
@@ -5244,6 +5571,13 @@ def run_batch(count: int, seed: str = "", beats: int = 7) -> None:
             else:
                 if thumb_path and video_id:
                     set_video_thumbnail(config, video_id, thumb_path)
+                if getattr(config, "enable_pinned_comment", False) and config.linktree_url and video_id:
+                    product_number = _meta_b.get("product_number", "") or _pick_product_number_for_short(config)
+                    if product_number:
+                        comment_text = build_pinned_comment_with_voting(
+                            product_number, config.linktree_url, pinned_base=_pinned_b
+                        )
+                        insert_video_comment(config, video_id, comment_text)
         log_row = {
             "date_jst": datetime.utcnow().strftime("%Y-%m-%d %H:%M:%S"),
             "title_ja": _title_b,
