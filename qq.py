@@ -1100,10 +1100,12 @@ def generate_script_jp(
             meta["bgm_mood"] = BGM_MOOD_ALIASES[mood_raw]
         if meta.get("bgm_mood") not in BGM_MOOD_CATEGORIES:
             meta["bgm_mood"] = "mystery_suspense"
-        if not meta.get("pinned_comment"):
-            meta["pinned_comment"] = random.choice(PINNED_COMMENT_VARIANTS)
-        if not meta.get("pinned_comment_ko"):
-            meta["pinned_comment_ko"] = meta["pinned_comment"]
+        # 고정댓글은 여러 버전 중 랜덤 선택 (LLM 생성 문장도 옵션에 포함)
+        comment_pool = list(PINNED_COMMENT_VARIANTS)
+        if meta.get("pinned_comment"):
+            comment_pool.append(str(meta["pinned_comment"]))
+        meta["pinned_comment"] = random.choice(comment_pool)
+        meta["pinned_comment_ko"] = meta.get("pinned_comment_ko") or meta["pinned_comment"]
         # 해시태그 최소 4개 유지
         if isinstance(meta.get("hashtags"), list) and len(meta["hashtags"]) < 4:
             defaults = ["#몰랐숏", "#폭로", "#충격", "#반전", "#미스터리"]
