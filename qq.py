@@ -629,14 +629,14 @@ def normalize_hashtags(tags: List[str]) -> List[str]:
     return cleaned
 
 
-def _compress_to_four_act(items: List[Dict[str, Any]]) -> List[Dict[str, Any]]:
-    order = ["hook", "conflict", "twist", "reaction"]
+def _compress_to_story_parts(items: List[Dict[str, Any]]) -> List[Dict[str, Any]]:
+    order = ["hook", "problem", "failure", "success", "point", "reaction"]
     picked: Dict[str, Dict[str, Any]] = {}
     for item in items:
         role = item.get("role")
         if role in order and role not in picked:
             picked[role] = item
-    if len(picked) == 4:
+    if len(picked) == len(order):
         compressed = [picked[r] for r in order]
         for idx, item in enumerate(compressed, start=1):
             item["order"] = idx
@@ -646,7 +646,7 @@ def _compress_to_four_act(items: List[Dict[str, Any]]) -> List[Dict[str, Any]]:
 
 def _check_story_quality(items: List[Dict[str, Any]]) -> List[str]:
     issues: List[str] = []
-    required = ["hook", "conflict", "twist", "reaction"]
+    required = ["hook", "problem", "failure", "success", "point", "reaction"]
     roles = {item.get("role") for item in items}
     missing = [r for r in required if r not in roles]
     if missing:
@@ -660,30 +660,56 @@ def _check_story_quality(items: List[Dict[str, Any]]) -> List[str]:
         return ""
 
     hook = _first_text("hook")
-    conflict = _first_text("conflict")
-    twist = _first_text("twist")
+    problem = _first_text("problem")
+    failure = _first_text("failure")
+    success = _first_text("success")
+    point = _first_text("point")
     reaction = _first_text("reaction")
 
     def _len_bad(text: str) -> bool:
-        return len(text) < 8 or len(text) > 50
+        return len(text) < 6 or len(text) > 60
 
     if _len_bad(hook):
         issues.append("Hook 길이 부적절")
-    if _len_bad(conflict):
-        issues.append("Conflict 길이 부적절")
-    if _len_bad(twist):
-        issues.append("Twist 길이 부적절")
+    if _len_bad(problem):
+        issues.append("Problem 길이 부적절")
+    if _len_bad(failure):
+        issues.append("Failure 길이 부적절")
+    if _len_bad(success):
+        issues.append("Success 길이 부적절")
+    if _len_bad(point):
+        issues.append("Point 길이 부적절")
     if _len_bad(reaction):
         issues.append("Reaction 길이 부적절")
 
-    if not re.search(r"[?？]", hook):
-        issues.append("Hook에 질문/도발 부족")
-    if not re.search(r"(罠|トリック|ごまかし|操作|詐欺|欺|ハッタリ|インチキ)", conflict):
-        issues.append("Conflict에 구체적 속임수 표현 부족")
-    if not re.search(r"(しかし|だが|でも|ところが|実は)", twist):
-        issues.append("Twist에 반전 연결어 부족")
-    if not re.search(r"(はぁ|マジ|やば|草|w|笑|あー|え)", reaction):
-        issues.append("Reaction에 감정 리액션 부족")
+    # 음슴체 체크 (대부분 문장 끝이 음/임/함)
+    def _ends_eum(text: str) -> bool:
+        return bool(re.search(r"(음|임|함)\\s*$", text))
+
+    for label, txt in [("hook", hook), ("problem", problem), ("failure", failure), ("success", success), ("point", point)]:
+        if txt and not _ends_eum(txt):
+            issues.append(f"{label} 음슴체 미준수")
+
+    # Hook 강한 시작
+    if not re.search(r"(미친|대박|개|충격)", hook):
+        issues.append("Hook 임팩트 부족")
+    # 위기/문제
+    if not re.search(r"(문제|위기|난관|고민)", problem):
+        issues.append("Problem 내용 약함")
+    # 시도/실패
+    if not re.search(r"(시도|해봤|했는데|실패|욕|반응|최악)", failure):
+        issues.append("Failure 내용 약함")
+    # 반전/성공
+    if not re.search(r"(근데|그런데|하지만|반전|성공|대박)", success):
+        issues.append("Success 반전 부족")
+    # 미친 포인트
+    if not re.search(r"(미친 포인트|핵심|포인트)", point):
+        issues.append("Point 문장 약함")
+    # 마지막 1인칭 혼잣말
+    if not re.search(r"(아\\.|아\\s|해야겠|크크|ㅋㅋ)", reaction):
+        issues.append("Reaction 1인칭 혼잣말 부족")
+    if reaction and not _ends_eum(reaction):
+        issues.append("Reaction 음슴체 미준수")
 
     return issues
 
@@ -943,54 +969,48 @@ JP_CONTENT_THEMES: List[str] = [
 ]
 
 # 시스템 프롬프트 (LLM에 직접 전달)
-JP_SHORTS_SYSTEM_PROMPT: str = """당신은 유튜브 쇼츠에서 조회수를 쓸어담는 '폭로 및 고발 전문 스토리텔러'입니다.
-주어진 주제에 대해 교과서적인 설명은 집어치우고, "대중이 속았다", "충격적인 사기극이었다"는 프레임으로 대본을 재구성하세요.
+JP_SHORTS_SYSTEM_PROMPT: str = """너는 유튜브 쇼츠 채널 '몰랐숏'의 메인 작가야. 너의 임무는 지루한 정보를 "미친 스토리텔링"으로 바꾸는 것임. 아래 규칙을 철저히 지켜서 대본을 작성함.
 
-### 1. 스토리텔링 4단계 공식 (엄격 준수)
-대본은 일본어 반말(친근하고 거친 구어체)로 작성해야 합니다.
-각 파트는 **짧고 임팩트 있게 1문장 (대략 10~25자)** 로 작성합니다.
+[스타일 가이드]
+1) 말투: 음슴체 필수. 문장 끝을 '~다/~요'가 아닌 '~음/~임/~함'으로 마무리함.
+2) 구어체 + 인터넷 용어 섞기: '미친 간식', '대박난', '개이득' 같은 표현을 자연스럽게 사용함.
+3) 마지막 한 마디는 1인칭 혼잣말: '아.. ~해야겠는데 크크'처럼 가볍게 끝냄.
+4) 교과서/장문/시적인 표현 금지. 바로 본론 시작, 썰 푸는 느낌 유지.
 
-1) Hook (0~5초): 도발/무시
-   - 시청자의 상식을 공격하세요. "아직도 이걸 믿어?", "당신은 속고 있습니다."
-   - Visual: 충격받은 얼굴, X표시, 경고장
-2) Conflict (5~20초): 사기 수법 공개
-   - 기업/인물이 대중을 어떻게 속였는지 '트릭'을 묘사. "꼼수", "함정" 같은 단어 사용.
-   - Visual: 돈 다발, 사악한 웃음, 조작된 그래프
-3) Twist (20~45초): 진실의 반전
-   - "하지만 진실은 정반대였음." 결정적 증거 제시.
-   - Visual: 깨지는 유리, 반전되는 화면, 진짜 데이터
-4) Reaction Outro (45~60초): 1인칭 혼잣말
-   - 촬영 끄기 직전에 혼자 중얼거리는 느낌. "구독해주세요" 금지.
+[스토리 아크: 반드시 6단계]
+1) Hook: '~~해서 대박난 미친 ~~' 같은 강한 한 줄로 시작함.
+2) 위기/문제: 주인공의 딜레마/문제를 짧게 설명함.
+3) 시도와 실패: 1차 시도 후 반응이 최악이었음을 보여줌.
+4) 반전/성공: 뜻밖의 계기/사용법으로 대성공 전환함.
+5) 미친 포인트: 성공의 핵심을 '진짜 미친 포인트는...'으로 요약함.
+6) Reaction Outro: 1인칭 혼잣말로 마무리함. (예: '아.. 커피 위에 올려 먹어야겠는데 크크')
 
-### 2. 자막/반응 유도 규칙
-- script_ja는 **짧고 임팩트 있게** (한 문장, 너무 길게 쓰지 말 것).
-- meta.hashtags는 4~6개. 감정/논란/검증을 자극하는 태그 혼합.
-- meta.pinned_comment는 시청자 반응을 유도하는 질문형 한 줄(일본어 반말).
-- meta.pinned_comment_ko는 위 문장의 한국어 번역.
+[작성 금지]
+- "여러분 안녕하세요" 같은 인사 금지.
+- 교과서 설명/긴 문장 금지.
+- 감성 과다 금지. 철저히 썰톤 유지.
 
-### 3. 키워드 규칙
-visual_search_keyword는 Pexels에서 실제 영상을 찾을 수 있도록 **구체적인 명사(영어)** 위주로 작성.
-추상적 표현 금지. 가능하면 고유명사/장소/연도/사물 포함.
+[예시 톤 참고]
+입력: 스트룹와플의 기원
+출력: 음식 찌꺼기를 뭉쳐서 대박난 미친 간식임. 네덜란드 한 제과점은 매일 깨진 쿠키랑 시럽 찌꺼기가 쌓이는 고민이 있었음. 버리긴 아깝고 팔긴 애매해서 뭉쳐 구워 팔기 시작함. 그게 스트룹와플인데 초기 반응 최악이었음. "남은 거 재활용 아니냐"며 욕만 먹음. 그래서 전략 바꿔서 갓 구운 냄새로 밀어붙였는데, 너무 딱딱해서 먹기 힘듦. 그런데 어느 날 커피 위에 올려놨더니 시럽이 녹으면서 말랑해지는 걸 발견하고 국룰이 돼버림. 진짜 미친 포인트는 쓴 커피랑 단맛이 찰떡궁합이라 무한 흡입하게 된다는 거임. 아.. 커피 위에 올려서 먹어봐야겠는데 크크.
 
-### 4. JSON 출력 형식 (엄격 준수)
+[JSON 출력 형식]
 {
   "meta": {
     "topic_en": "주제 키워드 (영어)",
-    "title_ja": "일본어 제목 (클릭 유도형)",
+    "title_ja": "한국어 제목 (클릭 유도형)",
     "hashtags": ["#태그1", "#태그2", "#태그3"],
-    "pinned_comment": "고정 댓글 (반응 유도 질문)",
-    "pinned_comment_ko": "고정 댓글 한국어 번역",
+    "pinned_comment": "고정 댓글 (반응 유도 질문, 한국어)",
+    "pinned_comment_ko": "고정 댓글 한국어 번역 (동일 문장 가능)",
     "bgm_mood": "mystery_suspense" 또는 "fast_exciting"
   },
   "story_timeline": [
-    {
-      "order": 1,
-      "role": "hook",
-      "script_ja": "일본어 대본 (도발)",
-      "script_ko": "한국어 번역 (확인용)",
-      "visual_search_keyword": "구체적인 영어 검색어"
-    },
-    ... (Conflict, Twist, Reaction 순서대로 작성) ...
+    {"order": 1, "role": "hook", "script_ja": "한 문장(음슴체)", "script_ko": "한 문장(음슴체)", "visual_search_keyword": "구체적인 영어 검색어"},
+    {"order": 2, "role": "problem", "script_ja": "한 문장(음슴체)", "script_ko": "한 문장(음슴체)", "visual_search_keyword": "구체적인 영어 검색어"},
+    {"order": 3, "role": "failure", "script_ja": "한 문장(음슴체)", "script_ko": "한 문장(음슴체)", "visual_search_keyword": "구체적인 영어 검색어"},
+    {"order": 4, "role": "success", "script_ja": "한 문장(음슴체)", "script_ko": "한 문장(음슴체)", "visual_search_keyword": "구체적인 영어 검색어"},
+    {"order": 5, "role": "point", "script_ja": "한 문장(음슴체, '미친 포인트' 포함)", "script_ko": "한 문장(음슴체)", "visual_search_keyword": "구체적인 영어 검색어"},
+    {"order": 6, "role": "reaction", "script_ja": "1인칭 혼잣말(음슴체)", "script_ko": "1인칭 혼잣말(음슴체)", "visual_search_keyword": "구체적인 영어 검색어"}
   ]
 }
 """
@@ -1009,8 +1029,9 @@ def generate_script_jp(
 
     theme_pool = "\n".join(f"- {t}" for t in JP_CONTENT_THEMES)
     user_text = (
-        "아래 주제 풀에서 영감을 받아, 전 세계적으로 검증된 미스터리/브랜드 비화/기이한 사건을 선택하거나 새로 발굴하세요.\n"
-        "반드시 Hook → Conflict → Twist → Reaction의 4단 구조를 지키고, 순수 JSON만 출력하세요.\n\n"
+        "아래 주제 풀에서 영감을 받아, 몰랐숏 톤으로 새로운 대본을 작성하세요.\n"
+        "반드시 Hook → 위기/문제 → 시도와 실패 → 반전/성공 → 미친 포인트 → Reaction Outro의 6단 구조를 지키고,\n"
+        "음슴체/구어체/인터넷 용어를 섞어 작성한 뒤 순수 JSON만 출력하세요.\n\n"
         f"[주제 풀 예시]\n{theme_pool}\n\n"
         + (f"[추가 힌트]\n{extra_hint}\n\n" if extra_hint else "")
         + "위 시스템 프롬프트의 규칙과 JSON 포맷을 완벽히 지켜 순수 JSON만 출력하세요."
@@ -1069,12 +1090,12 @@ def generate_script_jp(
         if meta.get("bgm_mood") not in BGM_MOOD_CATEGORIES:
             meta["bgm_mood"] = "mystery_suspense"
         if not meta.get("pinned_comment"):
-            meta["pinned_comment"] = "これ、信じる？それとも…？コメントで教えて。"
+            meta["pinned_comment"] = "너 이거 믿음? 댓글로 알려줘."
         if not meta.get("pinned_comment_ko"):
-            meta["pinned_comment_ko"] = "이거 믿어? 댓글로 말해줘."
+            meta["pinned_comment_ko"] = "너 이거 믿음? 댓글로 알려줘."
         # 해시태그 최소 4개 유지
         if isinstance(meta.get("hashtags"), list) and len(meta["hashtags"]) < 4:
-            defaults = ["#衝撃", "#暴露", "#検証", "#裏話", "#都市伝説"]
+            defaults = ["#몰랐숏", "#폭로", "#충격", "#반전", "#미스터리"]
             for tag in defaults:
                 if len(meta["hashtags"]) >= 4:
                     break
@@ -1083,8 +1104,15 @@ def generate_script_jp(
 
         # story_timeline 정렬 및 검증
         normalized: List[Dict[str, Any]] = []
-        allowed_roles = {"hook", "conflict", "twist", "reaction"}
-        order_map = {"hook": 1, "conflict": 2, "twist": 3, "reaction": 4}
+        allowed_roles = {"hook", "problem", "failure", "success", "point", "reaction"}
+        order_map = {
+            "hook": 1,
+            "problem": 2,
+            "failure": 3,
+            "success": 4,
+            "point": 5,
+            "reaction": 6,
+        }
         for idx, raw in enumerate(story_list or []):
             if not isinstance(raw, dict):
                 continue
@@ -1092,12 +1120,18 @@ def generate_script_jp(
             if role not in allowed_roles:
                 if "reaction" in role or "outro" in role:
                     role = "reaction"
-                elif role.startswith("twist"):
-                    role = "twist"
+                elif role.startswith("twist") or "success" in role or "반전" in role:
+                    role = "success"
+                elif "failure" in role or "실패" in role:
+                    role = "failure"
+                elif "problem" in role or "위기" in role:
+                    role = "problem"
+                elif "point" in role or "포인트" in role:
+                    role = "point"
                 elif role == "hook":
                     role = "hook"
                 else:
-                    role = "conflict" if idx > 0 else "hook"
+                    role = "problem" if idx > 0 else "hook"
             order_val = raw.get("order")
             if not isinstance(order_val, int):
                 order_val = order_map.get(role, idx + 1)
@@ -1119,7 +1153,7 @@ def generate_script_jp(
             )
 
         normalized = sorted(normalized, key=lambda x: x.get("order", 99))
-        normalized = _compress_to_four_act(normalized)
+        normalized = _compress_to_story_parts(normalized)
         issues = _check_story_quality(normalized)
         if issues:
             feedback = " / ".join(issues)
@@ -1149,7 +1183,15 @@ def _script_to_beats(script: Dict[str, Any]) -> List[str]:
     """generate_script_jp 결과(새 스키마)를 TTS/영상용 텍스트 리스트로 변환."""
     timeline = _get_story_timeline(script)
     if timeline:
-        return [item.get("script_ja", "") for item in timeline if item.get("script_ja")]
+        texts: List[str] = []
+        for item in timeline:
+            ja = item.get("script_ja", "")
+            ko = item.get("script_ko", "")
+            if ja:
+                texts.append(ja)
+            elif ko:
+                texts.append(ko)
+        return texts
     # 구 스키마 fallback (하위 호환)
     texts: List[str] = []
     hook = script.get("hook_3_sec", "")
@@ -1207,9 +1249,11 @@ def _script_to_roles(script: Dict[str, Any]) -> List[str]:
             role = str(item.get("role", "")).strip().lower()
             if "reaction" in role or "outro" in role:
                 role = "reaction"
-            elif role.startswith("twist"):
-                role = "twist"
-            roles.append(role or "conflict")
+            elif role.startswith("twist") or "success" in role or "반전" in role:
+                role = "success"
+            elif "conflict" in role:
+                role = "problem"
+            roles.append(role or "problem")
         return roles
     # 구 스키마 fallback
     texts = _script_to_beats(script)
