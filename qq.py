@@ -26,6 +26,7 @@ import gspread
 from google.oauth2.credentials import Credentials
 from googleapiclient.discovery import build
 from googleapiclient.http import MediaFileUpload
+from googleapiclient.errors import HttpError, ResumableUploadError
 
 MOVIEPY_AVAILABLE = True
 MOVIEPY_ERROR = ""
@@ -2745,6 +2746,28 @@ def append_publish_log(config: AppConfig, row: Dict[str, str]) -> None:
     worksheet.append_row(values, value_input_option="USER_ENTERED")
 
 
+def _parse_youtube_error(err: Exception) -> Tuple[str, str]:
+    reason = ""
+    message = str(err)
+    content = getattr(err, "content", None)
+    if content:
+        try:
+            text = content.decode("utf-8", errors="ignore") if isinstance(content, (bytes, bytearray)) else str(content)
+            data = json.loads(text)
+            payload = data.get("error", {})
+            errors = payload.get("errors", []) if isinstance(payload, dict) else []
+            if errors:
+                reason = errors[0].get("reason", "") or reason
+                message = errors[0].get("message", "") or message
+            if isinstance(payload, dict) and payload.get("message"):
+                message = payload.get("message", message)
+        except Exception:
+            pass
+    if not reason and "uploadLimitExceeded" in message:
+        reason = "uploadLimitExceeded"
+    return reason, message
+
+
 def upload_video(
     config: AppConfig,
     file_path: str,
@@ -2774,9 +2797,15 @@ def upload_video(
     }
     media = MediaFileUpload(file_path, chunksize=-1, resumable=True)
     request = youtube.videos().insert(part="snippet,status", body=body, media_body=media)
-    response = request.execute()
-    video_id = response.get("id", "")
-    return {"video_id": video_id, "video_url": f"https://www.youtube.com/watch?v={video_id}"}
+    try:
+        response = request.execute()
+        video_id = response.get("id", "")
+        return {"video_id": video_id, "video_url": f"https://www.youtube.com/watch?v={video_id}"}
+    except (HttpError, ResumableUploadError) as err:
+        reason, message = _parse_youtube_error(err)
+        return {"video_id": "", "video_url": "", "error": message, "error_reason": reason}
+    except Exception as err:
+        return {"video_id": "", "video_url": "", "error": str(err), "error_reason": "unknown"}
 
 
 def set_video_thumbnail(config: AppConfig, video_id: str, thumbnail_path: str) -> bool:
@@ -3699,6 +3728,8 @@ def _auto_jp_flow(config: AppConfig, progress, status_box, extra_hint: str = "")
     # ── 유튜브 업로드 ─────────────────────────────────────
     video_id = ""
     video_url = ""
+    upload_error = ""
+    upload_reason = ""
     if config.enable_youtube_upload:
         _telemetry_log("유튜브 업로드 시작", config)
         _status_update(progress, status_box, 0.85, "유튜브 업로드")
@@ -3709,14 +3740,26 @@ def _auto_jp_flow(config: AppConfig, progress, status_box, extra_hint: str = "")
             description=description,
             tags=hashtags,
         )
+        upload_error = str(result.get("error", "") or "").strip()
+        upload_reason = str(result.get("error_reason", "") or "").strip()
         video_id = result.get("video_id", "")
         video_url = result.get("video_url", "")
-        _telemetry_log(f"유튜브 업로드 완료: {video_id}", config)
-        if thumb_path and video_id:
-            if set_video_thumbnail(config, video_id, thumb_path):
-                _telemetry_log("썸네일 업로드 완료", config)
-            else:
-                _telemetry_log("썸네일 업로드 실패", config)
+        if upload_error:
+            extra_hint_msg = ""
+            if upload_reason == "uploadLimitExceeded":
+                extra_hint_msg = "유튜브 업로드 한도 초과(24시간 제한 가능). 잠시 후 다시 시도하거나 다른 계정으로 업로드하세요."
+            err_text = f"❌ 유튜브 업로드 실패: {upload_error}"
+            if extra_hint_msg:
+                err_text += f"\n{extra_hint_msg}"
+            _telemetry_log(err_text, config)
+            send_telegram_message(config.telegram_bot_token, config.telegram_admin_chat_id, err_text)
+        else:
+            _telemetry_log(f"유튜브 업로드 완료: {video_id}", config)
+            if thumb_path and video_id:
+                if set_video_thumbnail(config, video_id, thumb_path):
+                    _telemetry_log("썸네일 업로드 완료", config)
+                else:
+                    _telemetry_log("썸네일 업로드 실패", config)
     else:
         _status_update(progress, status_box, 0.85, "유튜브 업로드(스킵)")
         _telemetry_log("유튜브 업로드 스킵", config)
@@ -3733,8 +3776,8 @@ def _auto_jp_flow(config: AppConfig, progress, status_box, extra_hint: str = "")
         "video_path": output_path,
         "youtube_video_id": video_id,
         "youtube_url": video_url,
-        "status": "ok",
-        "error": "",
+        "status": "ok" if not upload_error else "error",
+        "error": upload_error,
     }
     try:
         append_publish_log(config, log_row)
@@ -4069,6 +4112,8 @@ def run_streamlit_app() -> None:
                             _telemetry_log(f"수동 썸네일 생성 실패: {thumb_err}", config)
                     video_id = ""
                     video_url = ""
+                    upload_error = ""
+                    upload_reason = ""
                     if config.enable_youtube_upload:
                         _status_update(progress, status_box, 0.85, "유튜브 업로드")
                         result = upload_video(
@@ -4078,13 +4123,25 @@ def run_streamlit_app() -> None:
                             description=pinned_val + "\n\n" + hashtags_val,
                             tags=hashtags_val.split(),
                         )
+                        upload_error = str(result.get("error", "") or "").strip()
+                        upload_reason = str(result.get("error_reason", "") or "").strip()
                         video_id = result.get("video_id", "")
                         video_url = result.get("video_url", "")
-                        if thumb_path and video_id:
-                            if set_video_thumbnail(config, video_id, thumb_path):
-                                _telemetry_log("수동 썸네일 업로드 완료", config)
-                            else:
-                                _telemetry_log("수동 썸네일 업로드 실패", config)
+                        if upload_error:
+                            extra_hint_msg = ""
+                            if upload_reason == "uploadLimitExceeded":
+                                extra_hint_msg = "유튜브 업로드 한도 초과(24시간 제한 가능). 잠시 후 다시 시도하세요."
+                            err_text = f"❌ 유튜브 업로드 실패: {upload_error}"
+                            if extra_hint_msg:
+                                err_text += f"\n{extra_hint_msg}"
+                            _telemetry_log(err_text, config)
+                            send_telegram_message(config.telegram_bot_token, config.telegram_admin_chat_id, err_text)
+                        else:
+                            if thumb_path and video_id:
+                                if set_video_thumbnail(config, video_id, thumb_path):
+                                    _telemetry_log("수동 썸네일 업로드 완료", config)
+                                else:
+                                    _telemetry_log("수동 썸네일 업로드 실패", config)
                     else:
                         _status_update(progress, status_box, 0.85, "유튜브 업로드(스킵)")
                     if video_url:
@@ -4108,8 +4165,8 @@ def run_streamlit_app() -> None:
                         "video_path": output_path,
                         "youtube_video_id": video_id,
                         "youtube_url": video_url,
-                        "status": "ok",
-                        "error": "",
+                        "status": "ok" if not upload_error else "error",
+                        "error": upload_error,
                     }
                     try:
                         append_publish_log(config, log_row)
@@ -4783,6 +4840,8 @@ def run_batch(count: int, seed: str = "", beats: int = 7) -> None:
         _title_b = _meta_b.get("title_ja", _meta_b.get("title", script.get("video_title", "")))
         _hashtags_b = _meta_b.get("hashtags", script.get("hashtags", []))
         _pinned_b = _meta_b.get("pinned_comment", script.get("pinned_comment", ""))
+        upload_error = ""
+        upload_reason = ""
         if config.enable_youtube_upload:
             result = upload_video(
                 config=config,
@@ -4791,10 +4850,22 @@ def run_batch(count: int, seed: str = "", beats: int = 7) -> None:
                 description=_pinned_b + "\n\n" + " ".join(_hashtags_b),
                 tags=_hashtags_b,
             )
+            upload_error = str(result.get("error", "") or "").strip()
+            upload_reason = str(result.get("error_reason", "") or "").strip()
             video_id = result.get("video_id", "")
             video_url = result.get("video_url", "")
-            if thumb_path and video_id:
-                set_video_thumbnail(config, video_id, thumb_path)
+            if upload_error:
+                extra_hint_msg = ""
+                if upload_reason == "uploadLimitExceeded":
+                    extra_hint_msg = "유튜브 업로드 한도 초과(24시간 제한 가능)."
+                err_text = f"❌ 유튜브 업로드 실패: {upload_error}"
+                if extra_hint_msg:
+                    err_text += f"\n{extra_hint_msg}"
+                _telemetry_log(err_text, config)
+                send_telegram_message(config.telegram_bot_token, config.telegram_admin_chat_id, err_text)
+            else:
+                if thumb_path and video_id:
+                    set_video_thumbnail(config, video_id, thumb_path)
         log_row = {
             "date_jst": datetime.utcnow().strftime("%Y-%m-%d %H:%M:%S"),
             "title_ja": _title_b,
@@ -4806,8 +4877,8 @@ def run_batch(count: int, seed: str = "", beats: int = 7) -> None:
             "video_path": output_path,
             "youtube_video_id": video_id,
             "youtube_url": video_url,
-            "status": "ok",
-            "error": "",
+            "status": "ok" if not upload_error else "error",
+            "error": upload_error,
         }
         try:
             append_publish_log(config, log_row)
