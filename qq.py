@@ -1554,10 +1554,13 @@ def render_video(
 
     # BGM 처리
     if bgm_path and os.path.exists(bgm_path):
-        bgm_clip = AudioFileClip(bgm_path).volumex(bgm_volume)
-        if bgm_clip.duration < audio_clip.duration:
-            bgm_clip = bgm_clip.loop(duration=audio_clip.duration)
-        bgm_clip = bgm_clip.set_duration(audio_clip.duration)
+        from moviepy.editor import concatenate_audioclips
+        bgm_raw = AudioFileClip(bgm_path).volumex(bgm_volume)
+        if bgm_raw.duration < audio_clip.duration:
+            n_loops = int(audio_clip.duration / bgm_raw.duration) + 2
+            bgm_clip = concatenate_audioclips([bgm_raw] * n_loops).subclip(0, audio_clip.duration)
+        else:
+            bgm_clip = bgm_raw.subclip(0, audio_clip.duration)
         audio = CompositeAudioClip([audio_clip, bgm_clip])
     else:
         audio = audio_clip
