@@ -481,6 +481,9 @@ class AppConfig:
     highlight_clip_sample_fps: float
     highlight_clip_max_scan_sec: float
     ab_test_enabled: bool
+    background_ab_epsilon: float
+    background_ab_lookback: int
+    background_ab_max_sample: int
     retry_pending_uploads: bool
     pending_uploads_path: str
     youtube_api_key: str
@@ -602,6 +605,9 @@ def load_config() -> AppConfig:
         highlight_clip_sample_fps=float(_get_secret("HIGHLIGHT_CLIP_SAMPLE_FPS", "2") or 2),
         highlight_clip_max_scan_sec=float(_get_secret("HIGHLIGHT_CLIP_MAX_SCAN_SEC", "900") or 900),
         ab_test_enabled=_get_bool("AB_TEST_ENABLED", True),
+        background_ab_epsilon=float(_get_secret("BACKGROUND_AB_EPSILON", "0.2") or 0.2),
+        background_ab_lookback=int(_get_secret("BACKGROUND_AB_LOOKBACK", "30") or 30),
+        background_ab_max_sample=int(_get_secret("BACKGROUND_AB_MAX_SAMPLE", "12") or 12),
         retry_pending_uploads=_get_bool("RETRY_PENDING_UPLOADS", True),
         pending_uploads_path=pending_uploads_path,
         youtube_api_key=(_get_secret("YOUTUBE_API_KEY", "") or "").strip(),
@@ -744,7 +750,7 @@ def _check_story_quality(items: List[Dict[str, Any]]) -> List[str]:
     reaction = _first_text("reaction")
 
     def _len_bad(text: str) -> bool:
-        return len(text) < 6 or len(text) > 60
+        return len(text) < 6 or len(text) > 80
 
     if _len_bad(hook):
         issues.append("Hook 길이 부적절")
@@ -759,34 +765,32 @@ def _check_story_quality(items: List[Dict[str, Any]]) -> List[str]:
     if _len_bad(reaction):
         issues.append("Reaction 길이 부적절")
 
-    # 음슴체 체크 (대부분 문장 끝이 음/임/함)
-    def _ends_eum(text: str) -> bool:
-        return bool(re.search(r"(음|임|함)\\s*$", text))
+    # 일본어 여부(히라가나/カタカナ/一部漢字) 간단 체크
+    def _has_japanese(text: str) -> bool:
+        return bool(re.search(r"[\\u3040-\\u30ff]", text))
 
-    for label, txt in [("hook", hook), ("problem", problem), ("failure", failure), ("success", success), ("point", point)]:
-        if txt and not _ends_eum(txt):
-            issues.append(f"{label} 음슴체 미준수")
+    for label, txt in [("hook", hook), ("problem", problem), ("failure", failure), ("success", success), ("point", point), ("reaction", reaction)]:
+        if txt and not _has_japanese(txt):
+            issues.append(f"{label} 일본어 느낌 부족")
 
-    # Hook 강한 시작 (레전드/충격 키워드 포함)
-    if not re.search(r"(미친|대박|개|충격|레전드|역대급|실화)", hook):
+    # Hook 임팩트
+    if not re.search(r"(衝撃|ヤバ|マジ|嘘|閲覧注意|知らない|やべ|危険|99%)", hook):
         issues.append("Hook 임팩트 부족")
-    # 위기/문제 (속임/함정/조작 계열 포함)
-    if not re.search(r"(문제|위기|난관|고민|함정|꼼수|조작|사기|속임|뒤통수|논란)", problem):
+    # Problem: 裏側/問題系
+    if not re.search(r"(問題|裏|秘密|闇|危険|違和感|炎上|黒歴史)", problem):
         issues.append("Problem 내용 약함")
-    # 시도/실패 (실패/욕/반응 최악)
-    if not re.search(r"(시도|해봤|했는데|실패|욕|반응|최악|망함|폭망)", failure):
+    # Failure: 실패/비판
+    if not re.search(r"(失敗|炎上|批判|最悪|叩かれ|伸びなかった|滑った)", failure):
         issues.append("Failure 내용 약함")
-    # 반전/성공 (정반대/알고보니)
-    if not re.search(r"(근데|그런데|하지만|반전|정반대|알고 ?보니|실화|대박)", success):
+    # Success: 반전/성공
+    if not re.search(r"(でも|ところが|実は|まさか|逆転|成功|大ヒット)", success):
         issues.append("Success 반전 부족")
-    # 미친 포인트
-    if not re.search(r"(미친 포인트|핵심|포인트|결정타)", point):
+    # Point: 핵심
+    if not re.search(r"(ポイント|理由|核心|決め手)", point):
         issues.append("Point 문장 약함")
-    # 마지막 1인칭 혼잣말
-    if not re.search(r"(아\\.|아\\s|해야겠|크크|ㅋㅋ)", reaction):
-        issues.append("Reaction 1인칭 혼잣말 부족")
-    if reaction and not _ends_eum(reaction):
-        issues.append("Reaction 음슴체 미준수")
+    # Reaction: 1인칭
+    if not re.search(r"(俺|私|やば|マジ|草|w|笑)", reaction):
+        issues.append("Reaction 1인칭/감정 부족")
 
     return issues
 
@@ -1033,71 +1037,66 @@ BGM_MOOD_ALIASES: Dict[str, str] = {
 
 # 롤렛 주제 풀 — LLM이 이 리스트를 참고해 매번 새 주제 생성
 JP_CONTENT_THEMES: List[str] = [
-    "코카콜라 초기 레시피에 실제로 코카인 성분이 있었던 시절",
-    "맥도날드 형제와 레이 크록의 계약 배신",
-    "타이레놀 청산가리 사건과 브랜드 위기관리",
-    "DB 쿠퍼 항공기 납치 미제 사건",
-    "아폴로 13호 산소탱크 폭발과 기적의 귀환",
-    "폭스바겐 디젤게이트 조작 스캔들",
-    "펩시 챌린지 블라인드 테스트의 반전 결과",
-    "에베레스트 1996 참사와 잘못된 판단들",
-    "보스턴 당밀 대홍수(1919)의 의외의 참사",
-    "메리 셀레스트호 유령선 미스터리",
+    "コカ・コーラ初期レシピにコカイン成分が含まれていた時代",
+    "マクドナルド兄弟とレイ・クロックの契約裏切り",
+    "タイレノール青酸事件とブランド危機管理",
+    "DBクーパー航空機ハイジャック未解決事件",
+    "アポロ13号 酸素タンク爆発と奇跡の帰還",
+    "フォルクスワーゲン ディーゼルゲート不正",
+    "ペプシチャレンジのブラインドテスト反転結果",
+    "エベレスト1996年遭難と判断ミス",
+    "ボストン糖蜜大洪水(1919)の意外な惨事",
+    "メアリー・セレスト号の幽霊船ミステリー",
 ]
 
 # 반응형 고정댓글 후보 (랜덤 선택)
 PINNED_COMMENT_VARIANTS: List[str] = [
-    "너 이거 믿음? 댓글로 알려줘.",
-    "이거 보고도 믿는 사람 있음? 의견 ㄱ",
-    "이게 진짜였다고 생각함? 반박 환영.",
-    "너라면 속았음? 솔직히 말해줘.",
-    "이거 실화라고 봄? 댓글 부탁함.",
+    "これ信じる？コメントで教えて。",
+    "あなたなら騙される？正直に教えて。",
+    "実はこれ知ってた？体験談ちょうだい。",
+    "どっち派？意見で揉めよう。",
+    "これガチだと思う？反論歓迎。",
 ]
 
 # 시스템 프롬프트 (LLM에 직접 전달)
-JP_SHORTS_SYSTEM_PROMPT: str = """너는 유튜브 쇼츠 채널 '몰랐숏'의 메인 작가야. 너의 임무는 지루한 정보를 "미친 스토리텔링"으로 바꾸는 것임. 아래 규칙을 철저히 지켜서 대본을 작성함.
+JP_SHORTS_SYSTEM_PROMPT: str = """あなたは日本のYouTube Shortsトレンドを熟知した『現代ミステリー／裏話ストーリーテラー』。視聴者が1秒も離脱しないテンポで書け。
 
-[스타일 가이드]
-1) 말투: 음슴체 필수. 문장 끝을 '~다/~요'가 아닌 '~음/~임/~함'으로 마무리함.
-2) 구어체 + 인터넷 용어 섞기: '미친 간식', '대박난', '개이득', '레전드급', '역대급' 같은 표현을 자연스럽게 사용함.
-3) 마지막 한 마디는 1인칭 혼잣말: '아.. ~해야겠는데 크크'처럼 가볍게 끝냄.
-4) 교과서/장문/시적인 표현 금지. 바로 본론 시작, 썰 푸는 느낌 유지.
-5) 강도: Hook/Problem/Success는 센 단어로 밀어붙임. 충격/함정/조작/정반대 느낌 살림.
+[スタイル]
+1) 口調: 日本語のタメ口。です/ます禁止。
+2) テンポ最優先。短文・辛口・シニカルに。
+3) 最後は必ず1人称の独り言で締める。
+4) 事実は「意外性・裏側・衝撃」に寄せる。
 
-[스토리 아크: 반드시 6단계]
-1) Hook: '~~해서 대박난 미친 ~~', '이거 실화냐' 같은 강한 한 줄로 시작함.
-2) 위기/문제: 함정/꼼수/조작/논란 같은 표현을 섞어 짧게 때림.
-3) 시도와 실패: 1차 시도 후 반응이 최악/폭망이었음을 보여줌.
-4) 반전/성공: "근데 알고 보니 정반대였음" 같은 반전 문장 필수.
-5) 미친 포인트: 성공의 핵심을 '진짜 미친 포인트는...'으로 요약함.
-6) Reaction Outro: 1인칭 혼잣말로 마무리함. (예: '아.. 커피 위에 올려 먹어야겠는데 크크')
+[ストーリー構成: 6段階]
+1) Hook: 目を止める挑発。例「まだこれ使ってるの？」
+2) Problem: 裏側の問題／違和感を提示。
+3) Failure: 最初は失敗・炎上・批判。
+4) Success: でも/ところが/実は…で逆転。
+5) Point: 成功の核心を一言で言い切る。
+6) Reaction: 1人称の独り言で締める。
 
-[작성 금지]
-- "여러분 안녕하세요" 같은 인사 금지.
-- 교과서 설명/긴 문장 금지.
-- 감성 과다 금지. 철저히 썰톤 유지.
+[注意]
+- 句読点少なめ・テンポ重視
+- 長文禁止、1行を短く
+- script_jaは必ず日本語。script_koは確認用の韓国語訳
 
-[예시 톤 참고]
-입력: 스트룹와플의 기원
-출력: 음식 찌꺼기를 뭉쳐서 대박난 미친 간식임. 네덜란드 한 제과점은 매일 깨진 쿠키랑 시럽 찌꺼기가 쌓이는 고민이 있었음. 버리긴 아깝고 팔긴 애매해서 뭉쳐 구워 팔기 시작함. 그게 스트룹와플인데 초기 반응 최악이었음. "남은 거 재활용 아니냐"며 욕만 먹음. 그래서 전략 바꿔서 갓 구운 냄새로 밀어붙였는데, 너무 딱딱해서 먹기 힘듦. 그런데 어느 날 커피 위에 올려놨더니 시럽이 녹으면서 말랑해지는 걸 발견하고 국룰이 돼버림. 진짜 미친 포인트는 쓴 커피랑 단맛이 찰떡궁합이라 무한 흡입하게 된다는 거임. 아.. 커피 위에 올려서 먹어봐야겠는데 크크.
-
-[JSON 출력 형식]
+[JSON出力フォーマット]
 {
   "meta": {
-    "topic_en": "주제 키워드 (영어)",
-    "title_ja": "한국어 제목 (클릭 유도형)",
-    "hashtags": ["#태그1", "#태그2", "#태그3"],
-    "pinned_comment": "고정 댓글 (반응 유도 질문, 한국어)",
-    "pinned_comment_ko": "고정 댓글 한국어 번역 (동일 문장 가능)",
-    "bgm_mood": "mystery_suspense" 또는 "fast_exciting"
+    "topic_en": "テーマ英語",
+    "title_ja": "日本語タイトル(釣り/衝撃系)",
+    "hashtags": ["#雑学", "#裏話", "#都市伝説", "#衝撃", "#ミステリー"],
+    "pinned_comment": "視聴者参加を促す日本語質問",
+    "pinned_comment_ko": "上の日本語コメントの韓国語訳",
+    "bgm_mood": "mystery_suspense" または "fast_exciting"
   },
   "story_timeline": [
-    {"order": 1, "role": "hook", "script_ja": "한 문장(음슴체)", "script_ko": "한 문장(음슴체)", "visual_search_keyword": "구체적인 영어 검색어"},
-    {"order": 2, "role": "problem", "script_ja": "한 문장(음슴체)", "script_ko": "한 문장(음슴체)", "visual_search_keyword": "구체적인 영어 검색어"},
-    {"order": 3, "role": "failure", "script_ja": "한 문장(음슴체)", "script_ko": "한 문장(음슴체)", "visual_search_keyword": "구체적인 영어 검색어"},
-    {"order": 4, "role": "success", "script_ja": "한 문장(음슴체)", "script_ko": "한 문장(음슴체)", "visual_search_keyword": "구체적인 영어 검색어"},
-    {"order": 5, "role": "point", "script_ja": "한 문장(음슴체, '미친 포인트' 포함)", "script_ko": "한 문장(음슴체)", "visual_search_keyword": "구체적인 영어 검색어"},
-    {"order": 6, "role": "reaction", "script_ja": "1인칭 혼잣말(음슴체)", "script_ko": "1인칭 혼잣말(음슴체)", "visual_search_keyword": "구체적인 영어 검색어"}
+    {"order": 1, "role": "hook", "script_ja": "日本語タメ口", "script_ko": "韓国語訳", "visual_search_keyword": "英語検索キーワード"},
+    {"order": 2, "role": "problem", "script_ja": "日本語タメ口", "script_ko": "韓国語訳", "visual_search_keyword": "英語検索キーワード"},
+    {"order": 3, "role": "failure", "script_ja": "日本語タメ口", "script_ko": "韓国語訳", "visual_search_keyword": "英語検索キーワード"},
+    {"order": 4, "role": "success", "script_ja": "日本語タメ口", "script_ko": "韓国語訳", "visual_search_keyword": "英語検索キーワード"},
+    {"order": 5, "role": "point", "script_ja": "日本語タメ口", "script_ko": "韓国語訳", "visual_search_keyword": "英語検索キーワード"},
+    {"order": 6, "role": "reaction", "script_ja": "日本語タメ口の独り言", "script_ko": "韓国語訳", "visual_search_keyword": "英語検索キーワード"}
   ]
 }
 """
@@ -1202,13 +1201,12 @@ def generate_script_jp(
 
     theme_pool = "\n".join(f"- {t}" for t in JP_CONTENT_THEMES)
     user_text = (
-        "아래 주제 풀에서 영감을 받아, 몰랐숏 톤으로 새로운 대본을 작성하세요.\n"
-        "반드시 Hook → 위기/문제 → 시도와 실패 → 반전/성공 → 미친 포인트 → Reaction Outro의 6단 구조를 지키고,\n"
-        "Hook/문제/반전은 더 세게(충격/함정/정반대 느낌) 작성하세요.\n"
-        "음슴체/구어체/인터넷 용어를 섞어 작성한 뒤 순수 JSON만 출력하세요.\n\n"
-        f"[주제 풀 예시]\n{theme_pool}\n\n"
-        + (f"[추가 힌트]\n{extra_hint}\n\n" if extra_hint else "")
-        + "위 시스템 프롬프트의 규칙과 JSON 포맷을 완벽히 지켜 순수 JSON만 출력하세요."
+        "以下のテーマ例を参考に、日本人向けの現代ミステリー/裏話ショート台本を作成してください。\n"
+        "Hook → Problem → Failure → Success → Point → Reaction の6段構成を守り、タメ口でテンポよく書いてください。\n"
+        "必ずJSONのみを出力してください。\n\n"
+        f"[テーマ例]\n{theme_pool}\n\n"
+        + (f"[追加ヒント]\n{extra_hint}\n\n" if extra_hint else "")
+        + "上記のシステムプロンプトとJSON形式を厳守し、純粋なJSONのみを出力してください。"
     )
 
     client = OpenAI(api_key=config.openai_api_key)
@@ -1271,7 +1269,7 @@ def generate_script_jp(
         meta["pinned_comment_ko"] = meta.get("pinned_comment_ko") or meta["pinned_comment"]
         # 해시태그 최소 4개 유지
         if isinstance(meta.get("hashtags"), list) and len(meta["hashtags"]) < 4:
-            defaults = ["#몰랐숏", "#폭로", "#충격", "#반전", "#미스터리"]
+            defaults = ["#雑学", "#裏話", "#都市伝説", "#衝撃", "#ミステリー"]
             for tag in defaults:
                 if len(meta["hashtags"]) >= 4:
                     break
@@ -1472,6 +1470,68 @@ def _apply_caption_variant(styles: List[str], variant: str) -> List[str]:
     if variant == "default":
         return ["reaction" if s == "reaction" else "default_plain" for s in styles]
     return styles
+
+
+def _load_ab_records(config: AppConfig, lookback: int) -> List[Dict[str, Any]]:
+    path = os.path.join(config.output_dir, "ab_tests.jsonl")
+    if not os.path.exists(path):
+        return []
+    try:
+        with open(path, "r", encoding="utf-8") as file:
+            lines = file.readlines()[-max(lookback, 1):]
+        records = []
+        for line in lines:
+            try:
+                records.append(json.loads(line))
+            except Exception:
+                pass
+        return records
+    except Exception:
+        return []
+
+
+def _select_background_mode(config: AppConfig) -> str:
+    modes = ["minecraft", "image"]
+    if not getattr(config, "use_minecraft_parkour_bg", True) or not getattr(config, "use_bg_videos", True):
+        return "image"
+    epsilon = float(getattr(config, "background_ab_epsilon", 0.2))
+    lookback = int(getattr(config, "background_ab_lookback", 30))
+    if not getattr(config, "ab_test_enabled", False):
+        return random.choice(modes)
+    if random.random() < max(0.0, min(epsilon, 1.0)):
+        return random.choice(modes)
+    records = _load_ab_records(config, lookback)
+    if not records:
+        return random.choice(modes)
+    # YouTube API 키가 있으면 조회수 기반으로 가중치
+    if getattr(config, "youtube_api_key", ""):
+        stats = {"minecraft": [], "image": []}
+        max_sample = int(getattr(config, "background_ab_max_sample", 12))
+        for rec in records:
+            mode = rec.get("background_mode")
+            vid = rec.get("youtube_video_id") or rec.get("youtube_video_id", "")
+            if mode in stats and vid and len(stats[mode]) < max_sample:
+                views = _fetch_youtube_stats(vid, config.youtube_api_key).get("viewCount", 0)
+                if views:
+                    stats[mode].append(views)
+        avg_m = sum(stats["minecraft"]) / max(1, len(stats["minecraft"]))
+        avg_i = sum(stats["image"]) / max(1, len(stats["image"]))
+        total = avg_m + avg_i
+        if total > 0:
+            r = random.random() * total
+            return "minecraft" if r < avg_m else "image"
+        return random.choice(modes)
+    # API 키가 없으면 성공 횟수 기반
+    counts = {"minecraft": 0, "image": 0}
+    for rec in records:
+        mode = rec.get("background_mode")
+        if mode in counts and rec.get("status", "ok") == "ok":
+            counts[mode] += 1
+    total = counts["minecraft"] + counts["image"]
+    if total <= 0:
+        return random.choice(modes)
+    r = random.random() * total
+    return "minecraft" if r < counts["minecraft"] else "image"
 
 
 _GENERIC_VIDEO_TOKENS = {
@@ -3430,6 +3490,7 @@ def append_publish_log(config: AppConfig, row: Dict[str, str]) -> None:
         "asset_ids",
         "voice_id",
         "caption_variant",
+        "background_mode",
         "bgm_file",
         "video_path",
         "youtube_video_id",
@@ -3599,15 +3660,22 @@ def _summarize_ab_tests(config: AppConfig) -> str:
     # 최근 N개만 통계
     filtered = filtered[-int(config.ab_report_max_items):]
     stats_by_variant: Dict[str, Dict[str, Any]] = {}
+    stats_by_bg: Dict[str, Dict[str, Any]] = {}
     for rec in filtered:
         variant = rec.get("caption_variant", "default")
         stats_by_variant.setdefault(variant, {"count": 0, "views": 0, "likes": 0, "comments": 0})
         stats_by_variant[variant]["count"] += 1
+        bg_mode = rec.get("background_mode", "unknown")
+        stats_by_bg.setdefault(bg_mode, {"count": 0, "views": 0, "likes": 0, "comments": 0})
+        stats_by_bg[bg_mode]["count"] += 1
         if config.youtube_api_key and rec.get("youtube_video_id"):
             s = _fetch_youtube_stats(rec["youtube_video_id"], config.youtube_api_key)
             stats_by_variant[variant]["views"] += s.get("viewCount", 0)
             stats_by_variant[variant]["likes"] += s.get("likeCount", 0)
             stats_by_variant[variant]["comments"] += s.get("commentCount", 0)
+            stats_by_bg[bg_mode]["views"] += s.get("viewCount", 0)
+            stats_by_bg[bg_mode]["likes"] += s.get("likeCount", 0)
+            stats_by_bg[bg_mode]["comments"] += s.get("commentCount", 0)
     lines = ["[A/B 리포트]"]
     lines.append(f"기간: 최근 {int(config.ab_report_days)}일 / 표본 {len(filtered)}개")
     for variant, stat in stats_by_variant.items():
@@ -3618,6 +3686,16 @@ def _summarize_ab_tests(config: AppConfig) -> str:
             )
         else:
             lines.append(f"- {variant}: {stat['count']}개")
+    lines.append("")
+    lines.append("[배경 모드]")
+    for mode, stat in stats_by_bg.items():
+        if config.youtube_api_key:
+            avg_views = int(stat["views"] / max(stat["count"], 1))
+            lines.append(
+                f"- {mode}: {stat['count']}개, 평균 조회 {avg_views}, 좋아요 {stat['likes']}, 댓글 {stat['comments']}"
+            )
+        else:
+            lines.append(f"- {mode}: {stat['count']}개")
     if not config.youtube_api_key:
         lines.append("※ 조회수 집계를 위해 YOUTUBE_API_KEY를 설정하세요.")
     return "\n".join(lines)
@@ -4635,18 +4713,18 @@ def _auto_jp_flow(
             use_streamlit,
         )
 
-    # ── 배경 영상 — Minecraft Parkour(yt-dlp) 우선, Pixabay/Pexels 폴백 ─────────────
-    # 일본 쇼츠 타겟: Minecraft Parkour No Copyright 영상을 YouTube에서 다운로드
+    # ── 배경 선택: Minecraft 영상 vs 상황 이미지 (A/B) ─────────────
     generated_bg_paths = _get_generated_bg_paths(config, len(texts))
     unique_kws = list(dict.fromkeys(visual_keywords))
     bg_video_paths: List[Optional[str]] = []
     bg_image_paths: List[Optional[str]] = []
+    background_mode = _select_background_mode(config)
     if generated_bg_paths:
+        background_mode = "image"
         bg_video_paths = [None] * len(texts)
         bg_image_paths = generated_bg_paths
         _telemetry_log("생성 배경 이미지 사용", config)
-    elif config.use_bg_videos and config.use_minecraft_parkour_bg:
-        # 1순위: YouTube Minecraft Parkour (일본 쇼츠 타겟)
+    elif background_mode == "minecraft":
         backgrounds_dir = os.path.join(config.assets_dir, "backgrounds")
         mc_path = fetch_youtube_minecraft_parkour_video(backgrounds_dir, config.width, config.height)
         if mc_path:
@@ -4656,72 +4734,16 @@ def _auto_jp_flow(
             _telemetry_log("Minecraft Parkour 배경 영상 사용", config)
             _ui_info("배경 영상: Minecraft Parkour (YouTube)", use_streamlit)
         else:
-            _telemetry_log("Minecraft Parkour 다운로드 실패 — Pixabay/Pexels 폴백", config)
-            # 폴백: Pixabay/Pexels
-            if config.pixabay_api_key or config.pexels_api_key:
-                _status_update(progress, status_box, 0.22, "배경 영상 다운로드 중 (Pixabay 폴백)")
-                kw_to_path = {}
-                kw_to_image = {}
-                for kw in unique_kws:
-                    path = None
-                    if config.pixabay_api_key:
-                        path = fetch_pixabay_video(kw, config.pixabay_api_key, config.width, config.height)
-                    if not path and config.pexels_api_key:
-                        path = fetch_pexels_video(kw, config.pexels_api_key, "/tmp/pexels_bg", config.width, config.height)
-                    kw_to_path[kw] = path
-                    if not path and config.pexels_api_key:
-                        kw_to_image[kw] = fetch_pexels_image(kw, config.pexels_api_key, "/tmp/pexels_bg_images")
-                    else:
-                        kw_to_image[kw] = None
-                for kw in visual_keywords:
-                    bg_video_paths.append(kw_to_path.get(kw))
-                    bg_image_paths.append(kw_to_image.get(kw))
-                if any(p is None for p in bg_image_paths):
-                    placeholder = _ensure_placeholder_image(config)
-                    bg_image_paths = [p or placeholder for p in bg_image_paths]
-            else:
-                bg_video_paths = [None] * len(texts)
-                placeholder = _ensure_placeholder_image(config)
-                bg_image_paths = [placeholder] * len(texts)
-    elif (config.pixabay_api_key or config.pexels_api_key) and config.use_bg_videos:
-        _telemetry_log(f"배경 영상 다운로드 시작 ({len(unique_kws)}개 키워드)", config)
-        _status_update(progress, status_box, 0.22, f"배경 영상 다운로드 중 ({len(unique_kws)}개 키워드, Pixabay 우선)")
-        kw_to_path: Dict[str, Optional[str]] = {}
-        kw_to_image: Dict[str, Optional[str]] = {}
-        for kw in unique_kws:
-            path: Optional[str] = None
-            # 1순위: Pixabay Videos
-            if config.pixabay_api_key:
-                path = fetch_pixabay_video(kw, config.pixabay_api_key, config.width, config.height)
-            # 2순위: Pexels (Pixabay 실패 시)
-            if not path and config.pexels_api_key:
-                path = fetch_pexels_video(kw, config.pexels_api_key, "/tmp/pexels_bg", config.width, config.height)
-            kw_to_path[kw] = path
-            if not path and config.pexels_api_key:
-                kw_to_image[kw] = fetch_pexels_image(kw, config.pexels_api_key, "/tmp/pexels_bg_images")
-            else:
-                kw_to_image[kw] = None
-        for kw in visual_keywords:
-            bg_video_paths.append(kw_to_path.get(kw))
-            bg_image_paths.append(kw_to_image.get(kw))
-        downloaded = sum(1 for p in bg_video_paths if p)
-        if downloaded:
-            _ui_info(f"배경 영상: {downloaded}/{len(texts)} 세그먼트 완료", use_streamlit)
-            _telemetry_log(f"배경 영상 다운로드 완료 {downloaded}/{len(texts)}", config)
+            background_mode = "image"
+            _telemetry_log("Minecraft 다운로드 실패 → 이미지 모드 전환", config)
+    if background_mode == "image":
+        bg_video_paths = [None] * len(texts)
+        if config.pixabay_api_key or config.pexels_api_key:
+            bg_image_paths = fetch_segment_images(config, visual_keywords)
+            _telemetry_log("키워드 이미지 수집 완료", config)
         else:
-            _ui_warning("배경 영상 다운로드 실패 — 정적 이미지 배경으로 대체", use_streamlit)
-            _telemetry_log("배경 영상 다운로드 실패 — 정적 이미지로 대체", config)
-        if any(p is None for p in bg_image_paths):
             placeholder = _ensure_placeholder_image(config)
-            bg_image_paths = [p or placeholder for p in bg_image_paths]
-    elif config.pixabay_api_key or config.pexels_api_key:
-        bg_video_paths = [None] * len(texts)
-        bg_image_paths = fetch_segment_images(config, visual_keywords)
-        _telemetry_log("키워드 이미지 수집 완료", config)
-    else:
-        bg_video_paths = [None] * len(texts)
-        placeholder = _ensure_placeholder_image(config)
-        bg_image_paths = [placeholder] * len(texts)
+            bg_image_paths = [placeholder] * len(texts)
 
     # ── 에셋 선택 ─────────────────────────────────────────
     mood_to_cat = {
@@ -4998,6 +5020,7 @@ def _auto_jp_flow(
         "instagram_media_id": video_id if use_instagram else "",
         "platform": "instagram" if use_instagram else "youtube",
         "caption_variant": caption_variant,
+        "background_mode": background_mode,
         "bgm_file": os.path.basename(bgm_path) if bgm_path else "",
         "status": "ok" if not upload_error else "error",
         "error": upload_error,
@@ -5013,10 +5036,12 @@ def _auto_jp_flow(
             "date_jst": log_row["date_jst"],
             "title": video_title,
             "caption_variant": caption_variant,
+            "background_mode": background_mode,
             "bgm_file": os.path.basename(bgm_path) if bgm_path else "",
             "mood": mood,
             "youtube_video_id": video_id,
             "youtube_url": video_url,
+            "status": log_row["status"],
         },
     )
 
@@ -5136,6 +5161,7 @@ def run_streamlit_app() -> None:
         "- `HIGHLIGHT_CLIP_DURATION_SEC` (하이라이트 길이)\n"
         "- `HIGHLIGHT_CLIP_SAMPLE_FPS` (모션 샘플링 FPS)\n\n"
         "- `AB_TEST_ENABLED` (자막/BGM A/B 기록)\n\n"
+        "- `BACKGROUND_AB_EPSILON`, `BACKGROUND_AB_LOOKBACK`\n\n"
         "- `RETRY_PENDING_UPLOADS` (업로드 실패 재시도)\n"
         "- `PENDING_UPLOADS_PATH` (대기열 저장 경로)\n"
         "- `AUTO_RUN_LOCK_PATH` (중복 실행 방지)\n"
@@ -5311,14 +5337,16 @@ def run_streamlit_app() -> None:
                         placeholder = _ensure_placeholder_image(config)
                         assets = [placeholder] * len(texts)
 
-                    # 세그먼트별 배경: 키워드 이미지 우선 (영상은 옵션)
+                    # 배경 선택: Minecraft vs 이미지
                     bg_vids_manual: List[Optional[str]] = [None] * len(texts)
                     bg_imgs_manual: List[Optional[str]] = [None] * len(texts)
+                    background_mode = _select_background_mode(config)
                     gen_bg_manual = _get_generated_bg_paths(config, len(texts))
                     if gen_bg_manual:
+                        background_mode = "image"
                         bg_imgs_manual = gen_bg_manual
                         _telemetry_log("수동 렌더링: 생성 배경 이미지 사용", config)
-                    elif config.use_bg_videos and config.use_minecraft_parkour_bg:
+                    elif background_mode == "minecraft":
                         _status_update(progress, status_box, 0.25, "배경 영상 다운로드 중 (Minecraft Parkour)")
                         _bg_dir_m = os.path.join(config.assets_dir, "backgrounds")
                         _mc_m = fetch_youtube_minecraft_parkour_video(_bg_dir_m, config.width, config.height)
@@ -5327,59 +5355,15 @@ def run_streamlit_app() -> None:
                             placeholder = _ensure_placeholder_image(config)
                             bg_imgs_manual = [placeholder] * len(texts)
                             _telemetry_log("수동 렌더링: Minecraft Parkour 배경 사용", config)
-                        elif (config.pixabay_api_key or config.pexels_api_key):
-                            _status_update(progress, status_box, 0.25, "배경 영상 다운로드 중 (Pixabay 폴백)")
+                        else:
+                            background_mode = "image"
+                    if background_mode == "image":
+                        if config.pixabay_api_key or config.pexels_api_key:
                             _kws_m = _script_to_visual_keywords(script)
-                            _unique_kws_m = list(dict.fromkeys(_kws_m))
-                            _kw_path_m = {}
-                            _kw_img_m = {}
-                            for _kw in _unique_kws_m:
-                                _p = None
-                                if config.pixabay_api_key:
-                                    _p = fetch_pixabay_video(_kw, config.pixabay_api_key, config.width, config.height)
-                                if not _p and config.pexels_api_key:
-                                    _p = fetch_pexels_video(_kw, config.pexels_api_key, "/tmp/pexels_bg", config.width, config.height)
-                                _kw_path_m[_kw] = _p
-                                if not _p and config.pexels_api_key:
-                                    _kw_img_m[_kw] = fetch_pexels_image(_kw, config.pexels_api_key, "/tmp/pexels_bg_images")
-                                else:
-                                    _kw_img_m[_kw] = None
-                            bg_vids_manual = [_kw_path_m.get(_kws_m[i] if i < len(_kws_m) else "") for i in range(len(texts))]
-                            bg_imgs_manual = [_kw_img_m.get(_kws_m[i] if i < len(_kws_m) else "") for i in range(len(texts))]
-                            if any(p is None for p in bg_imgs_manual):
-                                placeholder = _ensure_placeholder_image(config)
-                                bg_imgs_manual = [p or placeholder for p in bg_imgs_manual]
+                            bg_imgs_manual = fetch_segment_images(config, _kws_m)
                         else:
                             placeholder = _ensure_placeholder_image(config)
                             bg_imgs_manual = [placeholder] * len(texts)
-                    elif (config.pixabay_api_key or config.pexels_api_key) and config.use_bg_videos:
-                        _status_update(progress, status_box, 0.25, "배경 영상 다운로드 중 (Pixabay 우선)")
-                        _kws_m = _script_to_visual_keywords(script)
-                        _unique_kws_m = list(dict.fromkeys(_kws_m))
-                        _kw_path_m: Dict[str, Optional[str]] = {}
-                        _kw_img_m: Dict[str, Optional[str]] = {}
-                        for _kw in _unique_kws_m:
-                            _p: Optional[str] = None
-                            if config.pixabay_api_key:
-                                _p = fetch_pixabay_video(_kw, config.pixabay_api_key, config.width, config.height)
-                            if not _p and config.pexels_api_key:
-                                _p = fetch_pexels_video(_kw, config.pexels_api_key, "/tmp/pexels_bg", config.width, config.height)
-                            _kw_path_m[_kw] = _p
-                            if not _p and config.pexels_api_key:
-                                _kw_img_m[_kw] = fetch_pexels_image(_kw, config.pexels_api_key, "/tmp/pexels_bg_images")
-                            else:
-                                _kw_img_m[_kw] = None
-                        bg_vids_manual = [_kw_path_m.get(_kws_m[i] if i < len(_kws_m) else "") for i in range(len(texts))]
-                        bg_imgs_manual = [_kw_img_m.get(_kws_m[i] if i < len(_kws_m) else "") for i in range(len(texts))]
-                        if any(p is None for p in bg_imgs_manual):
-                            placeholder = _ensure_placeholder_image(config)
-                            bg_imgs_manual = [p or placeholder for p in bg_imgs_manual]
-                    elif config.pixabay_api_key or config.pexels_api_key:
-                        _kws_m = _script_to_visual_keywords(script)
-                        bg_imgs_manual = fetch_segment_images(config, _kws_m)
-                    else:
-                        placeholder = _ensure_placeholder_image(config)
-                        bg_imgs_manual = [placeholder] * len(texts)
                     _status_update(progress, status_box, 0.3, "TTS 생성")
                     now = datetime.utcnow().strftime("%Y%m%d_%H%M%S")
                     audio_path = os.path.join(config.output_dir, f"tts_{now}.mp3")
@@ -5528,6 +5512,7 @@ def run_streamlit_app() -> None:
                         "youtube_video_id": video_id,
                         "youtube_url": video_url,
                         "caption_variant": caption_variant,
+                        "background_mode": background_mode,
                         "bgm_file": os.path.basename(bgm_path) if bgm_path else "",
                         "status": "ok" if not upload_error else "error",
                         "error": upload_error,
@@ -5543,10 +5528,12 @@ def run_streamlit_app() -> None:
                             "date_jst": log_row["date_jst"],
                             "title": video_title_val,
                             "caption_variant": caption_variant,
+                            "background_mode": background_mode,
                             "bgm_file": os.path.basename(bgm_path) if bgm_path else "",
                             "mood": mood,
                             "youtube_video_id": video_id,
                             "youtube_url": video_url,
+                            "status": log_row["status"],
                         },
                     )
                     topic_key = _pick_topic_key(_meta)
@@ -6163,14 +6150,15 @@ def run_batch(count: int, seed: str = "", beats: int = 7) -> None:
         tts_generate(config, "。".join(texts), audio_path, voice=voice_id)
         output_path = os.path.join(config.output_dir, f"shorts_{now}_{index}.mp4")
         bgm_path = match_bgm_by_mood(config, mood)
-        # 세그먼트별 배경: 키워드 이미지 우선 (영상은 옵션)
+        # 배경 선택: Minecraft vs 이미지
         bg_vids_b: List[Optional[str]] = [None] * len(texts)
         bg_imgs_b: List[Optional[str]] = [None] * len(texts)
+        background_mode = _select_background_mode(config)
         gen_bg_b = _get_generated_bg_paths(config, len(texts))
         if gen_bg_b:
+            background_mode = "image"
             bg_imgs_b = gen_bg_b
-        elif config.use_bg_videos and config.use_minecraft_parkour_bg:
-            # Minecraft Parkour 배경 영상 우선 (일본 쇼츠 타겟)
+        elif background_mode == "minecraft":
             _bg_dir = os.path.join(config.assets_dir, "backgrounds")
             _mc_b = fetch_youtube_minecraft_parkour_video(_bg_dir, config.width, config.height)
             if _mc_b:
@@ -6178,55 +6166,13 @@ def run_batch(count: int, seed: str = "", beats: int = 7) -> None:
                 placeholder = _ensure_placeholder_image(config)
                 bg_imgs_b = [placeholder] * len(texts)
             else:
-                if config.pixabay_api_key or config.pexels_api_key:
-                    _unique_b = list(dict.fromkeys(visual_kws))
-                    _kw_path_b = {}
-                    _kw_img_b = {}
-                    for kw in _unique_b:
-                        _pb = None
-                        if config.pixabay_api_key:
-                            _pb = fetch_pixabay_video(kw, config.pixabay_api_key, config.width, config.height)
-                        if not _pb and config.pexels_api_key:
-                            _pb = fetch_pexels_video(kw, config.pexels_api_key, "/tmp/pexels_bg", config.width, config.height)
-                        _kw_path_b[kw] = _pb
-                        if not _pb and config.pexels_api_key:
-                            _kw_img_b[kw] = fetch_pexels_image(kw, config.pexels_api_key, "/tmp/pexels_bg_images")
-                        else:
-                            _kw_img_b[kw] = None
-                    bg_vids_b = [_kw_path_b.get(visual_kws[i] if i < len(visual_kws) else "") for i in range(len(texts))]
-                    bg_imgs_b = [_kw_img_b.get(visual_kws[i] if i < len(visual_kws) else "") for i in range(len(texts))]
-                    if any(p is None for p in bg_imgs_b):
-                        placeholder = _ensure_placeholder_image(config)
-                        bg_imgs_b = [p or placeholder for p in bg_imgs_b]
-                else:
-                    bg_vids_b = [None] * len(texts)
-                    placeholder = _ensure_placeholder_image(config)
-                    bg_imgs_b = [placeholder] * len(texts)
-        elif (config.pixabay_api_key or config.pexels_api_key) and config.use_bg_videos:
-            _unique_b = list(dict.fromkeys(visual_kws))
-            _kw_path_b: Dict[str, Optional[str]] = {}
-            _kw_img_b: Dict[str, Optional[str]] = {}
-            for kw in _unique_b:
-                _pb: Optional[str] = None
-                if config.pixabay_api_key:
-                    _pb = fetch_pixabay_video(kw, config.pixabay_api_key, config.width, config.height)
-                if not _pb and config.pexels_api_key:
-                    _pb = fetch_pexels_video(kw, config.pexels_api_key, "/tmp/pexels_bg", config.width, config.height)
-                _kw_path_b[kw] = _pb
-                if not _pb and config.pexels_api_key:
-                    _kw_img_b[kw] = fetch_pexels_image(kw, config.pexels_api_key, "/tmp/pexels_bg_images")
-                else:
-                    _kw_img_b[kw] = None
-            bg_vids_b = [_kw_path_b.get(visual_kws[i] if i < len(visual_kws) else "") for i in range(len(texts))]
-            bg_imgs_b = [_kw_img_b.get(visual_kws[i] if i < len(visual_kws) else "") for i in range(len(texts))]
-            if any(p is None for p in bg_imgs_b):
+                background_mode = "image"
+        if background_mode == "image":
+            if config.pixabay_api_key or config.pexels_api_key:
+                bg_imgs_b = fetch_segment_images(config, visual_kws)
+            else:
                 placeholder = _ensure_placeholder_image(config)
-                bg_imgs_b = [p or placeholder for p in bg_imgs_b]
-        elif config.pixabay_api_key or config.pexels_api_key:
-            bg_imgs_b = fetch_segment_images(config, visual_kws)
-        else:
-            placeholder = _ensure_placeholder_image(config)
-            bg_imgs_b = [placeholder] * len(texts)
+                bg_imgs_b = [placeholder] * len(texts)
         render_video(
             config=config,
             asset_paths=assets,
@@ -6347,6 +6293,7 @@ def run_batch(count: int, seed: str = "", beats: int = 7) -> None:
             "youtube_video_id": video_id,
             "youtube_url": video_url,
             "caption_variant": caption_variant,
+            "background_mode": background_mode,
             "bgm_file": os.path.basename(bgm_path) if bgm_path else "",
             "status": "ok" if not upload_error else "error",
             "error": upload_error,
@@ -6362,10 +6309,12 @@ def run_batch(count: int, seed: str = "", beats: int = 7) -> None:
                 "date_jst": log_row["date_jst"],
                 "title": _title_b,
                 "caption_variant": caption_variant,
+                "background_mode": background_mode,
                 "bgm_file": os.path.basename(bgm_path) if bgm_path else "",
                 "mood": mood,
                 "youtube_video_id": video_id,
                 "youtube_url": video_url,
+                "status": log_row["status"],
             },
         )
         if topic_key:
