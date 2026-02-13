@@ -444,6 +444,7 @@ class AppConfig:
     ja_dialect_style: str
     bgm_mode: str
     bgm_volume: float
+    bgm_fallback_enabled: bool
     asset_overlay_mode: str
     max_video_duration_sec: float
     require_approval: bool
@@ -569,6 +570,7 @@ def load_config() -> AppConfig:
         ja_dialect_style=_get_secret("JA_DIALECT_STYLE", "") or "",
         bgm_mode=_get_secret("BGM_MODE", "auto") or "auto",  # 기본값 auto: BGM 자동 선택
         bgm_volume=float(_get_secret("BGM_VOLUME", "0.2") or 0.2),  # 일본 쇼츠: TTS 가독성 위해 20%
+        bgm_fallback_enabled=_get_bool("BGM_FALLBACK_ENABLED", True),
         asset_overlay_mode=_get_secret("ASSET_OVERLAY_MODE", "off") or "off",
         max_video_duration_sec=float(_get_secret("MAX_VIDEO_DURATION_SEC", "59") or 59),
         require_approval=_get_bool("REQUIRE_APPROVAL", False),
@@ -1563,6 +1565,18 @@ def _refine_visual_keyword(keyword: str, topic_en: str, role: str, script_ja: st
     return kw or "archival newspaper headline close up"
 
 
+def _fallback_mood_key(mood: str) -> str:
+    if mood in BGM_MOOD_ALIASES:
+        mood = BGM_MOOD_ALIASES[mood]
+    if mood in {"mystery_suspense", "mystery", "suspense"}:
+        return "mystery"
+    if mood in {"fast_exciting", "exciting"}:
+        return "exciting"
+    if mood in {"emotional"}:
+        return "emotional"
+    return "informative"
+
+
 def match_bgm_by_mood(config: AppConfig, mood: str) -> Optional[str]:
     """
     mood(mystery_suspense/fast_exciting)에 맞는 BGM 파일 반환.
@@ -1636,6 +1650,17 @@ def match_bgm_by_mood(config: AppConfig, mood: str) -> Optional[str]:
     fallback_files = _list_audio_files(fallback_dir)
     if fallback_files:
         return random.choice(fallback_files)
+    # 최후: 간단한 합성 BGM 생성
+    if getattr(config, "bgm_fallback_enabled", True):
+        try:
+            gen_dir = os.path.join(config.assets_dir, "bgm", "generated")
+            os.makedirs(gen_dir, exist_ok=True)
+            filename = f"generated_{mood}_{datetime.utcnow().strftime('%Y%m%d_%H%M%S')}.wav"
+            out_path = os.path.join(gen_dir, filename)
+            _generate_bgm_fallback(out_path, float(getattr(config, "max_video_duration_sec", 59.0)), _fallback_mood_key(mood))
+            return out_path
+        except Exception:
+            pass
     return None
 
 
@@ -4745,6 +4770,7 @@ def _auto_jp_flow(
             _ui_info("배경 영상: Minecraft Parkour (YouTube)", use_streamlit)
         else:
             background_mode = "image"
+            _notify("⚠️", "배경 영상 실패", "Minecraft 다운로드 실패, 이미지로 대체")
             _telemetry_log("Minecraft 다운로드 실패 → 이미지 모드 전환", config)
     if background_mode == "image":
         bg_video_paths = [None] * len(texts)
@@ -5165,6 +5191,7 @@ def run_streamlit_app() -> None:
         "- `CAPTION_MAX_CHARS` (자막 최대 글자수)\n"
         "- `CAPTION_HOLD_RATIO` (자막 표시 비율)\n"
         "- `CAPTION_TRIM` (자막 잘라쓰기)\n\n"
+        "- `BGM_FALLBACK_ENABLED` (BGM 없을 때 합성 BGM 생성)\n\n"
         "- `THUMBNAIL_ENABLED` (썸네일 자동 생성)\n"
         "- `THUMBNAIL_USE_HOOK` (썸네일에 훅 문장 사용)\n"
         "- `THUMBNAIL_MAX_CHARS` (썸네일 문장 길이)\n\n"
@@ -5368,6 +5395,7 @@ def run_streamlit_app() -> None:
                             _telemetry_log("수동 렌더링: Minecraft Parkour 배경 사용", config)
                         else:
                             background_mode = "image"
+                            _ui_warning("Minecraft 다운로드 실패 — 이미지로 대체", True)
                     if background_mode == "image":
                         if config.pixabay_api_key or config.pexels_api_key:
                             _kws_m = _script_to_visual_keywords(script)
