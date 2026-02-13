@@ -459,6 +459,7 @@ class AppConfig:
     telegram_timeout_sec: int
     telegram_offset_path: str
     telegram_debug_logs: bool
+    telegram_timeline_only: bool
     approve_keywords: List[str]
     swap_keywords: List[str]
     pixabay_api_key: str
@@ -578,7 +579,8 @@ def load_config() -> AppConfig:
         telegram_admin_chat_id=_get_secret("TELEGRAM_ADMIN_CHAT_ID", "") or "",
         telegram_timeout_sec=int(_get_secret("TELEGRAM_TIMEOUT_SEC", "600") or 600),
         telegram_offset_path=telegram_offset_path,
-        telegram_debug_logs=_get_bool("TELEGRAM_DEBUG_LOGS", True),
+        telegram_debug_logs=_get_bool("TELEGRAM_DEBUG_LOGS", False),
+        telegram_timeline_only=_get_bool("TELEGRAM_TIMELINE_ONLY", True),
         approve_keywords=_get_list("APPROVE_KEYWORDS") or ["승인", "approve", "ok", "yes"],
         swap_keywords=_get_list("SWAP_KEYWORDS") or ["교환", "swap", "change", "next"],
         pixabay_api_key=pixabay_api_key,
@@ -2982,6 +2984,51 @@ def _estimate_durations(texts: List[str], total_duration: float) -> List[float]:
 
 
 _HIGHLIGHT_CACHE: Dict[Tuple[str, int], float] = {}
+_RUN_NOTIFIER: Optional["RunTimelineNotifier"] = None
+
+
+class RunTimelineNotifier:
+    def __init__(self, config: AppConfig, enabled: bool = True):
+        self.config = config
+        self.enabled = bool(enabled and config.telegram_bot_token and config.telegram_admin_chat_id)
+        self.start_ts = time.time()
+
+    def send(self, icon: str, title: str, detail: str | None = None) -> None:
+        if not self.enabled:
+            return
+        ts = _get_local_now(self.config).strftime("%H:%M:%S")
+        msg = f"{icon} {ts} - {title}"
+        if detail:
+            msg += f"\n   \"{detail}\""
+        send_telegram_message(self.config.telegram_bot_token, self.config.telegram_admin_chat_id, msg)
+
+    def finish(self, success_platforms: List[str], next_run: datetime | None = None) -> None:
+        elapsed = max(1, int(time.time() - self.start_ts))
+        mins, secs = divmod(elapsed, 60)
+        duration_text = f"총 소요시간: {mins}분 {secs}초" if mins else f"총 소요시간: {secs}초"
+        platforms_text = "성공한 업로드: " + (", ".join(success_platforms) if success_platforms else "없음")
+        next_text = ""
+        if next_run:
+            next_text = f"다음 실행: {next_run.strftime('%Y-%m-%d %H:%M')}"
+        detail = "\n".join([duration_text, platforms_text, next_text]).strip()
+        self.send("✅", "모든 작업 완료!", detail)
+        if next_run:
+            delta = next_run - _get_local_now(self.config)
+            rest_sec = max(0, int(delta.total_seconds()))
+            rest_h, rem = divmod(rest_sec, 3600)
+            rest_m, rest_s = divmod(rem, 60)
+            rest_text = f"{rest_h}시간 {rest_m}분 {rest_s}초 후 다시 만나요!"
+            self.send("😴", "시스템 휴식", rest_text)
+
+
+def _set_run_notifier(notifier: Optional["RunTimelineNotifier"]) -> None:
+    global _RUN_NOTIFIER
+    _RUN_NOTIFIER = notifier
+
+
+def _notify(icon: str, title: str, detail: str | None = None) -> None:
+    if _RUN_NOTIFIER:
+        _RUN_NOTIFIER.send(icon, title, detail)
 
 
 def _find_dynamic_segment_start(
@@ -3990,10 +4037,14 @@ def _telemetry_log(message: str, config: Optional[AppConfig] = None) -> bool:
         token = config.telegram_bot_token
         chat_id = config.telegram_admin_chat_id
         enabled = bool(config.telegram_debug_logs)
+        if getattr(config, "telegram_timeline_only", False):
+            return False
     else:
         token = _get_secret("TELEGRAM_BOT_TOKEN", "") or ""
         chat_id = _get_secret("TELEGRAM_ADMIN_CHAT_ID", "") or ""
         enabled = _get_bool("TELEGRAM_DEBUG_LOGS", True)
+        if _get_bool("TELEGRAM_TIMELINE_ONLY", True):
+            return False
     if not enabled or not token or not chat_id:
         return False
     prefix = "[auto-shorts]"
@@ -4270,6 +4321,14 @@ def _get_local_now(config: AppConfig) -> datetime:
         return datetime.utcnow()
 
 
+def _get_next_run_time(config: AppConfig) -> datetime:
+    now = _get_local_now(config)
+    target = now.replace(hour=int(config.auto_run_hour), minute=0, second=0, microsecond=0)
+    if target <= now:
+        target = target + timedelta(days=1)
+    return target
+
+
 def _acquire_run_lock(path: str, ttl_sec: int = 7200) -> bool:
     try:
         if os.path.exists(path):
@@ -4492,12 +4551,14 @@ def _auto_jp_flow(
         )
         return False
     manifest_items = load_manifest(config.manifest_path)
+    _notify("🚀", "AI 쇼츠 파이프라인 시작!")
 
     # ── 대본 생성 ─────────────────────────────────────────
     if getattr(config, "retry_pending_uploads", False):
         _try_upload_pending(config, use_streamlit=use_streamlit, max_items=1)
     _telemetry_log("자동 생성 시작 — 대본 생성 단계 진입", config)
     _status_update(progress, status_box, 0.10, "AI 대본 생성 중 (주제 자동 선정)...")
+    _notify("📝", "기획팀 작업 시작", "GPT-4야, 오늘의 미스터리 대본 써줘")
     script = None
     meta = {}
     content_list = []
@@ -4509,6 +4570,7 @@ def _auto_jp_flow(
         except Exception as exc:
             _telemetry_log(f"대본 생성 실패: {exc}", config)
             _ui_error(f"대본 생성 실패: {exc}", use_streamlit)
+            _notify("❌", "기획팀 실패", str(exc))
             return False
         meta = script.get("meta", {})
         content_list = _get_story_timeline(script)
@@ -4527,6 +4589,7 @@ def _auto_jp_flow(
             _telemetry_log(msg, config)
             _ui_warning(msg, use_streamlit)
             send_telegram_message(config.telegram_bot_token, config.telegram_admin_chat_id, msg)
+            _notify("❌", "기획팀 실패", "중복 주제로 중단")
             return False
 
     # ── 새 스키마 필드 추출 ───────────────────────────────
@@ -4536,6 +4599,8 @@ def _auto_jp_flow(
     mood = meta.get("bgm_mood", script.get("mood", "mystery_suspense"))
     pinned = meta.get("pinned_comment", script.get("pinned_comment", ""))
     pinned_ko = meta.get("pinned_comment_ko", pinned)
+    if topic_key:
+        _notify("📝", "기획팀 완료", f"완성! 오늘 주제: {topic_key}")
 
     texts = _script_to_beats(script)
     texts_ko = _script_to_beats_ko(script)
@@ -4741,20 +4806,33 @@ def _auto_jp_flow(
     voice_id = pick_voice_id(config.openai_tts_voices, config.openai_tts_voice_preference)
     _telemetry_log("TTS 생성 시작", config)
     _status_update(progress, status_box, 0.50, "TTS 생성 중")
+    _notify("🎤", "제작팀 작업 시작", "OpenAI TTS야, 이걸 활기찬 목소리로 녹음해줘")
     try:
         tts_generate(config, "。".join(texts), audio_path, voice=voice_id)
         _telemetry_log("TTS 생성 완료", config)
+        if AudioFileClip:
+            try:
+                aud = AudioFileClip(audio_path)
+                dur = int(aud.duration or 0)
+                aud.close()
+                _notify("🎤", "제작팀 완료", f"{dur}초 분량 음성 파일 저장 완료")
+            except Exception:
+                _notify("🎤", "제작팀 완료", "음성 파일 저장 완료")
+        else:
+            _notify("🎤", "제작팀 완료", "음성 파일 저장 완료")
     except Exception as tts_err:
         err_msg = f"❌ TTS 생성 실패: {tts_err}"
         _telemetry_log(err_msg, config)
         _ui_error(err_msg, use_streamlit)
         send_telegram_message(config.telegram_bot_token, config.telegram_admin_chat_id, err_msg)
+        _notify("❌", "제작팀 실패", str(tts_err))
         return False
 
     # ── 영상 렌더링 ───────────────────────────────────────
     _telemetry_log("영상 렌더링 시작", config)
     _status_update(progress, status_box, 0.65, "영상 렌더링 중")
     output_path = os.path.join(config.output_dir, f"shorts_{now}.mp4")
+    _notify("🎬", "영상팀 작업 시작", "자막/배경/오디오 합성 중")
     try:
         render_video(
             config=config,
@@ -4771,9 +4849,11 @@ def _auto_jp_flow(
             caption_texts=caption_texts,
         )
         _telemetry_log("영상 렌더링 완료", config)
+        _notify("🎬", "영상팀 완료", f"{config.width}x{config.height} 세로 영상 저장 완료")
     except Exception as render_err:
         _telemetry_log(f"영상 렌더링 실패: {render_err}", config)
         _ui_error(f"영상 렌더링 실패: {render_err}", use_streamlit)
+        _notify("❌", "영상팀 실패", str(render_err))
         return False
 
     # ── 썸네일 생성 ───────────────────────────────────────
@@ -4812,6 +4892,7 @@ def _auto_jp_flow(
     if use_instagram:
         _telemetry_log("인스타그램 릴스 업로드 시작", config)
         _status_update(progress, status_box, 0.85, "인스타그램 릴스 업로드")
+        _notify("📱", "마케팅팀 작업 시작", "인스타그램 릴스 업로드 중...")
         try:
             from platforms.instagram import add_instagram_comment, upload_instagram_reel
             caption_ig = f"{video_title}\n\n{description}"
@@ -4825,6 +4906,7 @@ def _auto_jp_flow(
                 video_id = result.get("media_id", "")
                 video_url = f"https://www.instagram.com/reel/{video_id}" if video_id else ""
                 _telemetry_log(f"인스타그램 릴스 업로드 완료: {video_id}", config)
+                _notify("📱", "인스타그램 업로드 완료", "릴스 업로드 완료")
                 if getattr(config, "enable_pinned_comment", False) and config.linktree_url and video_id:
                     product_number = meta.get("product_number", "") or _pick_product_number_for_short(config)
                     if product_number:
@@ -4843,9 +4925,11 @@ def _auto_jp_flow(
             upload_error = str(ig_err)
             _telemetry_log(f"인스타그램 업로드 예외: {ig_err}", config)
             send_telegram_message(config.telegram_bot_token, config.telegram_admin_chat_id, f"❌ 인스타 업로드 오류: {ig_err}")
+            _notify("❌", "인스타그램 업로드 실패", str(ig_err))
     elif config.enable_youtube_upload:
         _telemetry_log("유튜브 업로드 시작", config)
         _status_update(progress, status_box, 0.85, "유튜브 업로드")
+        _notify("📱", "마케팅팀 작업 시작", "유튜브 쇼츠 업로드 중...")
         result = upload_video(
             config=config,
             file_path=output_path,
@@ -4875,8 +4959,10 @@ def _auto_jp_flow(
                 thumb_path=thumb_path,
                 error=upload_error,
             )
+            _notify("❌", "유튜브 업로드 실패", upload_error)
         else:
             _telemetry_log(f"유튜브 업로드 완료: {video_id}", config)
+            _notify("📱", "유튜브 업로드 완료", "업로드 완료")
             if thumb_path and video_id:
                 if set_video_thumbnail(config, video_id, thumb_path):
                     _telemetry_log("썸네일 업로드 완료", config)
@@ -4959,7 +5045,13 @@ def _auto_jp_flow(
         send_telegram_message(config.telegram_bot_token, config.telegram_admin_chat_id, summary_text)
     if topic_key:
         _mark_used_topic(config.used_topics_path, topic_key, title=video_title)
+    _notify("📦", "정리 작업", "임시 파일 정리 및 로그 저장 완료")
     _maybe_send_ab_report(config, use_streamlit=use_streamlit)
+    if _RUN_NOTIFIER:
+        platforms = []
+        if video_url:
+            platforms.append("YouTube")
+        _RUN_NOTIFIER.finish(platforms, _get_next_run_time(config))
     return True
 
 
@@ -5020,7 +5112,9 @@ def run_streamlit_app() -> None:
     st.sidebar.markdown(
         "- `TELEGRAM_BOT_TOKEN`\n"
         "- `TELEGRAM_ADMIN_CHAT_ID`\n"
-        "- `TELEGRAM_TIMEOUT_SEC`"
+        "- `TELEGRAM_TIMEOUT_SEC`\n"
+        "- `TELEGRAM_TIMELINE_ONLY` (6시 로그만)\n"
+        "- `TELEGRAM_DEBUG_LOGS` (디버그 로그)"
     )
     st.sidebar.subheader("선택")
     st.sidebar.markdown(

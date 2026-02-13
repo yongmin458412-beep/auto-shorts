@@ -13,6 +13,8 @@ from qq import (
     _acquire_run_lock,
     _release_run_lock,
     _maybe_send_ab_report,
+    RunTimelineNotifier,
+    _set_run_notifier,
 )
 
 # 예시 크론 (매일 18:00 실행):
@@ -28,6 +30,9 @@ def main() -> None:
         print("이미 실행 중이라 종료합니다.")
         return
     try:
+        notifier = RunTimelineNotifier(config, enabled=True)
+        _set_run_notifier(notifier)
+        notifier.send("🕙", "스케줄러 깨어남")
         ok = _auto_jp_flow(config, progress=None, status_box=None, extra_hint="", use_streamlit=False)
         if ok:
             _mark_auto_run_done(config)
@@ -36,6 +41,7 @@ def main() -> None:
             print("자동 실행 실패")
         _maybe_send_ab_report(config, use_streamlit=False)
     finally:
+        _set_run_notifier(None)
         _release_run_lock(config.auto_run_lock_path)
 
 
