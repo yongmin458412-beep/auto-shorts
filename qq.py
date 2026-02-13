@@ -468,6 +468,7 @@ class AppConfig:
     use_korean_template: bool
     caption_max_chars: int
     caption_hold_ratio: float
+    caption_trim: bool
     thumbnail_enabled: bool
     thumbnail_use_hook: bool
     thumbnail_max_chars: int
@@ -591,7 +592,8 @@ def load_config() -> AppConfig:
         render_threads=int(_get_secret("RENDER_THREADS", "2") or 2),
         use_korean_template=_get_bool("USE_KOREAN_TEMPLATE", True),
         caption_max_chars=int(_get_secret("CAPTION_MAX_CHARS", "18") or 18),
-        caption_hold_ratio=float(_get_secret("CAPTION_HOLD_RATIO", "0.8") or 0.8),
+        caption_hold_ratio=float(_get_secret("CAPTION_HOLD_RATIO", "1.0") or 1.0),
+        caption_trim=_get_bool("CAPTION_TRIM", False),
         thumbnail_enabled=_get_bool("THUMBNAIL_ENABLED", True),
         thumbnail_use_hook=_get_bool("THUMBNAIL_USE_HOOK", True),
         thumbnail_max_chars=int(_get_secret("THUMBNAIL_MAX_CHARS", "22") or 22),
@@ -2154,6 +2156,12 @@ def _build_caption_texts(texts: List[str], max_chars: int) -> List[str]:
     return [_shorten_caption_text(t, max_chars=max_chars) for t in texts]
 
 
+def _get_caption_texts(config: AppConfig, texts: List[str]) -> List[str]:
+    if getattr(config, "caption_trim", False):
+        return _build_caption_texts(texts, config.caption_max_chars)
+    return texts
+
+
 def _pick_thumbnail_text(meta: Optional[Dict[str, Any]], texts: List[str]) -> str:
     meta = meta or {}
     for key in ("thumbnail_text_ja", "title_ja", "title", "video_title"):
@@ -3264,6 +3272,8 @@ def render_video(
         _style = style
         _overlay_mode = overlay_mode
         _hold_ratio = float(getattr(config, "caption_hold_ratio", 1.0) or 1.0)
+        if not getattr(config, "caption_trim", False):
+            _hold_ratio = 1.0
         _use_template = bool(getattr(config, "use_korean_template", False))
 
         def _render_frame(get_frame, t, __cap=_cap, __asset=_asset, __font=_font, __style=_style, __overlay=_overlay_mode, __dur=dur):
@@ -4687,7 +4697,7 @@ def _auto_jp_flow(
     caption_styles = _build_caption_styles(roles, len(texts))
     caption_variant = _select_caption_variant(config)
     caption_styles = _apply_caption_variant(caption_styles, caption_variant)
-    caption_texts = _build_caption_texts(texts, config.caption_max_chars)
+    caption_texts = _get_caption_texts(config, texts)
     texts_ko_norm = _normalize_ko_lines(texts_ko, texts)
 
     # 인스타그램 인기 오디오 스타일: BGM을 fast_exciting 쪽으로 편향
@@ -5153,7 +5163,8 @@ def run_streamlit_app() -> None:
         "- `RENDER_THREADS` (렌더링 스레드 수)\n\n"
         "- `USE_KOREAN_TEMPLATE` (한국형 템플릿 오버레이)\n"
         "- `CAPTION_MAX_CHARS` (자막 최대 글자수)\n"
-        "- `CAPTION_HOLD_RATIO` (자막 표시 비율)\n\n"
+        "- `CAPTION_HOLD_RATIO` (자막 표시 비율)\n"
+        "- `CAPTION_TRIM` (자막 잘라쓰기)\n\n"
         "- `THUMBNAIL_ENABLED` (썸네일 자동 생성)\n"
         "- `THUMBNAIL_USE_HOOK` (썸네일에 훅 문장 사용)\n"
         "- `THUMBNAIL_MAX_CHARS` (썸네일 문장 길이)\n\n"
@@ -5312,7 +5323,7 @@ def run_streamlit_app() -> None:
                     caption_styles = _build_caption_styles(roles, len(texts))
                     caption_variant = _select_caption_variant(config)
                     caption_styles = _apply_caption_variant(caption_styles, caption_variant)
-                    caption_texts = _build_caption_texts(texts, config.caption_max_chars)
+                    caption_texts = _get_caption_texts(config, texts)
                     texts_ko_norm = _normalize_ko_lines(_texts_ko, texts)
                     pinned_ko = _meta.get("pinned_comment_ko", pinned_val)
 
@@ -6123,7 +6134,7 @@ def run_batch(count: int, seed: str = "", beats: int = 7) -> None:
         caption_styles = _build_caption_styles(roles, len(texts))
         caption_variant = _select_caption_variant(config)
         caption_styles = _apply_caption_variant(caption_styles, caption_variant)
-        caption_texts = _build_caption_texts(texts, config.caption_max_chars)
+        caption_texts = _get_caption_texts(config, texts)
         mood_to_cat = {
             "mystery_suspense": "shocking",
             "fast_exciting": "exciting",
