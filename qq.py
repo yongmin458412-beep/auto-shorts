@@ -7,6 +7,7 @@ import mimetypes
 import os
 import random
 import re
+import subprocess
 import textwrap
 import time
 from html import unescape
@@ -21,6 +22,15 @@ import requests
 import streamlit as st
 from openai import OpenAI
 from bs4 import BeautifulSoup
+
+PYSUBS2_AVAILABLE = True
+PYSUBS2_ERROR = ""
+try:
+    import pysubs2
+except Exception as exc:
+    PYSUBS2_AVAILABLE = False
+    PYSUBS2_ERROR = str(exc)
+    pysubs2 = None
 
 import gspread
 from google.oauth2.credentials import Credentials
@@ -473,6 +483,7 @@ class AppConfig:
     caption_max_chars: int
     caption_hold_ratio: float
     caption_trim: bool
+    use_ass_subtitles: bool
     thumbnail_enabled: bool
     thumbnail_use_hook: bool
     thumbnail_max_chars: int
@@ -610,6 +621,7 @@ def load_config() -> AppConfig:
         caption_max_chars=int(_get_secret("CAPTION_MAX_CHARS", "14") or 14),
         caption_hold_ratio=float(_get_secret("CAPTION_HOLD_RATIO", "0.9") or 0.9),
         caption_trim=_get_bool("CAPTION_TRIM", True),
+        use_ass_subtitles=_get_bool("USE_ASS_SUBTITLES", True),
         thumbnail_enabled=_get_bool("THUMBNAIL_ENABLED", True),
         thumbnail_use_hook=_get_bool("THUMBNAIL_USE_HOOK", True),
         thumbnail_max_chars=int(_get_secret("THUMBNAIL_MAX_CHARS", "22") or 22),
@@ -3886,6 +3898,7 @@ def render_video(
     bg_video_paths: Optional[List[Optional[str]]] = None,
     bg_image_paths: Optional[List[Optional[str]]] = None,
     caption_texts: Optional[List[str]] = None,
+    draw_subtitles: bool = True,
 ) -> str:
     """
     TTS + 자막 + 에셋 스티커 + 배경영상(or 정적 이미지)으로 숏츠 영상 생성.
@@ -3980,17 +3993,18 @@ def render_video(
             img = Image.fromarray(frame).convert("RGB")
             if _use_template:
                 img = _apply_korean_template(img, W, H)
-            img = _draw_subtitle(
-                img,
-                __cap,
-                __font,
-                W,
-                H,
-                style=__style,
-                t=t,
-                duration=__dur,
-                hold_ratio=_hold_ratio,
-            )
+            if draw_subtitles:
+                img = _draw_subtitle(
+                    img,
+                    __cap,
+                    __font,
+                    W,
+                    H,
+                    style=__style,
+                    t=t,
+                    duration=__dur,
+                    hold_ratio=_hold_ratio,
+                )
             if __asset and os.path.exists(__asset):
                 img = _maybe_overlay_sticker(img, __asset, W, H, mode=__overlay, size=260)
             return np.array(img)
@@ -5280,6 +5294,213 @@ def _build_bilingual_caption_texts(
     return merged
 
 
+def _guess_ass_font_name(font_path: str) -> str:
+    name = os.path.basename(str(font_path or "")).lower()
+    if "zenkakugothicnew" in name:
+        return "Zen Kaku Gothic New"
+    if "mplusrounded1c" in name:
+        return "M PLUS Rounded 1c"
+    if "bizudpgothic" in name:
+        return "BIZ UDPGothic"
+    if "notosansjp" in name:
+        return "Noto Sans JP"
+    return "Noto Sans CJK JP"
+
+
+def _ass_escape_text(text: str) -> str:
+    value = str(text or "")
+    value = value.replace("\\", "\\\\")
+    value = value.replace("{", r"\{").replace("}", r"\}")
+    return value.replace("\n", r"\N")
+
+
+def _ffmpeg_sub_path_escape(path: str) -> str:
+    value = os.path.abspath(path).replace("\\", "/")
+    value = value.replace(":", r"\:")
+    value = value.replace("'", r"\'")
+    value = value.replace(",", r"\,")
+    value = value.replace("[", r"\[")
+    value = value.replace("]", r"\]")
+    value = value.replace(" ", r"\ ")
+    return value
+
+
+def _build_ass_subtitle_file(
+    config: AppConfig,
+    ass_path: str,
+    texts: List[str],
+    caption_texts: List[str],
+    caption_styles: Optional[List[str]],
+    tts_audio_path: str,
+) -> bool:
+    if not PYSUBS2_AVAILABLE or pysubs2 is None:
+        return False
+    if not texts or not caption_texts or not os.path.exists(tts_audio_path):
+        return False
+    try:
+        audio_clip = AudioFileClip(tts_audio_path)
+        max_duration = max(5.0, float(getattr(config, "max_video_duration_sec", 59.0)))
+        duration = min(float(audio_clip.duration or 0.0), max_duration)
+        audio_clip.close()
+        if duration <= 0.0:
+            return False
+        seg_durations = _estimate_durations(texts, duration)
+        hold_ratio = float(getattr(config, "caption_hold_ratio", 1.0) or 1.0)
+        if not getattr(config, "caption_trim", False):
+            hold_ratio = 1.0
+        hold_ratio = max(0.45, min(1.0, hold_ratio))
+
+        subs = pysubs2.SSAFile()
+        subs.info["PlayResX"] = str(int(config.width))
+        subs.info["PlayResY"] = str(int(config.height))
+        subs.info["WrapStyle"] = "2"
+        font_name = _guess_ass_font_name(config.font_path)
+
+        default_style = pysubs2.SSAStyle(
+            fontname=font_name,
+            fontsize=max(44, int(config.width * 0.05)),
+            bold=True,
+            italic=False,
+            underline=False,
+            alignment=2,
+            marginl=int(config.width * 0.07),
+            marginr=int(config.width * 0.07),
+            marginv=int(config.height * 0.34),
+            primarycolor=pysubs2.Color(255, 255, 255, 0),
+            secondarycolor=pysubs2.Color(255, 255, 255, 0),
+            outlinecolor=pysubs2.Color(0, 0, 0, 0),
+            backcolor=pysubs2.Color(0, 0, 0, 140),
+            borderstyle=1,
+            outline=2.8,
+            shadow=0.8,
+            spacing=0,
+            angle=0,
+        )
+        variety_style = default_style.copy()
+        variety_style.primarycolor = pysubs2.Color(0, 240, 255, 0)
+        variety_style.outline = 4.6
+        variety_style.shadow = 1.0
+
+        reaction_style = default_style.copy()
+        reaction_style.primarycolor = pysubs2.Color(25, 25, 25, 0)
+        reaction_style.backcolor = pysubs2.Color(92, 232, 255, 40)
+        reaction_style.borderstyle = 3
+        reaction_style.outline = 1.0
+        reaction_style.shadow = 0.0
+
+        subs.styles["Default"] = default_style
+        subs.styles["Variety"] = variety_style
+        subs.styles["Reaction"] = reaction_style
+
+        start_sec = 0.0
+        for idx, seg_dur in enumerate(seg_durations):
+            text_raw = caption_texts[idx] if idx < len(caption_texts) else texts[idx]
+            text_out = _ass_escape_text(text_raw)
+            seg_show = max(0.45, seg_dur * hold_ratio)
+            end_sec = min(duration, start_sec + seg_show)
+            if end_sec <= start_sec:
+                end_sec = min(duration, start_sec + 0.45)
+            role_style = "Default"
+            if caption_styles and idx < len(caption_styles):
+                style_name = str(caption_styles[idx] or "").strip().lower()
+                if style_name in {"reaction", "outro", "outro_loop"}:
+                    role_style = "Reaction"
+                elif style_name == "japanese_variety":
+                    role_style = "Variety"
+            subs.events.append(
+                pysubs2.SSAEvent(
+                    start=int(start_sec * 1000),
+                    end=int(end_sec * 1000),
+                    style=role_style,
+                    text=text_out,
+                )
+            )
+            start_sec += seg_dur
+        os.makedirs(os.path.dirname(ass_path) or ".", exist_ok=True)
+        subs.save(ass_path, encoding="utf-8")
+        return True
+    except Exception:
+        return False
+
+
+def _burn_ass_subtitles_to_video(
+    config: AppConfig,
+    input_video_path: str,
+    output_video_path: str,
+    ass_path: str,
+) -> bool:
+    if not ass_path or not os.path.exists(ass_path):
+        return False
+    ffmpeg_bin = "ffmpeg"
+    try:
+        import imageio_ffmpeg
+
+        ffmpeg_bin = imageio_ffmpeg.get_ffmpeg_exe()
+    except Exception:
+        pass
+    ass_escaped = _ffmpeg_sub_path_escape(ass_path)
+    fonts_dir = os.path.dirname(config.font_path) if config.font_path else ""
+    if not fonts_dir:
+        fonts_dir = os.path.join(config.assets_dir, "fonts")
+    fonts_escaped = _ffmpeg_sub_path_escape(fonts_dir)
+    vf_expr = f"subtitles='{ass_escaped}':fontsdir='{fonts_escaped}':charenc=UTF-8"
+    cmd = [
+        ffmpeg_bin,
+        "-y",
+        "-i",
+        input_video_path,
+        "-vf",
+        vf_expr,
+        "-c:v",
+        "libx264",
+        "-preset",
+        "veryfast",
+        "-crf",
+        "19",
+        "-c:a",
+        "copy",
+        output_video_path,
+    ]
+    try:
+        proc = subprocess.run(cmd, capture_output=True, text=True, timeout=600)
+        if proc.returncode == 0 and os.path.exists(output_video_path):
+            return True
+        tail = (proc.stderr or "")[-400:]
+        print(f"[ASS 자막 번인 실패] rc={proc.returncode} err={tail}")
+        return False
+    except Exception as exc:
+        print(f"[ASS 자막 번인 예외] {exc}")
+        return False
+
+
+def _render_ass_subtitled_video(
+    config: AppConfig,
+    input_video_path: str,
+    output_video_path: str,
+    ass_path: str,
+    texts: List[str],
+    caption_texts: List[str],
+    caption_styles: Optional[List[str]],
+    tts_audio_path: str,
+) -> bool:
+    ok = _build_ass_subtitle_file(
+        config=config,
+        ass_path=ass_path,
+        texts=texts,
+        caption_texts=caption_texts,
+        caption_styles=caption_styles,
+        tts_audio_path=tts_audio_path,
+    )
+    if not ok:
+        return False
+    return _burn_ass_subtitles_to_video(
+        config=config,
+        input_video_path=input_video_path,
+        output_video_path=output_video_path,
+        ass_path=ass_path,
+    )
+
+
 def _build_upload_report_ko(
     title: str,
     video_url: str,
@@ -5910,6 +6131,7 @@ def _auto_jp_flow(
     _telemetry_log("영상 렌더링 시작", config)
     _status_update(progress, status_box, 0.65, "영상 렌더링 중")
     output_path = os.path.join(config.output_dir, f"shorts_{now}.mp4")
+    ass_enabled = bool(getattr(config, "use_ass_subtitles", True) and PYSUBS2_AVAILABLE)
     _notify("🎬", "영상팀 작업 시작", "자막/배경/오디오 합성 중")
     try:
         render_video(
@@ -5925,7 +6147,40 @@ def _auto_jp_flow(
             caption_styles=caption_styles,
             overlay_mode="off",
             caption_texts=caption_texts,
+            draw_subtitles=not ass_enabled,
         )
+        if ass_enabled:
+            ass_path = os.path.join(config.output_dir, f"subs_{now}.ass")
+            ass_output = os.path.join(config.output_dir, f"shorts_ass_{now}.mp4")
+            if _render_ass_subtitled_video(
+                config=config,
+                input_video_path=output_path,
+                output_video_path=ass_output,
+                ass_path=ass_path,
+                texts=texts,
+                caption_texts=caption_texts,
+                caption_styles=caption_styles,
+                tts_audio_path=audio_path,
+            ):
+                output_path = ass_output
+                _telemetry_log("ASS 자막 렌더링 적용 완료", config)
+            else:
+                _telemetry_log("ASS 자막 렌더링 실패 → Pillow 자막으로 폴백", config)
+                render_video(
+                    config=config,
+                    asset_paths=assets,
+                    texts=texts,
+                    tts_audio_path=audio_path,
+                    output_path=output_path,
+                    bgm_path=bgm_path,
+                    bgm_volume=config.bgm_volume,
+                    bg_video_paths=bg_video_paths,
+                    bg_image_paths=bg_image_paths,
+                    caption_styles=caption_styles,
+                    overlay_mode="off",
+                    caption_texts=caption_texts,
+                    draw_subtitles=True,
+                )
         _telemetry_log("영상 렌더링 완료", config)
         _notify("🎬", "영상팀 완료", f"{config.width}x{config.height} 세로 영상 저장 완료")
     except Exception as render_err:
@@ -6224,6 +6479,10 @@ def run_streamlit_app() -> None:
     st.sidebar.write(f"렌더 스레드: {config.render_threads}")
     st.sidebar.write(f"템플릿: {'켜짐' if config.use_korean_template else '꺼짐'}")
     st.sidebar.write(f"자막 길이: {config.caption_max_chars}자")
+    st.sidebar.write(
+        f"ASS 자막 엔진: {'켜짐' if getattr(config, 'use_ass_subtitles', True) else '꺼짐'} / "
+        f"{'사용가능' if PYSUBS2_AVAILABLE else '미설치'}"
+    )
     st.sidebar.write(f"썸네일: {'켜짐' if config.thumbnail_enabled else '꺼짐'}")
     if not MOVIEPY_AVAILABLE:
         st.sidebar.error(f"MoviePy 오류: {MOVIEPY_ERROR}")
@@ -6497,6 +6756,7 @@ def run_streamlit_app() -> None:
                     tts_generate(config, "。".join(texts), audio_path, voice=voice_id)
                     _status_update(progress, status_box, 0.6, "영상 렌더링")
                     output_path = os.path.join(config.output_dir, f"shorts_{now}.mp4")
+                    ass_enabled = bool(getattr(config, "use_ass_subtitles", True) and PYSUBS2_AVAILABLE)
                     try:
                         render_video(
                             config=config,
@@ -6511,7 +6771,40 @@ def run_streamlit_app() -> None:
                             caption_styles=caption_styles,
                             overlay_mode="off",
                             caption_texts=caption_texts,
+                            draw_subtitles=not ass_enabled,
                         )
+                        if ass_enabled:
+                            ass_path = os.path.join(config.output_dir, f"subs_{now}.ass")
+                            ass_output = os.path.join(config.output_dir, f"shorts_ass_{now}.mp4")
+                            if _render_ass_subtitled_video(
+                                config=config,
+                                input_video_path=output_path,
+                                output_video_path=ass_output,
+                                ass_path=ass_path,
+                                texts=texts,
+                                caption_texts=caption_texts,
+                                caption_styles=caption_styles,
+                                tts_audio_path=audio_path,
+                            ):
+                                output_path = ass_output
+                                _telemetry_log("수동 렌더링: ASS 자막 적용 완료", config)
+                            else:
+                                _telemetry_log("수동 렌더링: ASS 실패 → Pillow 자막 폴백", config)
+                                render_video(
+                                    config=config,
+                                    asset_paths=assets,
+                                    texts=texts,
+                                    tts_audio_path=audio_path,
+                                    output_path=output_path,
+                                    bgm_path=bgm_path,
+                                    bgm_volume=config.bgm_volume,
+                                    bg_video_paths=bg_vids_manual,
+                                    bg_image_paths=bg_imgs_manual,
+                                    caption_styles=caption_styles,
+                                    overlay_mode="off",
+                                    caption_texts=caption_texts,
+                                    draw_subtitles=True,
+                                )
                         _telemetry_log("수동 렌더링 완료", config)
                     except Exception as render_err:
                         _telemetry_log(f"수동 렌더링 실패: {render_err}", config)
@@ -7363,6 +7656,7 @@ def run_batch(count: int, seed: str = "", beats: int = 7) -> None:
             f"배치 배경 요약: mode={background_mode}, video_segments={len([p for p in bg_vids_b if p])}, image_segments={len([p for p in bg_imgs_b if p])}",
             config,
         )
+        ass_enabled = bool(getattr(config, "use_ass_subtitles", True) and PYSUBS2_AVAILABLE)
         render_video(
             config=config,
             asset_paths=assets,
@@ -7376,7 +7670,38 @@ def run_batch(count: int, seed: str = "", beats: int = 7) -> None:
             caption_styles=caption_styles,
             overlay_mode="off",
             caption_texts=caption_texts,
+            draw_subtitles=not ass_enabled,
         )
+        if ass_enabled:
+            ass_path = os.path.join(config.output_dir, f"subs_{now}_{index}.ass")
+            ass_output = os.path.join(config.output_dir, f"shorts_ass_{now}_{index}.mp4")
+            if _render_ass_subtitled_video(
+                config=config,
+                input_video_path=output_path,
+                output_video_path=ass_output,
+                ass_path=ass_path,
+                texts=texts,
+                caption_texts=caption_texts,
+                caption_styles=caption_styles,
+                tts_audio_path=audio_path,
+            ):
+                output_path = ass_output
+            else:
+                render_video(
+                    config=config,
+                    asset_paths=assets,
+                    texts=texts,
+                    tts_audio_path=audio_path,
+                    output_path=output_path,
+                    bgm_path=bgm_path,
+                    bgm_volume=config.bgm_volume,
+                    bg_video_paths=bg_vids_b,
+                    bg_image_paths=bg_imgs_b,
+                    caption_styles=caption_styles,
+                    overlay_mode="off",
+                    caption_texts=caption_texts,
+                    draw_subtitles=True,
+                )
         thumb_path = ""
         if config.thumbnail_enabled:
             try:
