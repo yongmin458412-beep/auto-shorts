@@ -653,7 +653,7 @@ def load_config() -> AppConfig:
         thumbnail_enabled=_get_bool("THUMBNAIL_ENABLED", True),
         thumbnail_use_hook=_get_bool("THUMBNAIL_USE_HOOK", True),
         thumbnail_max_chars=int(_get_secret("THUMBNAIL_MAX_CHARS", "22") or 22),
-        use_minecraft_parkour_bg=_get_bool("USE_MINECRAFT_PARKOUR_BG", True),
+        use_minecraft_parkour_bg=_get_bool("USE_MINECRAFT_PARKOUR_BG", False),
         tts_provider=(_get_secret("TTS_PROVIDER", "") or "openai").strip().lower() or "openai",
         tts_force_cute_voice=_get_bool("TTS_FORCE_CUTE_VOICE", True),
         tts_baby_voice=_get_bool("TTS_BABY_VOICE", True),
@@ -7146,20 +7146,19 @@ def _auto_jp_flow(
                 _telemetry_log("Minecraft 다운로드 실패 → 이미지 모드 전환", config)
     if background_mode == "image":
         bg_video_paths = [None] * len(texts)
-        if config.pixabay_api_key or config.pexels_api_key:
-            bg_image_paths = fetch_segment_images(config, visual_keywords)
-            _telemetry_log("키워드 이미지 수집 완료", config)
-            placeholder = _ensure_placeholder_image(config)
-            if bg_image_paths and all((not p) or p == placeholder for p in bg_image_paths):
-                fallback_video = _fetch_context_video_background(config, visual_keywords)
-                if fallback_video:
-                    background_mode = "context_video"
-                    bg_video_paths = [fallback_video] * len(texts)
-                    bg_image_paths = [placeholder] * len(texts)
-                    _telemetry_log("이미지 결과 부족 → 컨텍스트 영상 대체", config)
-        else:
+        bg_image_paths = fetch_segment_images(config, visual_keywords)
+        _telemetry_log("키워드 이미지 수집 완료", config)
+        placeholder = _ensure_placeholder_image(config)
+        if not bg_image_paths:
             placeholder = _ensure_placeholder_image(config)
             bg_image_paths = [placeholder] * len(texts)
+        if bg_image_paths and all((not p) or p == placeholder for p in bg_image_paths):
+            fallback_video = _fetch_context_video_background(config, visual_keywords)
+            if fallback_video:
+                background_mode = "context_video"
+                bg_video_paths = [fallback_video] * len(texts)
+                bg_image_paths = [placeholder] * len(texts)
+                _telemetry_log("이미지 결과 부족 → 컨텍스트 영상 대체", config)
     bg_video_paths, bg_image_paths = _apply_primary_photo_override(config, bg_video_paths, bg_image_paths)
     video_count = len([p for p in bg_video_paths if p])
     image_count = len([p for p in bg_image_paths if p])
@@ -7861,19 +7860,18 @@ def run_streamlit_app() -> None:
                                 background_mode = "image"
                                 _ui_warning("Minecraft 다운로드 실패 — 이미지로 대체", True)
                     if background_mode == "image":
-                        if config.pixabay_api_key or config.pexels_api_key:
-                            bg_imgs_manual = fetch_segment_images(config, _kws_m)
-                            placeholder = _ensure_placeholder_image(config)
-                            if bg_imgs_manual and all((not p) or p == placeholder for p in bg_imgs_manual):
-                                fallback_video = _fetch_context_video_background(config, _kws_m)
-                                if fallback_video:
-                                    background_mode = "context_video"
-                                    bg_vids_manual = [fallback_video] * len(texts)
-                                    bg_imgs_manual = [placeholder] * len(texts)
-                                    _telemetry_log("수동 렌더링: 이미지 부족 → 컨텍스트 영상 대체", config)
-                        else:
+                        bg_imgs_manual = fetch_segment_images(config, _kws_m)
+                        placeholder = _ensure_placeholder_image(config)
+                        if not bg_imgs_manual:
                             placeholder = _ensure_placeholder_image(config)
                             bg_imgs_manual = [placeholder] * len(texts)
+                        if bg_imgs_manual and all((not p) or p == placeholder for p in bg_imgs_manual):
+                            fallback_video = _fetch_context_video_background(config, _kws_m)
+                            if fallback_video:
+                                background_mode = "context_video"
+                                bg_vids_manual = [fallback_video] * len(texts)
+                                bg_imgs_manual = [placeholder] * len(texts)
+                                _telemetry_log("수동 렌더링: 이미지 부족 → 컨텍스트 영상 대체", config)
                     bg_vids_manual, bg_imgs_manual = _apply_primary_photo_override(config, bg_vids_manual, bg_imgs_manual)
                     _telemetry_log(
                         f"수동 배경 요약: mode={background_mode}, video_segments={len([p for p in bg_vids_manual if p])}, image_segments={len([p for p in bg_imgs_manual if p])}",
@@ -8834,18 +8832,17 @@ def run_batch(count: int, seed: str = "", beats: int = 7) -> None:
                 else:
                     background_mode = "image"
         if background_mode == "image":
-            if config.pixabay_api_key or config.pexels_api_key:
-                bg_imgs_b = fetch_segment_images(config, visual_kws)
-                placeholder = _ensure_placeholder_image(config)
-                if bg_imgs_b and all((not p) or p == placeholder for p in bg_imgs_b):
-                    fallback_video = _fetch_context_video_background(config, visual_kws)
-                    if fallback_video:
-                        background_mode = "context_video"
-                        bg_vids_b = [fallback_video] * len(texts)
-                        bg_imgs_b = [placeholder] * len(texts)
-            else:
+            bg_imgs_b = fetch_segment_images(config, visual_kws)
+            placeholder = _ensure_placeholder_image(config)
+            if not bg_imgs_b:
                 placeholder = _ensure_placeholder_image(config)
                 bg_imgs_b = [placeholder] * len(texts)
+            if bg_imgs_b and all((not p) or p == placeholder for p in bg_imgs_b):
+                fallback_video = _fetch_context_video_background(config, visual_kws)
+                if fallback_video:
+                    background_mode = "context_video"
+                    bg_vids_b = [fallback_video] * len(texts)
+                    bg_imgs_b = [placeholder] * len(texts)
         bg_vids_b, bg_imgs_b = _apply_primary_photo_override(config, bg_vids_b, bg_imgs_b)
         _telemetry_log(
             f"배치 배경 요약: mode={background_mode}, video_segments={len([p for p in bg_vids_b if p])}, image_segments={len([p for p in bg_imgs_b if p])}",
