@@ -2598,7 +2598,7 @@ def _shorten_caption_text(text: str, max_chars: int = 18) -> str:
     if not text:
         return text
     # 문장 분리 — 첫 문장/구문만 사용
-    head = re.split(r"[。．.!?？！\\n、]", text, maxsplit=1)[0].strip()
+    head = re.split(r"[。．.!?？！\\n、,，]", text, maxsplit=1)[0].strip()
     if not head:
         head = text.strip()
     if len(head) > max_chars:
@@ -2884,12 +2884,24 @@ def _draw_subtitle(
     font_size = max(50, canvas_width // 16)
     pad_x = int(canvas_width * 0.05)
     max_text_w = canvas_width - pad_x * 2
-    raw_parts = [part.strip() for part in str(text or "").splitlines() if part.strip()]
-    is_bilingual = len(raw_parts) >= 2
+    raw_text = str(text or "")
+    ja_text = ""
+    ko_text = ""
+    if _CAPTION_LANG_SEP in raw_text:
+        ja_text, ko_text = raw_text.split(_CAPTION_LANG_SEP, 1)
+        ja_text = ja_text.strip()
+        ko_text = ko_text.strip()
+        is_bilingual = bool(ja_text and ko_text)
+        raw_parts: List[str] = []
+    else:
+        raw_parts = [part.strip() for part in raw_text.splitlines() if part.strip()]
+        is_bilingual = len(raw_parts) >= 2
 
     if is_bilingual:
-        ja_text = raw_parts[0]
-        ko_text = raw_parts[1]
+        if not ja_text and raw_parts:
+            ja_text = raw_parts[0]
+        if not ko_text and len(raw_parts) > 1:
+            ko_text = "\n".join(raw_parts[1:])
         primary_lines = _wrap_cjk_text(ja_text, max_text_w, font_size)[:3]
         secondary_base_size = max(30, int(font_size * 0.64))
         secondary_lines = _wrap_cjk_text(ko_text, max_text_w, secondary_base_size)[:3]
@@ -5348,6 +5360,63 @@ def _normalize_ko_lines(texts_ko: List[str], texts_ja: List[str]) -> List[str]:
     return normalized
 
 
+_CAPTION_LANG_SEP = "<<KO>>"
+
+
+def _split_caption_chunks(text: str, max_chars: int = 14, max_lines: int = 3) -> str:
+    src = re.sub(r"\s+", " ", str(text or "").strip())
+    if not src:
+        return ""
+
+    # 쉼표/마침표 기반으로 우선 분리 (요청사항 반영)
+    parts = re.split(r"(?<=[,，、.。．!?？！])\s*", src)
+    if not parts:
+        parts = [src]
+
+    def _char_w(ch: str) -> float:
+        return 1.0 if ord(ch) > 127 else 0.55
+
+    def _hard_wrap(segment: str) -> List[str]:
+        seg = segment.strip()
+        if not seg:
+            return []
+        out: List[str] = []
+        cur = ""
+        cur_w = 0.0
+        limit = float(max(8, max_chars))
+        for ch in seg:
+            cw = _char_w(ch)
+            if cur and (cur_w + cw) > limit:
+                out.append(cur)
+                cur = ch
+                cur_w = cw
+            else:
+                cur += ch
+                cur_w += cw
+        if cur:
+            out.append(cur)
+        return out
+
+    lines: List[str] = []
+    for part in parts:
+        p = part.strip()
+        if not p:
+            continue
+        wrapped = _hard_wrap(p)
+        if not wrapped:
+            continue
+        lines.extend(wrapped)
+
+    if not lines:
+        lines = _hard_wrap(src)
+    if not lines:
+        return src
+
+    # 줄 수 제한 (세로 영역 과점유 방지)
+    lines = lines[: max(1, max_lines)]
+    return "\n".join(lines)
+
+
 def _build_bilingual_caption_texts(
     config: AppConfig,
     texts_ja: List[str],
@@ -5355,12 +5424,21 @@ def _build_bilingual_caption_texts(
 ) -> List[str]:
     ko_norm = _normalize_ko_lines(texts_ko, texts_ja)
     merged: List[str] = []
+    max_chars = max(8, int(getattr(config, "caption_max_chars", 14) or 14))
     for idx, ja_src in enumerate(texts_ja):
         ko_src = ko_norm[idx] if idx < len(ko_norm) else ""
-        ja_line = re.sub(r"\s+", " ", str(ja_src or "").strip())
-        ko_line = re.sub(r"\s+", " ", str(ko_src or "").strip())
+        ja_line = _split_caption_chunks(
+            re.sub(r"\s+", " ", str(ja_src or "").strip()),
+            max_chars=max_chars,
+            max_lines=3,
+        )
+        ko_line = _split_caption_chunks(
+            re.sub(r"\s+", " ", str(ko_src or "").strip()),
+            max_chars=max_chars + 2,
+            max_lines=2,
+        )
         if ko_line and ko_line != ja_line:
-            merged.append(f"{ja_line}\n{ko_line}")
+            merged.append(f"{ja_line}{_CAPTION_LANG_SEP}{ko_line}")
         else:
             merged.append(ja_line)
     return merged
@@ -5381,6 +5459,7 @@ def _guess_ass_font_name(font_path: str) -> str:
 
 def _ass_escape_text(text: str) -> str:
     value = str(text or "")
+    value = value.replace(_CAPTION_LANG_SEP, "\n")
     value = value.replace("\\", "\\\\")
     value = value.replace("{", r"\{").replace("}", r"\}")
     return value.replace("\n", r"\N")
@@ -5467,6 +5546,9 @@ def _build_ass_subtitle_file(
         start_sec = 0.0
         for idx, seg_dur in enumerate(seg_durations):
             text_raw = caption_texts[idx] if idx < len(caption_texts) else texts[idx]
+            if _CAPTION_LANG_SEP in str(text_raw):
+                ja_raw, ko_raw = str(text_raw).split(_CAPTION_LANG_SEP, 1)
+                text_raw = f"{ja_raw}\n{ko_raw}"
             text_out = _ass_escape_text(text_raw)
             seg_show = max(0.45, seg_dur * hold_ratio)
             end_sec = min(duration, start_sec + seg_show)
