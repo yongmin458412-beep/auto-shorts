@@ -790,6 +790,8 @@ def _check_story_quality(items: List[Dict[str, Any]]) -> List[str]:
     # Hook 임팩트
     if not re.search(r"(衝撃|ヤバ|マジ|嘘|閲覧注意|知らない|やべ|危険|99%|ガチ|まじか|ほんま)", hook):
         issues.append("Hook 임팩트 부족")
+    if not re.search(r"(知ってた|まだ|おい|消えかけ|マジ|嘘|[?？])", hook):
+        issues.append("Hook 어그로/질문 부족")
     # Problem: 裏側/問題系
     if not re.search(r"(問題|裏|秘密|闇|危険|違和感|炎上|黒歴史|やばい|罠|トリック)", problem):
         issues.append("Problem 내용 약함")
@@ -807,6 +809,62 @@ def _check_story_quality(items: List[Dict[str, Any]]) -> List[str]:
         issues.append("Reaction 1인칭/감정 부족")
 
     return issues
+
+
+_HOOK_TOPIC_LABEL_PATTERNS: List[Tuple[re.Pattern[str], str]] = [
+    (re.compile(r"(mcdonald|マクドナルド|맥도날드)", re.IGNORECASE), "マクドナルド"),
+    (re.compile(r"(coca[- ]?cola|コカ.?コーラ|코카콜라)", re.IGNORECASE), "コカ・コーラ"),
+    (re.compile(r"(pepsi|ペプシ|펩시)", re.IGNORECASE), "ペプシ"),
+    (re.compile(r"(nike|ナイキ)", re.IGNORECASE), "ナイキ"),
+    (re.compile(r"(instagram|インスタ|인스타)", re.IGNORECASE), "インスタ"),
+    (re.compile(r"(ramen|ラーメン|라면)", re.IGNORECASE), "ラーメン"),
+]
+
+
+def _topic_label_for_hook(meta: Dict[str, Any], hook_text: str = "") -> str:
+    joined = " ".join(
+        [
+            str(meta.get("topic_en", "") or ""),
+            str(meta.get("title_ja", "") or ""),
+            str(hook_text or ""),
+        ]
+    )
+    for pattern, label in _HOOK_TOPIC_LABEL_PATTERNS:
+        if pattern.search(joined):
+            return label
+    title = str(meta.get("title_ja", "") or "").strip()
+    if title:
+        # 일본어 제목의 앞쪽 명사구를 최대한 짧게 사용
+        title = re.sub(r"[【】\[\]()（）].*$", "", title).strip()
+        return title[:10] if title else "この話"
+    return "この話"
+
+
+def _is_strong_hook(text: str) -> bool:
+    text = (text or "").strip()
+    if not text:
+        return False
+    return bool(
+        re.search(r"(知ってた|まだ|おい|消えかけ|嘘|ヤバ|マジ|[?？])", text)
+    )
+
+
+def _enforce_aggressive_hook(meta: Dict[str, Any], items: List[Dict[str, Any]]) -> List[Dict[str, Any]]:
+    if not items:
+        return items
+    for item in items:
+        if item.get("role") != "hook":
+            continue
+        original = str(item.get("script_ja", "") or "").strip()
+        if _is_strong_hook(original):
+            return items
+        label = _topic_label_for_hook(meta, original)
+        forced = f"おい、{label}が昔消えかけたって知ってた？"
+        item["script_ja"] = forced
+        if not str(item.get("script_ko", "") or "").strip():
+            item["script_ko"] = f"야, {label}가 예전에 사라질 뻔한 거 알고 있었어?"
+        return items
+    return items
 
 
 # ─────────────────────────────────────────────
@@ -1347,6 +1405,7 @@ def generate_script_jp(
 
         normalized = sorted(normalized, key=lambda x: x.get("order", 99))
         normalized = _compress_to_story_parts(normalized)
+        normalized = _enforce_aggressive_hook(meta, normalized)
         issues = _check_story_quality(normalized)
         if issues:
             feedback = " / ".join(issues)
@@ -1613,19 +1672,22 @@ _VISUAL_SEARCH_STOPWORDS = {
     "reaction", "scene", "light", "lights", "street", "city", "old", "new",
 }
 _ROLE_QUERY_HINTS: Dict[str, str] = {
-    "hook": "dramatic close up",
-    "problem": "investigation evidence documents",
-    "failure": "public criticism protest news",
-    "success": "factory production success",
-    "point": "product detail close up",
-    "reaction": "person shocked reaction",
+    "hook": "brand logo sign close up",
+    "problem": "old advertisement archive newspaper",
+    "failure": "closed store empty street",
+    "success": "crowded store launch success",
+    "point": "brand product detail close up",
+    "reaction": "person shocked in store",
 }
 _BRAND_QUERY_HINTS: List[Tuple[re.Pattern[str], str]] = [
-    (re.compile(r"(mcdonald|マクドナルド|맥도날드)", re.IGNORECASE), "McDonald's restaurant french fries burger"),
-    (re.compile(r"(coca[- ]?cola|コカ.?コーラ|코카콜라)", re.IGNORECASE), "Coca Cola bottle vending machine"),
-    (re.compile(r"(pepsi|ペプシ|펩시)", re.IGNORECASE), "Pepsi can soda taste test"),
-    (re.compile(r"(nike|ナイキ)", re.IGNORECASE), "Nike sneaker store display"),
-    (re.compile(r"(instagram|インスタ|인스타)", re.IGNORECASE), "smartphone Instagram app screen"),
+    (
+        re.compile(r"(mcdonald|マクドナルド|맥도날드|ronald|ランランルー|란란루)", re.IGNORECASE),
+        "McDonalds logo golden arches Ronald McDonald mascot storefront",
+    ),
+    (re.compile(r"(coca[- ]?cola|コカ.?コーラ|코카콜라)", re.IGNORECASE), "Coca Cola logo bottle vending machine"),
+    (re.compile(r"(pepsi|ペプシ|펩시)", re.IGNORECASE), "Pepsi logo can soda advertisement"),
+    (re.compile(r"(nike|ナイキ)", re.IGNORECASE), "Nike logo sneaker store display"),
+    (re.compile(r"(instagram|インスタ|인스타)", re.IGNORECASE), "Instagram logo smartphone app screen"),
     (re.compile(r"(ramen|ラーメン|라면)", re.IGNORECASE), "ramen noodles bowl close up"),
 ]
 
@@ -3174,6 +3236,44 @@ def fetch_youtube_minecraft_parkour_video(
         _mc_log("Minecraft 배경 확보 실패: 모든 쿼리에서 다운로드 결과 없음")
 
     return result_path
+
+
+def _is_video_readable(path: Optional[str]) -> bool:
+    if not path or not os.path.exists(path):
+        return False
+    if not MOVIEPY_AVAILABLE or VideoFileClip is None:
+        return True
+    try:
+        clip = VideoFileClip(path)
+        _ = float(clip.duration or 0)
+        clip.close()
+        return True
+    except Exception:
+        return False
+
+
+def _fetch_context_video_background(
+    config: AppConfig,
+    keywords: List[str],
+) -> Optional[str]:
+    queries = [q for q in dict.fromkeys(keywords or []) if q]
+    queries.extend(_GLOBAL_BG_FALLBACK_QUERIES[:3])
+    for query in queries[:6]:
+        path: Optional[str] = None
+        if config.pixabay_api_key:
+            path = fetch_pixabay_video(query, config.pixabay_api_key, config.width, config.height)
+        if not path and config.pexels_api_key:
+            path = fetch_pexels_video(
+                query=query,
+                api_key=config.pexels_api_key,
+                output_dir="/tmp/pexels_bg_videos",
+                canvas_w=config.width,
+                canvas_h=config.height,
+            )
+        if path and _is_video_readable(path):
+            _telemetry_log(f"컨텍스트 배경 영상 확보: {os.path.basename(path)} (q={query})", config)
+            return path
+    return None
 
 
 def fetch_youtube_minecraft_bgm(output_dir: str) -> Optional[str]:
@@ -5030,24 +5130,43 @@ def _auto_jp_flow(
             config.height,
             config=config,
         )
-        if mc_path:
+        if mc_path and _is_video_readable(mc_path):
             bg_video_paths = [mc_path] * len(texts)
             placeholder = _ensure_placeholder_image(config)
             bg_image_paths = [placeholder] * len(texts)
             _telemetry_log("Minecraft Parkour 배경 영상 사용", config)
             _ui_info("배경 영상: Minecraft Parkour (YouTube)", use_streamlit)
         else:
-            background_mode = "image"
-            _notify("⚠️", "배경 영상 실패", "Minecraft 다운로드 실패, 이미지로 대체")
-            _telemetry_log("Minecraft 다운로드 실패 → 이미지 모드 전환", config)
+            fallback_video = _fetch_context_video_background(config, visual_keywords)
+            if fallback_video:
+                background_mode = "context_video"
+                bg_video_paths = [fallback_video] * len(texts)
+                placeholder = _ensure_placeholder_image(config)
+                bg_image_paths = [placeholder] * len(texts)
+                _telemetry_log("Minecraft 실패 → 컨텍스트 영상 대체 사용", config)
+            else:
+                background_mode = "image"
+                _notify("⚠️", "배경 영상 실패", "Minecraft 다운로드 실패, 이미지로 대체")
+                _telemetry_log("Minecraft 다운로드 실패 → 이미지 모드 전환", config)
     if background_mode == "image":
         bg_video_paths = [None] * len(texts)
         if config.pixabay_api_key or config.pexels_api_key:
             bg_image_paths = fetch_segment_images(config, visual_keywords)
             _telemetry_log("키워드 이미지 수집 완료", config)
+            placeholder = _ensure_placeholder_image(config)
+            if bg_image_paths and all((not p) or p == placeholder for p in bg_image_paths):
+                fallback_video = _fetch_context_video_background(config, visual_keywords)
+                if fallback_video:
+                    background_mode = "context_video"
+                    bg_video_paths = [fallback_video] * len(texts)
+                    bg_image_paths = [placeholder] * len(texts)
+                    _telemetry_log("이미지 결과 부족 → 컨텍스트 영상 대체", config)
         else:
             placeholder = _ensure_placeholder_image(config)
             bg_image_paths = [placeholder] * len(texts)
+    video_count = len([p for p in bg_video_paths if p])
+    image_count = len([p for p in bg_image_paths if p])
+    _telemetry_log(f"배경 적용 요약: mode={background_mode}, video_segments={video_count}, image_segments={image_count}", config)
 
     # 에셋 스티커는 사용하지 않음 (배경 이미지/영상 중심)
     placeholder = _ensure_placeholder_image(config)
@@ -5621,20 +5740,40 @@ def run_streamlit_app() -> None:
                             config.height,
                             config=config,
                         )
-                        if _mc_m:
+                        if _mc_m and _is_video_readable(_mc_m):
                             bg_vids_manual = [_mc_m] * len(texts)
                             placeholder = _ensure_placeholder_image(config)
                             bg_imgs_manual = [placeholder] * len(texts)
                             _telemetry_log("수동 렌더링: Minecraft Parkour 배경 사용", config)
                         else:
-                            background_mode = "image"
-                            _ui_warning("Minecraft 다운로드 실패 — 이미지로 대체", True)
+                            fallback_video = _fetch_context_video_background(config, _kws_m)
+                            if fallback_video:
+                                background_mode = "context_video"
+                                bg_vids_manual = [fallback_video] * len(texts)
+                                placeholder = _ensure_placeholder_image(config)
+                                bg_imgs_manual = [placeholder] * len(texts)
+                                _telemetry_log("수동 렌더링: 컨텍스트 영상 대체 사용", config)
+                            else:
+                                background_mode = "image"
+                                _ui_warning("Minecraft 다운로드 실패 — 이미지로 대체", True)
                     if background_mode == "image":
                         if config.pixabay_api_key or config.pexels_api_key:
                             bg_imgs_manual = fetch_segment_images(config, _kws_m)
+                            placeholder = _ensure_placeholder_image(config)
+                            if bg_imgs_manual and all((not p) or p == placeholder for p in bg_imgs_manual):
+                                fallback_video = _fetch_context_video_background(config, _kws_m)
+                                if fallback_video:
+                                    background_mode = "context_video"
+                                    bg_vids_manual = [fallback_video] * len(texts)
+                                    bg_imgs_manual = [placeholder] * len(texts)
+                                    _telemetry_log("수동 렌더링: 이미지 부족 → 컨텍스트 영상 대체", config)
                         else:
                             placeholder = _ensure_placeholder_image(config)
                             bg_imgs_manual = [placeholder] * len(texts)
+                    _telemetry_log(
+                        f"수동 배경 요약: mode={background_mode}, video_segments={len([p for p in bg_vids_manual if p])}, image_segments={len([p for p in bg_imgs_manual if p])}",
+                        config,
+                    )
                     _status_update(progress, status_box, 0.3, "TTS 생성")
                     now = datetime.utcnow().strftime("%Y%m%d_%H%M%S")
                     audio_path = os.path.join(config.output_dir, f"tts_{now}.mp3")
@@ -6427,18 +6566,36 @@ def run_batch(count: int, seed: str = "", beats: int = 7) -> None:
                 config.height,
                 config=config,
             )
-            if _mc_b:
+            if _mc_b and _is_video_readable(_mc_b):
                 bg_vids_b = [_mc_b] * len(texts)
                 placeholder = _ensure_placeholder_image(config)
                 bg_imgs_b = [placeholder] * len(texts)
             else:
-                background_mode = "image"
+                fallback_video = _fetch_context_video_background(config, visual_kws)
+                if fallback_video:
+                    background_mode = "context_video"
+                    bg_vids_b = [fallback_video] * len(texts)
+                    placeholder = _ensure_placeholder_image(config)
+                    bg_imgs_b = [placeholder] * len(texts)
+                else:
+                    background_mode = "image"
         if background_mode == "image":
             if config.pixabay_api_key or config.pexels_api_key:
                 bg_imgs_b = fetch_segment_images(config, visual_kws)
+                placeholder = _ensure_placeholder_image(config)
+                if bg_imgs_b and all((not p) or p == placeholder for p in bg_imgs_b):
+                    fallback_video = _fetch_context_video_background(config, visual_kws)
+                    if fallback_video:
+                        background_mode = "context_video"
+                        bg_vids_b = [fallback_video] * len(texts)
+                        bg_imgs_b = [placeholder] * len(texts)
             else:
                 placeholder = _ensure_placeholder_image(config)
                 bg_imgs_b = [placeholder] * len(texts)
+        _telemetry_log(
+            f"배치 배경 요약: mode={background_mode}, video_segments={len([p for p in bg_vids_b if p])}, image_segments={len([p for p in bg_imgs_b if p])}",
+            config,
+        )
         render_video(
             config=config,
             asset_paths=assets,
