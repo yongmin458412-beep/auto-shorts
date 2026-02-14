@@ -3689,7 +3689,12 @@ class RunTimelineNotifier:
         msg = f"{icon} {ts} - {title}"
         if detail:
             msg += f"\n   \"{detail}\""
-        send_telegram_message(self.config.telegram_bot_token, self.config.telegram_admin_chat_id, msg)
+        send_telegram_message(
+            self.config.telegram_bot_token,
+            self.config.telegram_admin_chat_id,
+            msg,
+            silent=True,
+        )
 
     def finish(self, success_platforms: List[str], next_run: datetime | None = None) -> None:
         elapsed = max(1, int(time.time() - self.start_ts))
@@ -4749,7 +4754,7 @@ def collect_images_auto_trend(
     return collected[:total_count], queries
 
 
-def send_telegram_message(token: str, chat_id: str, text: str) -> bool:
+def send_telegram_message(token: str, chat_id: str, text: str, silent: bool = False) -> bool:
     """
     텔레그램 메시지 전송. 성공하면 True, 실패하면 False 반환.
     - 4096자 초과 시 자동 분할 전송
@@ -4762,7 +4767,11 @@ def send_telegram_message(token: str, chat_id: str, text: str) -> bool:
     chunks = [text[i : i + max_len] for i in range(0, max(len(text), 1), max_len)]
     success = True
     for chunk in chunks:
-        payload = {"chat_id": chat_id, "text": chunk}
+        payload = {
+            "chat_id": chat_id,
+            "text": chunk,
+            "disable_notification": bool(silent),
+        }
         try:
             resp = requests.post(url, json=payload, timeout=30)
             if not resp.ok:
@@ -4854,7 +4863,7 @@ def _telemetry_log(message: str, config: Optional[AppConfig] = None) -> bool:
         return False
     prefix = "[auto-shorts]"
     try:
-        return send_telegram_message(token, chat_id, f"{prefix} {message}")
+        return send_telegram_message(token, chat_id, f"{prefix} {message}", silent=True)
     except Exception:
         return False
 
@@ -5599,6 +5608,7 @@ def _auto_jp_flow(
             use_streamlit,
         )
         return False
+    _set_run_notifier(RunTimelineNotifier(config, enabled=True))
     _notify("🚀", "AI 쇼츠 파이프라인 시작!")
 
     # ── 대본 생성 ─────────────────────────────────────────
