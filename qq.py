@@ -2417,6 +2417,10 @@ def tags_from_text(text: str) -> List[str]:
 
 
 _SYSTEM_FONT_CANDIDATES = [
+    # 트렌디 일본어 폰트가 설치된 경우 우선
+    "/usr/share/fonts/truetype/zenkakugothicnew/ZenKakuGothicNew-Bold.ttf",
+    "/usr/share/fonts/truetype/mplus/MPLUSRounded1c-ExtraBold.ttf",
+    "/usr/share/fonts/truetype/bizudpgothic/BIZUDPGothic-Bold.ttf",
     # Streamlit Cloud / Ubuntu
     "/usr/share/fonts/truetype/noto/NotoSansCJK-Regular.ttc",
     "/usr/share/fonts/opentype/noto/NotoSansCJK-Regular.ttc",
@@ -2431,6 +2435,9 @@ _SYSTEM_FONT_CANDIDATES = [
 
 # 일본어 가독성용 Noto Sans JP Bold (일본 예능 자막 스타일)
 _JAPANESE_FONT_CANDIDATES = [
+    "/usr/share/fonts/truetype/zenkakugothicnew/ZenKakuGothicNew-Bold.ttf",
+    "/usr/share/fonts/truetype/mplus/MPLUSRounded1c-ExtraBold.ttf",
+    "/usr/share/fonts/truetype/bizudpgothic/BIZUDPGothic-Bold.ttf",
     "/usr/share/fonts/opentype/noto/NotoSansCJK-Bold.ttc",
     "/usr/share/fonts/truetype/noto/NotoSansCJK-Bold.ttc",
     "/usr/share/fonts/noto-cjk/NotoSansCJK-Bold.ttc",
@@ -2438,27 +2445,52 @@ _JAPANESE_FONT_CANDIDATES = [
 ] + _SYSTEM_FONT_CANDIDATES
 
 
+_TRENDY_JP_FONT_DOWNLOADS: List[Tuple[str, str]] = [
+    (
+        "ZenKakuGothicNew-Bold.ttf",
+        "https://github.com/google/fonts/raw/main/ofl/zenkakugothicnew/ZenKakuGothicNew-Bold.ttf",
+    ),
+    (
+        "MPLUSRounded1c-ExtraBold.ttf",
+        "https://github.com/google/fonts/raw/main/ofl/mplusrounded1c/MPLUSRounded1c-ExtraBold.ttf",
+    ),
+    (
+        "BIZUDPGothic-Bold.ttf",
+        "https://github.com/google/fonts/raw/main/ofl/bizudpgothic/BIZUDPGothic-Bold.ttf",
+    ),
+    (
+        "NotoSansJP[wght].ttf",
+        "https://github.com/google/fonts/raw/main/ofl/notosansjp/NotoSansJP%5Bwght%5D.ttf",
+    ),
+]
+
+
 def _ensure_japanese_font(assets_dir: str) -> str:
     """
     ./assets/fonts/ 경로에서 일본어 폰트를 불러오거나, 없으면 Google Fonts에서
-    Noto Sans JP Bold를 다운로드합니다. 일본어 자막 깨짐 방지용.
+    트렌디한 일본어 볼드 폰트를 다운로드합니다. 일본어 자막 깨짐 방지용.
     """
     fonts_dir = os.path.join(assets_dir, "fonts")
     os.makedirs(fonts_dir, exist_ok=True)
-    for name in ("NotoSansJP-Bold.otf", "NotoSansJP-Bold.ttf", "NotoSansCJKjp-Bold.otf"):
+    local_names = [name for name, _ in _TRENDY_JP_FONT_DOWNLOADS] + [
+        "NotoSansJP-Bold.otf",
+        "NotoSansJP-Bold.ttf",
+        "NotoSansCJKjp-Bold.otf",
+    ]
+    for name in local_names:
         p = os.path.join(fonts_dir, name)
         if os.path.exists(p):
             return p
-    try:
-        url = "https://github.com/google/fonts/raw/main/ofl/notosansjp/NotoSansJP-Bold.otf"
-        resp = requests.get(url, timeout=30)
-        if resp.status_code == 200 and len(resp.content) > 10000:
-            path = os.path.join(fonts_dir, "NotoSansJP-Bold.otf")
-            with open(path, "wb") as f:
-                f.write(resp.content)
-            return path
-    except Exception:
-        pass
+    for filename, url in _TRENDY_JP_FONT_DOWNLOADS:
+        try:
+            resp = requests.get(url, timeout=30)
+            if resp.status_code == 200 and len(resp.content) > 10000:
+                path = os.path.join(fonts_dir, filename)
+                with open(path, "wb") as f:
+                    f.write(resp.content)
+                return path
+        except Exception:
+            continue
     for candidate in _JAPANESE_FONT_CANDIDATES:
         if os.path.exists(candidate) and ImageFont:
             try:
@@ -2630,28 +2662,43 @@ def _pick_thumbnail_source(
 
 
 def _apply_korean_template(image: Image.Image, canvas_width: int, canvas_height: int) -> Image.Image:
-    """한국형 쇼츠 템플릿 느낌의 오버레이 (상·하단 그라디언트 + 얇은 프레임)."""
+    """트렌디 쇼츠 느낌의 오버레이 (시네마 그라디언트 + 네온 엣지)."""
     overlay = Image.new("RGBA", (canvas_width, canvas_height), (0, 0, 0, 0))
     draw = ImageDraw.Draw(overlay)
 
-    grad_h = int(canvas_height * 0.18)
-    # 상단 그라디언트
-    for y in range(grad_h):
-        alpha = int(160 * (1 - y / max(1, grad_h)))
+    # 배경 전체에 은은한 시네마 컬러 그라디언트
+    grad_step = 3
+    for y in range(0, canvas_height, grad_step):
+        p = y / max(1, canvas_height - 1)
+        r = int(10 + 22 * p)
+        g = int(14 + 28 * p)
+        b = int(18 + 44 * p)
+        a = int(55 + 25 * p)
+        draw.rectangle([0, y, canvas_width, min(canvas_height, y + grad_step)], fill=(r, g, b, a))
+
+    # 자막 가독성 확보용 상/하단 비네팅
+    top_h = int(canvas_height * 0.17)
+    for y in range(top_h):
+        alpha = int(135 * (1 - y / max(1, top_h)))
         draw.line([(0, y), (canvas_width, y)], fill=(0, 0, 0, alpha))
-    # 하단 그라디언트
-    for y in range(grad_h):
-        alpha = int(200 * (y / max(1, grad_h)))
-        draw.line(
-            [(0, canvas_height - grad_h + y), (canvas_width, canvas_height - grad_h + y)],
-            fill=(0, 0, 0, alpha),
-        )
-    # 얇은 프레임
-    frame_margin = max(6, int(canvas_width * 0.006))
-    draw.rectangle(
-        [frame_margin, frame_margin, canvas_width - frame_margin, canvas_height - frame_margin],
-        outline=(255, 255, 255, 40),
-        width=2,
+    bottom_h = int(canvas_height * 0.24)
+    for y in range(bottom_h):
+        alpha = int(185 * (y / max(1, bottom_h)))
+        yy = canvas_height - bottom_h + y
+        draw.line([(0, yy), (canvas_width, yy)], fill=(0, 0, 0, alpha))
+
+    # 좌우 네온 엣지 (과하지 않게)
+    edge_w = max(5, int(canvas_width * 0.006))
+    draw.rectangle([0, 0, edge_w, canvas_height], fill=(79, 208, 255, 72))
+    draw.rectangle([canvas_width - edge_w, 0, canvas_width, canvas_height], fill=(255, 108, 92, 66))
+
+    # 상단 칩(짧은 강조 바)
+    chip_h = max(8, int(canvas_height * 0.008))
+    chip_w = int(canvas_width * 0.22)
+    draw.rounded_rectangle(
+        [int(canvas_width * 0.06), int(canvas_height * 0.05), int(canvas_width * 0.06) + chip_w, int(canvas_height * 0.05) + chip_h],
+        radius=max(4, chip_h // 2),
+        fill=(255, 255, 255, 86),
     )
     return Image.alpha_composite(image.convert("RGBA"), overlay).convert("RGB")
 
@@ -2842,8 +2889,12 @@ def _draw_subtitle(
     style_key = (style or "").strip().lower()
     is_reaction = style_key in {"reaction", "outro", "outro_loop"}
     is_japanese_variety = style_key == "japanese_variety"
+    box_outline = (255, 255, 255, 0)
+    accent_fill = (255, 255, 255, 0)
     if is_reaction:
-        box_fill = (255, 232, 92, 220)
+        box_fill = (255, 232, 92, 214)
+        box_outline = (255, 255, 255, 120)
+        accent_fill = (255, 255, 255, 105)
         text_fill = (25, 20, 0)
         stroke_fill = (0, 0, 0)
         stroke_width = 3
@@ -2854,10 +2905,13 @@ def _draw_subtitle(
         stroke_fill = (0, 0, 0)
         stroke_width = 10          # 기존 6 → 10으로 강화 (일본 예능 TV 스타일)
     else:
-        box_fill = (0, 0, 0, 185)
+        # old-PPT 느낌을 줄이기 위해 글래스 카드 톤으로 변경
+        box_fill = (12, 16, 24, 165)
+        box_outline = (120, 216, 255, 118)
+        accent_fill = (100, 232, 255, 112)
         text_fill = (255, 255, 255)
         stroke_fill = (0, 0, 0)
-        stroke_width = 4
+        stroke_width = 3
 
     # 애니메이션: 팝업(scale) + 튀어오르기(bounce) + 페이드아웃 + 새벽 빛 효과(glow)
     scale = 1.0
@@ -2883,10 +2937,29 @@ def _draw_subtitle(
         box_y + total_h + box_pad,
     ]
     if not is_japanese_variety:
-        if hasattr(box_draw, "rounded_rectangle") and is_reaction:
-            box_draw.rounded_rectangle(box_rect, radius=24, fill=box_fill)
+        if hasattr(box_draw, "rounded_rectangle"):
+            radius = 26 if is_reaction else 20
+            box_draw.rounded_rectangle(
+                box_rect,
+                radius=radius,
+                fill=box_fill,
+                outline=box_outline if box_outline[3] > 0 else None,
+                width=2 if box_outline[3] > 0 else 1,
+            )
         else:
             box_draw.rectangle(box_rect, fill=box_fill)
+        # 카드 상단 하이라이트 바
+        if accent_fill[3] > 0:
+            accent_h = max(4, int(canvas_height * 0.004))
+            box_draw.rectangle(
+                [
+                    box_rect[0] + 8,
+                    box_rect[1] + 8,
+                    box_rect[2] - 8,
+                    box_rect[1] + 8 + accent_h,
+                ],
+                fill=accent_fill,
+            )
 
     # 말풍선 꼬리 (reaction 전용)
     if is_reaction:
@@ -3944,7 +4017,18 @@ def render_video(
             bg_img = _fit_image_to_canvas(bg_img, (W, H))
             base_clip = ImageClip(np.array(bg_img)).set_duration(dur)
             clip = base_clip.fl(_render_frame)
-            clip = clip.fx(vfx.resize, lambda t, d=dur: 1 + 0.02 * (t / max(d, 0.1)))
+            zoom_strength = random.uniform(0.035, 0.065)
+            clip = clip.fx(
+                vfx.resize,
+                lambda t, d=dur, z=zoom_strength: 1 + z * (t / max(d, 0.1)),
+            )
+
+        # 세그먼트 연결을 부드럽게 (구식 컷 전환 느낌 완화)
+        try:
+            trans = min(0.12, dur * 0.15)
+            clip = clip.fx(vfx.fadein, trans).fx(vfx.fadeout, trans)
+        except Exception:
+            pass
 
         clips.append(clip)
         vid_offset += dur
@@ -5223,6 +5307,32 @@ def _build_upload_report_ko(
     return "\n".join(lines)
 
 
+def _build_approval_script_summary(
+    texts_ja: List[str],
+    texts_ko: List[str],
+    roles: Optional[List[str]] = None,
+) -> str:
+    role_labels = {
+        "hook": "Hook",
+        "problem": "Problem",
+        "failure": "Failure",
+        "success": "Twist",
+        "point": "Point",
+        "reaction": "Reaction",
+    }
+    lines: List[str] = ["[대본 요약 - 기승전결 전체]"]
+    ko_norm = _normalize_ko_lines(texts_ko, texts_ja)
+    for idx, ja in enumerate(texts_ja):
+        role = roles[idx] if roles and idx < len(roles) else "body"
+        role_label = role_labels.get(str(role).lower(), "Body")
+        ja_line = re.sub(r"\s+", " ", str(ja or "").strip())
+        ko_line = re.sub(r"\s+", " ", str(ko_norm[idx] if idx < len(ko_norm) else "").strip())
+        lines.append(f"{idx+1}. [{role_label}] JA: {ja_line}")
+        if ko_line:
+            lines.append(f"   KO: {ko_line}")
+    return "\n".join(lines)
+
+
 def _build_upload_caption_text(
     title: str,
     hashtags: List[str],
@@ -5849,6 +5959,7 @@ def _auto_jp_flow(
 
     # ── 최종 승인: 렌더링된 영상 미리보기 전송 후 업로드 여부 결정 ─────────
     if config.require_approval:
+        script_summary = _build_approval_script_summary(texts, texts_ko_norm, roles)
         approval_caption = (
             "[업로드 전 최종 승인]\n"
             f"제목: {video_title}\n"
@@ -5856,6 +5967,7 @@ def _auto_jp_flow(
             f"고정댓글 JA: {pinned}\n"
             f"고정댓글 KO 직역: {pinned_ko}\n"
             f"해시태그: {' '.join(hashtags)}\n"
+            f"\n{script_summary}\n\n"
             "버튼으로 업로드 여부를 선택해주세요."
         )
         _status_update(progress, status_box, 0.78, "텔레그램에 렌더링 영상 전송 중")
@@ -6428,6 +6540,7 @@ def run_streamlit_app() -> None:
                             _telemetry_log(f"수동 썸네일 생성 실패: {thumb_err}", config)
                     should_upload = True
                     if config.require_approval:
+                        script_summary = _build_approval_script_summary(texts, texts_ko_norm, roles)
                         approval_caption = (
                             "[업로드 전 최종 승인]\n"
                             f"제목: {video_title_val}\n"
@@ -6435,6 +6548,7 @@ def run_streamlit_app() -> None:
                             f"고정댓글 JA: {pinned_val}\n"
                             f"고정댓글 KO 직역: {pinned_ko}\n"
                             f"해시태그: {hashtags_val}\n"
+                            f"\n{script_summary}\n\n"
                             "버튼으로 업로드 여부를 선택해주세요."
                         )
                         _status_update(progress, status_box, 0.78, "텔레그램에 렌더링 영상 전송 중")
@@ -7285,10 +7399,12 @@ def run_batch(count: int, seed: str = "", beats: int = 7) -> None:
                 thumb_path = ""
         should_upload = True
         if config.require_approval:
+            script_summary = _build_approval_script_summary(texts, texts_ko, roles)
             approval_caption = (
                 "[업로드 전 최종 승인]\n"
                 f"제목: {_meta_b.get('title_ja', _meta_b.get('title', ''))}\n"
                 f"무드: {mood}\n"
+                f"\n{script_summary}\n\n"
                 "배치 생성 영상입니다. 업로드하려면 승인 버튼을 눌러주세요."
             )
             approval_msg_id = send_telegram_video_approval_request(
