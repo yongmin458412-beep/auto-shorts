@@ -2725,12 +2725,13 @@ def _apply_asmr_voice_filter(audio_path: str) -> str:
         f"asmr_{os.path.basename(audio_path)}",
     )
     filt = (
-        "highpass=f=150,"
-        "lowpass=f=4800,"
-        "acompressor=threshold=-28dB:ratio=3.2:attack=12:release=160:makeup=8,"
-        "equalizer=f=3000:t=q:w=1.2:g=3.0,"
-        "volume=1.18,"
-        "alimiter=limit=0.92"
+        "highpass=f=145,"
+        "lowpass=f=5200,"
+        "acompressor=threshold=-30dB:ratio=3.4:attack=10:release=150:makeup=10,"
+        "equalizer=f=2600:t=q:w=1.1:g=2.6,"
+        "equalizer=f=4200:t=q:w=1.2:g=2.2,"
+        "volume=1.30,"
+        "alimiter=limit=0.95"
     )
     if _apply_ffmpeg_audio_filter(audio_path, filtered, filt):
         try:
@@ -3671,7 +3672,7 @@ def _draw_fixed_template_title(
         return image
     max_w = max(80, int((right - left) * 0.95))
     # 요청사항: 제목은 한 줄, 더 작고 굵게
-    font_size = max(18, int(canvas_width * 0.040))
+    font_size = max(30, int(canvas_width * 0.065))
     line = text.replace("\n", " ").strip()
     for _ in range(18):
         font = _load_font(font_path, font_size)
@@ -3738,6 +3739,7 @@ def _compose_fixed_template_background(
         base = Image.new("RGB", (canvas_width, canvas_height), color=(238, 236, 226))
     title_rect = _layout_rect_from_spec(layout.get("title_box"), canvas_width, canvas_height)
     content_rect = _layout_rect_from_spec(layout.get("content_box"), canvas_width, canvas_height)
+    subtitle_rect = _layout_rect_from_spec(layout.get("subtitle_box"), canvas_width, canvas_height)
     base = _draw_fixed_template_title(
         base,
         title_text=title_text,
@@ -3769,6 +3771,15 @@ def _compose_fixed_template_background(
         center_y = int(canvas_height * max(0.45, min(0.85, center_y_ratio)))
         x = max(8, min(canvas_width - side - 8, center_x - side // 2))
         y = max(int(canvas_height * 0.42), min(canvas_height - side - 12, center_y - side // 2))
+    # 안전 여백: 제목↔이미지, 이미지↔자막 최소 40px
+    min_gap = max(24, int(round(canvas_height * (40.0 / 1536.0))))
+    if title_rect:
+        title_bottom = int(title_rect[3])
+        y = max(y, title_bottom + min_gap)
+    if subtitle_rect:
+        subtitle_top = int(subtitle_rect[1])
+        y = min(y, subtitle_top - min_gap - side)
+    y = max(8, min(canvas_height - side - 8, y))
     content = content.resize((side, side), Image.LANCZOS)
     out = base.convert("RGBA")
     shadow = Image.new("RGBA", out.size, (0, 0, 0, 0))
@@ -3921,6 +3932,7 @@ def _draw_subtitle(
     duration: Optional[float] = None,
     hold_ratio: float = 1.0,
     box_top_override: Optional[int] = None,
+    box_bottom_limit: Optional[int] = None,
 ) -> Image.Image:
     """자막을 YouTube Shorts 안전 영역(화면 60% 지점)에 렌더링.
     모바일 Shorts 하단 UI(제목·좋아요·댓글 등)가 화면 하단 ~30%를 덮으므로
@@ -3985,7 +3997,8 @@ def _draw_subtitle(
     # 오버라이드 제공 시: 지정된 top 위치 사용(사진 바로 아래 배치 용도)
     if box_top_override is not None:
         box_y = int(box_top_override)
-        box_y = max(0, min(canvas_height - total_h - 8, box_y))
+        max_bottom = box_bottom_limit if box_bottom_limit is not None else (canvas_height - 8)
+        box_y = max(0, min(max_bottom - total_h, box_y))
     else:
         safe_bottom = int(canvas_height * 0.68)
         box_y = safe_bottom - total_h
@@ -5987,7 +6000,11 @@ def render_video(
         _is_last_segment = index == (len(texts) - 1)
         _ending_asset = ending_asset_path if _is_last_segment else ""
         _subtitle_top_override: Optional[int] = None
+        _subtitle_bottom_limit: Optional[int] = None
         if use_fixed_template_layout:
+            green_top = int(round(H * (1320.0 / 1536.0)))
+            ui_safe_top = H - max(1, int(round(H * (150.0 / 1536.0))))
+            _subtitle_bottom_limit = min(green_top, ui_safe_top)
             media_bottom = 0
             if template_content_rect:
                 c_left, c_top, c_right, c_bottom = template_content_rect
@@ -6005,10 +6022,11 @@ def render_video(
                 center_y = int(H * max(0.45, min(0.85, center_y_ratio)))
                 media_top = max(int(H * 0.42), min(H - side - 12, center_y - side // 2))
                 media_bottom = media_top + side
-            margin = max(10, int(H * 0.014))
+            margin = max(24, int(round(H * (40.0 / 1536.0))))
             min_subtitle_top = int(media_bottom + margin)
             if template_subtitle_rect:
                 _subtitle_top_override = max(int(template_subtitle_rect[1]), min_subtitle_top)
+                _subtitle_bottom_limit = min(_subtitle_bottom_limit, int(template_subtitle_rect[3]))
             else:
                 _subtitle_top_override = min_subtitle_top
 
@@ -6025,6 +6043,7 @@ def render_video(
             __ending_asset=_ending_asset,
             __is_last_segment=_is_last_segment,
             __subtitle_top_override=_subtitle_top_override,
+            __subtitle_bottom_limit=_subtitle_bottom_limit,
         ):
             frame = get_frame(t)
             img = Image.fromarray(frame).convert("RGB")
@@ -6055,6 +6074,7 @@ def render_video(
                     duration=__dur,
                     hold_ratio=_hold_ratio,
                     box_top_override=__subtitle_top_override,
+                    box_bottom_limit=__subtitle_bottom_limit,
                 )
             if __is_last_segment and __ending_asset and os.path.exists(__ending_asset):
                 like_size = max(120, int(min(W, H) * 0.20))
