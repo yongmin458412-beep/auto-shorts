@@ -5426,8 +5426,9 @@ def _resolve_primary_photo_asset(config: AppConfig) -> Optional[str]:
     if existing_primary:
         return existing_primary
 
-    # 4) 마지막 fallback
+    # 4) 마지막 fallback (branding/ 포함 - 업로드 이미지 저장 위치)
     fallback_sources = [
+        os.path.join(config.assets_dir, "branding"),
         os.path.join(config.assets_dir, "inbox"),
         os.path.join(config.assets_dir, "images"),
     ]
@@ -8938,15 +8939,27 @@ def run_streamlit_app() -> None:
 
     if page == "에셋":
         st.header("에셋")
+        # 업로드 이미지는 git에 포함된 branding/ 폴더에 저장 → 재시작 후에도 영속적으로 유지
+        branding_dir = os.path.join(config.assets_dir, "branding")
+        os.makedirs(branding_dir, exist_ok=True)
         upload_files = st.file_uploader("이미지 업로드", type=["jpg", "jpeg", "png"], accept_multiple_files=True)
         tag_input = st.text_input("태그(쉼표 구분)")
         if st.button("업로드 저장") and upload_files:
+            saved_count = 0
             for file in upload_files:
-                save_path = os.path.join(config.assets_dir, "images", file.name)
+                save_path = os.path.join(branding_dir, file.name)
                 with open(save_path, "wb") as out_file:
                     out_file.write(file.getbuffer())
-                add_asset(config.manifest_path, save_path, tags_from_text(tag_input))
-            st.success("에셋이 저장되었습니다.")
+                # 이미 manifest에 동일 경로가 있으면 중복 등록 방지
+                existing_paths = {item.path for item in load_manifest(config.manifest_path)}
+                if save_path not in existing_paths:
+                    add_asset(config.manifest_path, save_path, tags_from_text(tag_input))
+                    saved_count += 1
+            if saved_count:
+                st.success(f"에셋 {saved_count}개가 저장되었습니다.")
+                st.rerun()
+            else:
+                st.info("이미 라이브러리에 등록된 파일입니다.")
 
         st.subheader("BGM 업로드")
         bgm_files = st.file_uploader(
