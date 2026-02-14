@@ -12,6 +12,7 @@ import shutil
 import subprocess
 import textwrap
 import time
+import uuid
 from difflib import SequenceMatcher
 from html import unescape
 from urllib.parse import urljoin, urlencode, urlparse
@@ -466,8 +467,6 @@ class AppConfig:
     youtube_privacy_status: str
     serpapi_api_key: str
     pexels_api_key: str
-    google_cse_api_key: str
-    google_cse_cx: str
     freepik_api_key: str
     picsart_api_key: str
     image_search_source_priority: List[str]
@@ -617,13 +616,11 @@ def load_config() -> AppConfig:
         youtube_privacy_status=_get_secret("YOUTUBE_PRIVACY_STATUS", "public") or "public",
         serpapi_api_key=_get_secret("SERPAPI_API_KEY", "") or "",
         pexels_api_key=pexels_api_key,
-        google_cse_api_key=(_get_secret("GOOGLE_CSE_API_KEY", "") or "").strip(),
-        google_cse_cx=(_get_secret("GOOGLE_CSE_CX", "") or "").strip(),
         freepik_api_key=(_get_secret("FREEPIK_API_KEY", "") or "").strip(),
         picsart_api_key=(_get_secret("PICSART_API_KEY", "") or "").strip(),
         image_search_source_priority=(
             _get_list("IMAGE_SEARCH_SOURCE_PRIORITY")
-            or ["google", "freepik", "serpapi", "pixabay", "pexels", "wikimedia"]
+            or ["freepik", "serpapi", "pixabay", "pexels", "wikimedia"]
         ),
         ja_dialect_style=(
             _get_secret(
@@ -2837,7 +2834,7 @@ def add_asset(
     kind: str = "image",
 ) -> AssetItem:
     items = load_manifest(manifest_path)
-    asset_id = f"asset_{len(items)+1:04d}"
+    asset_id = f"asset_{uuid.uuid4().hex[:8]}"
     new_item = AssetItem(asset_id=asset_id, path=asset_path, tags=tags, kind=kind)
     items.append(new_item)
     save_manifest(manifest_path, items)
@@ -4044,62 +4041,6 @@ def _score_image_candidate_text(
     return score
 
 
-def fetch_google_cse_image(
-    query: str,
-    api_key: str,
-    cse_cx: str,
-    output_dir: str = "/tmp/google_cse_images",
-) -> Optional[str]:
-    if not api_key or not cse_cx:
-        return None
-    save_dir = _ensure_writable_dir(output_dir, "/tmp/google_cse_images")
-    try:
-        params = {
-            "key": api_key,
-            "cx": cse_cx,
-            "q": query,
-            "searchType": "image",
-            "safe": "active",
-            "num": 10,
-        }
-        resp = requests.get("https://www.googleapis.com/customsearch/v1", params=params, timeout=40)
-        if resp.status_code != 200:
-            return None
-        items = resp.json().get("items", []) or []
-        if not items:
-            return None
-        tokens = _extract_query_tokens(query)
-        prefer_logo = bool(_brand_fallback_queries_from_keyword(query)) or ("logo" in query.lower())
-        scored: List[Tuple[int, Dict[str, Any]]] = []
-        for item in items:
-            if not isinstance(item, dict):
-                continue
-            text = " ".join(
-                [
-                    str(item.get("title", "") or ""),
-                    str(item.get("snippet", "") or ""),
-                    str(item.get("displayLink", "") or ""),
-                    str(item.get("link", "") or ""),
-                    str(((item.get("image") or {}) if isinstance(item.get("image"), dict) else {}).get("contextLink", "") or ""),
-                ]
-            )
-            score = _score_image_candidate_text(text, tokens, prefer_logo=prefer_logo)
-            if prefer_logo:
-                # 로고/앱아이콘 쿼리는 아이콘형 이미지를 우선
-                mime = str(item.get("mime", "") or "").lower()
-                if "png" in mime or "webp" in mime:
-                    score += 1
-            scored.append((score, item))
-        scored.sort(key=lambda x: x[0], reverse=True)
-        for _, item in scored[:8]:
-            image_url = str(item.get("link", "") or "").strip()
-            path = _download_image_file(image_url, save_dir, prefix="gcs")
-            if path:
-                return path
-    except Exception:
-        return None
-    return None
-
 
 def fetch_freepik_image(
     query: str,
@@ -4167,9 +4108,6 @@ def fetch_freepik_image(
 
 def _normalize_image_source_priority(raw_list: List[str]) -> List[str]:
     alias = {
-        "google": "google",
-        "google_cse": "google",
-        "google_images": "google",
         "freepik": "freepik",
         "pixabay": "pixabay",
         "pexels": "pexels",
@@ -4183,7 +4121,7 @@ def _normalize_image_source_priority(raw_list: List[str]) -> List[str]:
         if key and key not in out:
             out.append(key)
     if not out:
-        out = ["google", "freepik", "serpapi", "pixabay", "pexels", "wikimedia"]
+        out = ["freepik", "serpapi", "pixabay", "pexels", "wikimedia"]
     return out
 
 
@@ -4194,13 +4132,6 @@ def _fetch_image_from_source(
     dirs: Dict[str, str],
 ) -> Optional[str]:
     src = str(source or "").strip().lower()
-    if src == "google":
-        return fetch_google_cse_image(
-            query=query,
-            api_key=str(getattr(config, "google_cse_api_key", "") or ""),
-            cse_cx=str(getattr(config, "google_cse_cx", "") or ""),
-            output_dir=dirs.get("google", "/tmp/google_cse_images"),
-        )
     if src == "freepik":
         return fetch_freepik_image(
             query=query,
@@ -4288,7 +4219,6 @@ def fetch_segment_images(
     run_stamp = datetime.utcnow().strftime("%Y%m%d_%H%M%S_%f")
     px_dir = f"/tmp/pixabay_images/{run_stamp}"
     pex_dir = f"/tmp/pexels_bg_images/{run_stamp}"
-    gcs_dir = f"/tmp/google_cse_images/{run_stamp}"
     fpk_dir = f"/tmp/freepik_images/{run_stamp}"
     sp_dir = f"/tmp/serpapi_images/{run_stamp}"
     wm_dir = f"/tmp/wikimedia_images/{run_stamp}"
@@ -4298,7 +4228,6 @@ def fetch_segment_images(
     source_dirs = {
         "pixabay": px_dir,
         "pexels": pex_dir,
-        "google": gcs_dir,
         "freepik": fpk_dir,
         "serpapi": sp_dir,
         "wikimedia": wm_dir,
@@ -8314,7 +8243,6 @@ def run_streamlit_app() -> None:
     st.sidebar.write(f"MoviePy 사용 가능: {'예' if MOVIEPY_AVAILABLE else '아니오'}")
     st.sidebar.write(f"BGM 모드: {config.bgm_mode or 'off'}")
     st.sidebar.write("이미지 소스 우선순위: " + ", ".join(_normalize_image_source_priority(config.image_search_source_priority)))
-    st.sidebar.write(f"Google CSE: {'설정됨' if (config.google_cse_api_key and config.google_cse_cx) else '미설정'}")
     st.sidebar.write(f"Freepik: {'설정됨' if config.freepik_api_key else '미설정'}")
     if config.pixabay_api_key:
         key_tail = config.pixabay_api_key[-4:] if len(config.pixabay_api_key) >= 4 else config.pixabay_api_key
@@ -8352,9 +8280,8 @@ def run_streamlit_app() -> None:
     st.sidebar.subheader("선택")
     st.sidebar.markdown(
         "- `YOUTUBE_*` (자동 업로드)\n"
-        "- `GOOGLE_CSE_API_KEY`, `GOOGLE_CSE_CX` (Google 이미지 검색)\n"
         "- `FREEPIK_API_KEY` (Freepik 이미지 검색)\n"
-        "- `IMAGE_SEARCH_SOURCE_PRIORITY` (예: `google,freepik,serpapi,pixabay,pexels,wikimedia`)\n"
+        "- `IMAGE_SEARCH_SOURCE_PRIORITY` (예: `freepik,serpapi,pixabay,pexels,wikimedia`)\n"
         "- `PIXABAY_API_KEY` (배경 이미지/영상, 폴백)\n"
         "- `PIXABAY_BGM_ENABLED` (Pixabay BGM 자동 다운로드 on/off)\n"
         "- `PEXELS_API_KEY` (이미지 자동 수집, 폴백)\n"
