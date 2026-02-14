@@ -741,7 +741,18 @@ def _compress_to_story_parts(items: List[Dict[str, Any]]) -> List[Dict[str, Any]
     return items
 
 
-def _check_story_quality(items: List[Dict[str, Any]]) -> List[str]:
+_FORBIDDEN_MYSTERY_PATTERNS = re.compile(
+    r"(幽霊|心霊|怪談|呪い|悪魔|オカルト|降霊|UFO|宇宙人|ミイラ|古代文明|中世|王朝|海賊船)",
+    re.IGNORECASE,
+)
+_TOO_OLD_YEAR_PATTERNS = re.compile(r"(17\d{2}|18\d{2})")
+_MODERN_DAILY_HINT_PATTERNS = re.compile(
+    r"(スマホ|アプリ|SNS|インスタ|YouTube|TikTok|Netflix|Amazon|Uber|コンビニ|マクドナルド|スタバ|コカ.?コーラ|ペプシ|ナイキ|iPhone|AirPods|サブスク|デリバリー|QR決済|ポイント|クーポン|カップ麺|ラーメン)",
+    re.IGNORECASE,
+)
+
+
+def _check_story_quality(items: List[Dict[str, Any]], meta: Optional[Dict[str, Any]] = None) -> List[str]:
     issues: List[str] = []
     required = ["hook", "problem", "failure", "success", "point", "reaction"]
     roles = {item.get("role") for item in items}
@@ -808,6 +819,20 @@ def _check_story_quality(items: List[Dict[str, Any]]) -> List[str]:
     if not re.search(r"(俺|私|やば|マジ|草|w|笑|ほんま|なんやねん|うわ)", reaction):
         issues.append("Reaction 1인칭/감정 부족")
 
+    meta = meta or {}
+    title_ja = str(meta.get("title_ja", "") or "")
+    topic_en = str(meta.get("topic_en", "") or "")
+    whole_text = " ".join(
+        [title_ja, topic_en]
+        + [str(item.get("script_ja", "") or "") for item in items]
+    )
+    if _FORBIDDEN_MYSTERY_PATTERNS.search(whole_text):
+        issues.append("초자연/유령 계열 소재 금지")
+    if _TOO_OLD_YEAR_PATTERNS.search(whole_text):
+        issues.append("1800년대 이전/유사 고전 연도 소재 금지")
+    if not _MODERN_DAILY_HINT_PATTERNS.search(whole_text):
+        issues.append("현대 일상 공감 키워드 부족")
+
     return issues
 
 
@@ -859,10 +884,10 @@ def _enforce_aggressive_hook(meta: Dict[str, Any], items: List[Dict[str, Any]]) 
         if _is_strong_hook(original):
             return items
         label = _topic_label_for_hook(meta, original)
-        forced = f"おい、{label}が昔消えかけたって知ってた？"
+        forced = f"おい、{label}が一時期ガチで終わりかけたって知ってた？"
         item["script_ja"] = forced
         if not str(item.get("script_ko", "") or "").strip():
-            item["script_ko"] = f"야, {label}가 예전에 사라질 뻔한 거 알고 있었어?"
+            item["script_ko"] = f"야, {label}가 한때 진짜 망할 뻔한 거 알고 있었어?"
         return items
     return items
 
@@ -1112,16 +1137,18 @@ BGM_MOOD_ALIASES: Dict[str, str] = {
 
 # 롤렛 주제 풀 — LLM이 이 리스트를 참고해 매번 새 주제 생성
 JP_CONTENT_THEMES: List[str] = [
-    "コカ・コーラ初期レシピにコカイン成分が含まれていた時代",
-    "マクドナルド兄弟とレイ・クロックの契約裏切り",
-    "タイレノール青酸事件とブランド危機管理",
-    "DBクーパー航空機ハイジャック未解決事件",
-    "アポロ13号 酸素タンク爆発と奇跡の帰還",
-    "フォルクスワーゲン ディーゼルゲート不正",
-    "ペプシチャレンジのブラインドテスト反転結果",
-    "エベレスト1996年遭難と判断ミス",
-    "ボストン糖蜜大洪水(1919)の意外な惨事",
-    "メアリー・セレスト号の幽霊船ミステリー",
+    "マクドナルドのポテトが店舗で味ブレしにくい運用の裏側",
+    "コカ・コーラとペプシの味覚テストで起きる錯覚トリック",
+    "Instagramのおすすめ欄が伸びる投稿と沈む投稿の差",
+    "TikTokの冒頭3秒で離脱率が決まる理由",
+    "NetflixのサムネABテストが視聴行動を変える仕組み",
+    "Amazonレビュー表示順のロジックと購買への影響",
+    "Uberのサージ価格とユーザー心理の駆け引き",
+    "コンビニ新商品が短期間で消える選定ロジック",
+    "スタバ期間限定メニューの希少性マーケ戦略",
+    "Nikeスニーカー抽選販売が熱狂を生む設計",
+    "AirPodsが外れにくく感じる設計と錯覚ポイント",
+    "カップ麺ヒット商品が生まれる試作サイクルの裏話",
 ]
 
 # 반응형 고정댓글 후보 (랜덤 선택)
@@ -1141,6 +1168,12 @@ JP_SHORTS_SYSTEM_PROMPT: str = """あなたは日本のYouTube Shortsトレン�
 2) テンポ最優先。短文・辛口・シニカルに。
 3) 最後は必ず1人称の独り言で締める。
 4) 事実は「意外性・裏側・衝撃」に寄せる。
+
+[テーマ制約]
+1) 幽霊・怪談・超自然・オカルトは禁止。
+2) 1800年代以前、古代史/中世史メインの話は禁止。
+3) いまの生活で使うブランド/アプリ/食べ物/サービスだけ扱う。
+4) 視聴者が「今日の自分に関係ある」と感じる具体例を必ず入れる。
 
 [ストーリー構成: 6段階]
 1) Hook: 目を止める挑発。例「まだこれ使ってるの？」
@@ -1324,6 +1357,8 @@ def generate_script_jp(
     user_text = (
         "以下のテーマ例を参考に、日本人向けの現代ミステリー/裏話ショート台本を作成してください。\n"
         "Hook → Problem → Failure → Success → Point → Reaction の6段構成を守り、タメ口でテンポよく書いてください。\n"
+        "幽霊/怪談/オカルト/古代史/中世史/1800年代以前のネタは使わないでください。\n"
+        "視聴者の日常に直結するテーマ(ブランド・アプリ・食べ物・サービス)のみ選んでください。\n"
         + (f"日本語の口調は必ず「{dialect_style}」のニュアンスで統一してください。\n" if dialect_style else "")
         + "必ずJSONのみを出力してください。\n\n"
         f"[テーマ例]\n{theme_pool}\n\n"
@@ -1453,7 +1488,7 @@ def generate_script_jp(
         normalized = sorted(normalized, key=lambda x: x.get("order", 99))
         normalized = _compress_to_story_parts(normalized)
         normalized = _enforce_aggressive_hook(meta, normalized)
-        issues = _check_story_quality(normalized)
+        issues = _check_story_quality(normalized, meta=meta)
         if issues:
             feedback = " / ".join(issues)
             last_error = "스토리 구조 품질 미달"
