@@ -3069,13 +3069,17 @@ def _open_image_rgb_safe(path: str, alpha_bg: Tuple[int, int, int] = (255, 255, 
     """
     if not MOVIEPY_AVAILABLE:
         raise RuntimeError(f"MoviePy/PIL not available: {MOVIEPY_ERROR}")
-    img = Image.open(path)
-    if img.mode in {"RGBA", "LA"} or ("transparency" in getattr(img, "info", {})):
-        rgba = img.convert("RGBA")
-        bg = Image.new("RGBA", rgba.size, (alpha_bg[0], alpha_bg[1], alpha_bg[2], 255))
-        merged = Image.alpha_composite(bg, rgba)
-        return merged.convert("RGB")
-    return img.convert("RGB")
+    try:
+        img = Image.open(path)
+        if img.mode in {"RGBA", "LA"} or ("transparency" in getattr(img, "info", {})):
+            rgba = img.convert("RGBA")
+            bg = Image.new("RGBA", rgba.size, (alpha_bg[0], alpha_bg[1], alpha_bg[2], 255))
+            merged = Image.alpha_composite(bg, rgba)
+            return merged.convert("RGB")
+        return img.convert("RGB")
+    except Exception:
+        # 손상 파일이 섞여도 렌더가 죽지 않도록 단색 이미지로 폴백
+        return Image.new("RGB", (1080, 1920), color=alpha_bg)
 
 
 def _enhance_bg_image_quality(image: Image.Image) -> Image.Image:
@@ -3933,18 +3937,9 @@ def fetch_pixabay_image(
                 url = hit.get("largeImageURL") or hit.get("webformatURL") or hit.get("previewURL")
                 if not url:
                     continue
-                try:
-                    img_resp = requests.get(url, stream=True, timeout=60)
-                    img_resp.raise_for_status()
-                    ext = os.path.splitext(urlparse(url).path)[1] or ".jpg"
-                    fname = f"pximg_{random.randint(100000, 999999)}{ext}"
-                    fpath = os.path.join(save_dir, fname)
-                    with open(fpath, "wb") as out:
-                        for chunk in img_resp.iter_content(chunk_size=65536):
-                            out.write(chunk)
-                    return fpath
-                except Exception:
-                    continue
+                path = _download_image_file(str(url), save_dir, prefix="pximg")
+                if path:
+                    return path
         except Exception:
             return None
         return None
@@ -3997,17 +3992,9 @@ def fetch_serpapi_image(
             image_url = item.get("original") or item.get("thumbnail")
             if not image_url:
                 continue
-            try:
-                r = requests.get(image_url, stream=True, timeout=40)
-                r.raise_for_status()
-                ext = os.path.splitext(urlparse(str(image_url)).path)[1] or ".jpg"
-                path = os.path.join(save_dir, f"sp_{random.randint(100000, 999999)}{ext}")
-                with open(path, "wb") as out:
-                    for chunk in r.iter_content(chunk_size=65536):
-                        out.write(chunk)
+            path = _download_image_file(str(image_url), save_dir, prefix="sp")
+            if path:
                 return path
-            except Exception:
-                continue
     except Exception:
         return None
     return None
@@ -4038,6 +4025,17 @@ def _download_image_file(image_url: str, output_dir: str, prefix: str = "img") -
             for chunk in resp.iter_content(chunk_size=65536):
                 if chunk:
                     out.write(chunk)
+        # 손상 파일/HTML 위장 파일 방지
+        try:
+            if MOVIEPY_AVAILABLE and Image is not None:
+                with Image.open(file_path) as img_obj:
+                    img_obj.verify()
+        except Exception:
+            try:
+                os.remove(file_path)
+            except Exception:
+                pass
+            return None
         return file_path if os.path.exists(file_path) else None
     except Exception:
         return None
@@ -4321,17 +4319,9 @@ def fetch_wikimedia_image(
             url = str(infos[0].get("url", "") or "")
             if not url:
                 continue
-            try:
-                r = requests.get(url, stream=True, timeout=40)
-                r.raise_for_status()
-                ext = os.path.splitext(urlparse(url).path)[1] or ".jpg"
-                path = os.path.join(save_dir, f"wm_{random.randint(100000, 999999)}{ext}")
-                with open(path, "wb") as out:
-                    for chunk in r.iter_content(chunk_size=65536):
-                        out.write(chunk)
+            path = _download_image_file(str(url), save_dir, prefix="wm")
+            if path:
                 return path
-            except Exception:
-                continue
     except Exception:
         return None
     return None
@@ -4367,6 +4357,16 @@ def fetch_segment_images(
 
     def _accept_path(path: Optional[str], allow_duplicate: bool = False) -> Optional[str]:
         if not path or (not os.path.exists(path)):
+            return None
+        try:
+            if MOVIEPY_AVAILABLE and Image is not None:
+                with Image.open(path) as img_obj:
+                    img_obj.verify()
+        except Exception:
+            try:
+                os.remove(path)
+            except Exception:
+                pass
             return None
         sig = _quick_image_hash(path)
         if sig and (not allow_duplicate) and sig in used_hashes:
