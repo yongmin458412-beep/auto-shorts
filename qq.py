@@ -3808,11 +3808,20 @@ def _score_pixabay_hit(hit: Dict[str, Any], query_tokens: List[str]) -> int:
     for token in query_tokens:
         if token in text:
             score += 5
-    # vertical 선호 가중치
+    # vertical + 해상도 가중치
     width = int(hit.get("imageWidth") or 0)
     height = int(hit.get("imageHeight") or 0)
     if height > width > 0:
         score += 2
+    area = width * height
+    if area >= 2_000_000:
+        score += 4
+    elif area >= 1_200_000:
+        score += 3
+    elif area >= 700_000:
+        score += 2
+    elif area >= 400_000:
+        score += 1
     return score
 
 
@@ -3934,7 +3943,13 @@ def fetch_pixabay_image(
                 random.shuffle(top)
                 candidates = top + candidates[3:]
             for hit in candidates:
-                url = hit.get("largeImageURL") or hit.get("webformatURL") or hit.get("previewURL")
+                url = (
+                    hit.get("imageURL")
+                    or hit.get("fullHDURL")
+                    or hit.get("largeImageURL")
+                    or hit.get("webformatURL")
+                    or hit.get("previewURL")
+                )
                 if not url:
                     continue
                 path = _download_image_file(str(url), save_dir, prefix="pximg")
@@ -3960,6 +3975,12 @@ def fetch_serpapi_image(
         return None
     save_dir = _ensure_writable_dir(output_dir, "/tmp/serpapi_images")
     try:
+        def _to_int(value: Any) -> int:
+            try:
+                return int(str(value).strip())
+            except Exception:
+                return 0
+
         params = {
             "engine": "google_images",
             "q": query,
@@ -3984,6 +4005,15 @@ def fetch_serpapi_image(
                 if tok in text:
                     score += 3
             if "logo" in text:
+                score += 2
+            ow = _to_int(item.get("original_width") or item.get("width"))
+            oh = _to_int(item.get("original_height") or item.get("height"))
+            area = ow * oh
+            if area >= 2_000_000:
+                score += 4
+            elif area >= 1_200_000:
+                score += 3
+            elif area >= 700_000:
                 score += 2
             scored.append((score, item))
         scored.sort(key=lambda x: x[0], reverse=True)
@@ -4054,6 +4084,106 @@ def _quick_image_hash(path: str) -> str:
         return ""
 
 
+def _image_size(path: str) -> Tuple[int, int]:
+    if not path or (not os.path.exists(path)):
+        return (0, 0)
+    try:
+        if MOVIEPY_AVAILABLE and Image is not None:
+            with Image.open(path) as img_obj:
+                return tuple(map(int, img_obj.size))
+    except Exception:
+        return (0, 0)
+    return (0, 0)
+
+
+def _required_cover_scale(
+    source_w: int,
+    source_h: int,
+    canvas_w: int,
+    canvas_h: int,
+) -> float:
+    if source_w <= 0 or source_h <= 0:
+        return 99.0
+    return max(float(canvas_w) / float(source_w), float(canvas_h) / float(source_h))
+
+
+def _is_bg_image_quality_ok(
+    path: str,
+    canvas_w: int = 1080,
+    canvas_h: int = 1920,
+    max_upscale_ratio: float = 1.55,
+) -> bool:
+    """
+    숏츠 배경 품질 기준:
+    - 캔버스로 채우기 위해 필요한 확대 배율이 너무 크면 제외
+    - 원본 면적이 지나치게 작은 이미지 제외
+    """
+    w, h = _image_size(path)
+    if w <= 0 or h <= 0:
+        return False
+    scale_needed = _required_cover_scale(w, h, canvas_w, canvas_h)
+    if scale_needed > max_upscale_ratio:
+        return False
+    area = w * h
+    min_area = int(max(320_000, (canvas_w * canvas_h) * 0.28))
+    if area < min_area:
+        return False
+    return True
+
+
+def _upscale_bg_image_to_canvas(
+    path: str,
+    canvas_w: int,
+    canvas_h: int,
+    output_dir: str = "/tmp/upscaled_bg_images",
+) -> Optional[str]:
+    """
+    저해상도 후보를 적당히 업스케일해서 화질 열화를 줄인다.
+    - 과도한 업스케일(>1.75x)이 필요한 경우는 버림.
+    """
+    if (not MOVIEPY_AVAILABLE) or Image is None:
+        return path
+    if not path or (not os.path.exists(path)):
+        return None
+    w, h = _image_size(path)
+    if w <= 0 or h <= 0:
+        return None
+    scale_needed = _required_cover_scale(w, h, canvas_w, canvas_h)
+    if scale_needed <= 1.0:
+        return path
+    if scale_needed > 1.75:
+        return None
+    try:
+        img = _open_image_rgb_safe(path)
+        upscale_ratio = min(1.75, max(1.08, scale_needed * 1.03))
+        new_w = max(int(round(w * upscale_ratio)), canvas_w)
+        new_h = max(int(round(h * upscale_ratio)), canvas_h)
+        resized = img.resize((new_w, new_h), Image.LANCZOS)
+        enhanced = _enhance_bg_image_quality(resized)
+        os.makedirs(output_dir, exist_ok=True)
+        ext = os.path.splitext(path)[1].lower()
+        if ext not in {".jpg", ".jpeg", ".png", ".webp"}:
+            ext = ".jpg"
+        out_path = os.path.join(output_dir, f"up_{random.randint(100000, 999999)}{ext}")
+        save_kwargs: Dict[str, Any] = {}
+        fmt = "JPEG"
+        if ext == ".png":
+            fmt = "PNG"
+            save_kwargs = {"optimize": True}
+        elif ext == ".webp":
+            fmt = "WEBP"
+            save_kwargs = {"quality": 95, "method": 6}
+        else:
+            enhanced = enhanced.convert("RGB")
+            save_kwargs = {"quality": 95, "optimize": True, "progressive": True, "subsampling": 0}
+        enhanced.save(out_path, format=fmt, **save_kwargs)
+        if os.path.exists(out_path):
+            return out_path
+    except Exception:
+        return None
+    return None
+
+
 def _score_image_candidate_text(
     text: str,
     query_tokens: List[str],
@@ -4080,21 +4210,35 @@ def _score_image_candidate_text(
 def _extract_pinterest_pin_image_url(pin: Dict[str, Any]) -> str:
     if not isinstance(pin, dict):
         return ""
+
+    def _node_area(node_key: str, node_val: Dict[str, Any]) -> int:
+        width = int(node_val.get("width") or 0)
+        height = int(node_val.get("height") or 0)
+        if width <= 0 or height <= 0:
+            match = re.search(r"(\d+)\s*x\s*(\d+)", str(node_key or "").lower())
+            if match:
+                width = int(match.group(1))
+                height = int(match.group(2))
+        return max(0, width * height)
+
+    best_url = ""
+    best_area = -1
     media = pin.get("media", {})
     if isinstance(media, dict):
         images = media.get("images", {})
         if isinstance(images, dict):
-            for key in ("1200x", "600x", "400x300", "150x150"):
-                node = images.get(key, {})
-                if isinstance(node, dict):
-                    url = str(node.get("url", "") or "").strip()
-                    if url:
-                        return url
-            for node in images.values():
-                if isinstance(node, dict):
-                    url = str(node.get("url", "") or "").strip()
-                    if url:
-                        return url
+            for key, node in images.items():
+                if not isinstance(node, dict):
+                    continue
+                url = str(node.get("url", "") or "").strip()
+                if not url:
+                    continue
+                area = _node_area(str(key), node)
+                if area > best_area:
+                    best_area = area
+                    best_url = url
+            if best_url:
+                return best_url
     for key in ("image", "image_url", "url"):
         node = pin.get(key, {})
         if isinstance(node, dict):
@@ -4302,9 +4446,9 @@ def fetch_wikimedia_image(
             "generator": "search",
             "gsrsearch": query,
             "gsrnamespace": 6,
-            "gsrlimit": 8,
+            "gsrlimit": 20,
             "prop": "imageinfo",
-            "iiprop": "url",
+            "iiprop": "url|size",
         }
         resp = requests.get("https://commons.wikimedia.org/w/api.php", params=params, timeout=30)
         if resp.status_code != 200:
@@ -4312,13 +4456,21 @@ def fetch_wikimedia_image(
         pages = (resp.json().get("query", {}) or {}).get("pages", {}) or {}
         if not pages:
             return None
+        ranked: List[Tuple[int, str]] = []
         for page in pages.values():
             infos = page.get("imageinfo", []) if isinstance(page, dict) else []
             if not infos:
                 continue
-            url = str(infos[0].get("url", "") or "")
+            info = infos[0] if isinstance(infos[0], dict) else {}
+            url = str(info.get("url", "") or "")
             if not url:
                 continue
+            width = int(info.get("width") or 0)
+            height = int(info.get("height") or 0)
+            area = width * height
+            ranked.append((area, url))
+        ranked.sort(key=lambda row: row[0], reverse=True)
+        for _, url in ranked[:10]:
             path = _download_image_file(str(url), save_dir, prefix="wm")
             if path:
                 return path
@@ -4354,6 +4506,8 @@ def fetch_segment_images(
     placeholder = _ensure_placeholder_image(config)
     used_hashes: set[str] = set()
     results: List[Optional[str]] = []
+    canvas_w = max(320, int(getattr(config, "width", 1080) or 1080))
+    canvas_h = max(320, int(getattr(config, "height", 1920) or 1920))
 
     def _accept_path(path: Optional[str], allow_duplicate: bool = False) -> Optional[str]:
         if not path or (not os.path.exists(path)):
@@ -4368,6 +4522,18 @@ def fetch_segment_images(
             except Exception:
                 pass
             return None
+        if not _is_bg_image_quality_ok(path, canvas_w=canvas_w, canvas_h=canvas_h):
+            upscaled = _upscale_bg_image_to_canvas(path, canvas_w=canvas_w, canvas_h=canvas_h)
+            if not upscaled:
+                return None
+            path = upscaled
+            if not _is_bg_image_quality_ok(
+                path,
+                canvas_w=canvas_w,
+                canvas_h=canvas_h,
+                max_upscale_ratio=1.85,
+            ):
+                return None
         sig = _quick_image_hash(path)
         if sig and (not allow_duplicate) and sig in used_hashes:
             return None
@@ -6156,23 +6322,34 @@ def collect_images_pexels(
     response.raise_for_status()
     photos = response.json().get("photos", [])
     downloaded: List[str] = []
+    candidates: List[Tuple[int, str]] = []
     for photo in photos:
-        src = photo.get("src", {}) if isinstance(photo, dict) else {}
-        image_url = src.get("large") or src.get("original")
+        if not isinstance(photo, dict):
+            continue
+        src = photo.get("src", {}) if isinstance(photo.get("src"), dict) else {}
+        image_url = (
+            src.get("original")
+            or src.get("large2x")
+            or src.get("large")
+            or src.get("portrait")
+            or src.get("medium")
+        )
         if not image_url:
             continue
-        try:
-            image_response = requests.get(image_url, timeout=30)
-            image_response.raise_for_status()
-            filename = f"{random.randint(100000, 999999)}.jpg"
-            file_path = os.path.join(output_dir, filename)
-            with open(file_path, "wb") as file:
-                file.write(image_response.content)
-            downloaded.append(file_path)
-            if len(downloaded) >= limit:
-                break
-        except Exception:
+        width = int(photo.get("width") or 0)
+        height = int(photo.get("height") or 0)
+        score = width * height
+        if height >= width > 0:
+            score += 500_000
+        candidates.append((score, str(image_url)))
+    candidates.sort(key=lambda row: row[0], reverse=True)
+    for _, image_url in candidates:
+        path = _download_image_file(str(image_url), output_dir, prefix="pex")
+        if not path:
             continue
+        downloaded.append(path)
+        if len(downloaded) >= limit:
+            break
     return downloaded
 
 
