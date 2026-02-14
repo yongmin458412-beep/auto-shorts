@@ -581,7 +581,7 @@ def load_config() -> AppConfig:
         bgm_fallback_enabled=_get_bool("BGM_FALLBACK_ENABLED", True),
         asset_overlay_mode=_get_secret("ASSET_OVERLAY_MODE", "off") or "off",
         max_video_duration_sec=float(_get_secret("MAX_VIDEO_DURATION_SEC", "59") or 59),
-        require_approval=_get_bool("REQUIRE_APPROVAL", False),
+        require_approval=_get_bool("REQUIRE_APPROVAL", True),
         auto_run_daily=_get_bool("AUTO_RUN_DAILY", True),
         auto_run_hour=int(_get_secret("AUTO_RUN_HOUR", "18") or 18),
         auto_run_tz=_get_secret("AUTO_RUN_TZ", "Asia/Seoul") or "Asia/Seoul",
@@ -1153,7 +1153,7 @@ JP_SHORTS_SYSTEM_PROMPT: str = """あなたは日本のYouTube Shortsトレン�
 [注意]
 - 句読点少なめ・テンポ重視
 - 長文禁止、1行を短く
-- script_jaは必ず日本語。script_koは確認用の韓国語訳
+- script_jaは必ず日本語。script_koは確認用の韓国語訳だが、意訳せず「直訳寄り」で口調の強さ/温度感を維持すること
 
 [JSON出力フォーマット]
 {
@@ -1162,19 +1162,64 @@ JP_SHORTS_SYSTEM_PROMPT: str = """あなたは日本のYouTube Shortsトレン�
     "title_ja": "日本語タイトル(釣り/衝撃系)",
     "hashtags": ["#雑学", "#裏話", "#都市伝説", "#衝撃", "#ミステリー"],
     "pinned_comment": "視聴者参加を促す日本語質問",
-    "pinned_comment_ko": "上の日本語コメントの韓国語訳",
+    "pinned_comment_ko": "上の日本語コメントの韓国語直訳(口調を維持)",
     "bgm_mood": "mystery_suspense" または "fast_exciting"
   },
   "story_timeline": [
-    {"order": 1, "role": "hook", "script_ja": "日本語タメ口", "script_ko": "韓国語訳", "visual_search_keyword": "英語検索キーワード"},
-    {"order": 2, "role": "problem", "script_ja": "日本語タメ口", "script_ko": "韓国語訳", "visual_search_keyword": "英語検索キーワード"},
-    {"order": 3, "role": "failure", "script_ja": "日本語タメ口", "script_ko": "韓国語訳", "visual_search_keyword": "英語検索キーワード"},
-    {"order": 4, "role": "success", "script_ja": "日本語タメ口", "script_ko": "韓国語訳", "visual_search_keyword": "英語検索キーワード"},
-    {"order": 5, "role": "point", "script_ja": "日本語タメ口", "script_ko": "韓国語訳", "visual_search_keyword": "英語検索キーワード"},
-    {"order": 6, "role": "reaction", "script_ja": "日本語タメ口の独り言", "script_ko": "韓国語訳", "visual_search_keyword": "英語検索キーワード"}
+    {"order": 1, "role": "hook", "script_ja": "日本語タメ口", "script_ko": "韓国語直訳(거친 말투 유지)", "visual_search_keyword": "英語検索キーワード"},
+    {"order": 2, "role": "problem", "script_ja": "日本語タメ口", "script_ko": "韓国語直訳(거친 말투 유지)", "visual_search_keyword": "英語検索キーワード"},
+    {"order": 3, "role": "failure", "script_ja": "日本語タメ口", "script_ko": "韓国語直訳(거친 말투 유지)", "visual_search_keyword": "英語検索キーワード"},
+    {"order": 4, "role": "success", "script_ja": "日本語タメ口", "script_ko": "韓国語直訳(거친 말투 유지)", "visual_search_keyword": "英語検索キーワード"},
+    {"order": 5, "role": "point", "script_ja": "日本語タメ口", "script_ko": "韓国語直訳(거친 말투 유지)", "visual_search_keyword": "英語検索キーワード"},
+    {"order": 6, "role": "reaction", "script_ja": "日本語タメ口の独り言", "script_ko": "韓国語直訳(거친 말투 유지)", "visual_search_keyword": "英語検索キーワード"}
   ]
 }
 """
+
+
+_KO_LITERAL_ENDING_RULES: List[Tuple[str, str]] = [
+    (r"입니다\.$", "임."),
+    (r"입니다$", "임"),
+    (r"였습니다\.$", "였음."),
+    (r"였습니다$", "였음"),
+    (r"습니다\.$", "음."),
+    (r"습니다$", "음"),
+    (r"하세요\.$", "해."),
+    (r"하세요$", "해"),
+    (r"해요\.$", "함."),
+    (r"해요$", "함"),
+    (r"해요\?$", "함?"),
+]
+
+
+def _to_ko_literal_tone(text: str) -> str:
+    """
+    일본어 원문의 거친 템포를 살리기 위해 한국어 번역을 직역/반말 톤으로 정규화.
+    """
+    value = str(text or "").strip()
+    if not value:
+        return value
+    for pattern, repl in _KO_LITERAL_ENDING_RULES:
+        value = re.sub(pattern, repl, value)
+    # 존댓말 축소
+    value = value.replace("합니다", "함").replace("했어요", "했음")
+    value = value.replace("그래요", "그럼").replace("하지만", "근데")
+    return value.strip()
+
+
+def _compose_bilingual_text(
+    ja_text: str,
+    ko_text: str,
+    ko_prefix: str = "(한글 직역)",
+) -> str:
+    ja = (ja_text or "").strip()
+    ko = _to_ko_literal_tone(ko_text)
+    if not ja and not ko:
+        return ""
+    if not ko or ko == ja:
+        return ja or ko
+    prefix = f"{ko_prefix} " if ko_prefix else ""
+    return f"{ja}\n{prefix}{ko}"
 
 
 def generate_viral_script() -> Dict[str, Any]:
@@ -1343,7 +1388,8 @@ def generate_script_jp(
         if meta.get("pinned_comment"):
             comment_pool.append(str(meta["pinned_comment"]))
         meta["pinned_comment"] = random.choice(comment_pool)
-        meta["pinned_comment_ko"] = meta.get("pinned_comment_ko") or meta["pinned_comment"]
+        pinned_ko_raw = meta.get("pinned_comment_ko") or meta["pinned_comment"]
+        meta["pinned_comment_ko"] = _to_ko_literal_tone(str(pinned_ko_raw or ""))
         # 해시태그 최소 4개 유지
         if isinstance(meta.get("hashtags"), list) and len(meta["hashtags"]) < 4:
             defaults = ["#雑学", "#裏話", "#都市伝説", "#衝撃", "#ミステリー"]
@@ -1390,6 +1436,7 @@ def generate_script_jp(
             script_ko = str(raw.get("script_ko") or "").strip()
             if not script_ko and script_ja:
                 script_ko = script_ja
+            script_ko = _to_ko_literal_tone(script_ko)
             visual_kw = raw.get("visual_search_keyword") or raw.get("visual_keyword_en") or ""
             visual_kw = str(visual_kw).strip()
             visual_kw = _refine_visual_keyword(visual_kw, meta.get("topic_en", ""), role, script_ja)
@@ -2353,19 +2400,25 @@ def _wrap_cjk_text(text: str, max_width_px: int, font_size: int) -> List[str]:
 
     max_chars = max(6, int(max_width_px / (font_size * 0.95)))
     lines: List[str] = []
-    current = ""
-    current_w = 0.0
-    for ch in text:
-        cw = char_w(ch)
-        if current_w + cw > max_chars:
+    paragraphs = str(text or "").splitlines() or [str(text or "")]
+    for paragraph in paragraphs:
+        paragraph = paragraph.strip()
+        if not paragraph:
+            continue
+        current = ""
+        current_w = 0.0
+        for ch in paragraph:
+            cw = char_w(ch)
+            if current_w + cw > max_chars:
+                if current:
+                    lines.append(current)
+                current = ch
+                current_w = cw
+            else:
+                current += ch
+                current_w += cw
+        if current:
             lines.append(current)
-            current = ch
-            current_w = cw
-        else:
-            current += ch
-            current_w += cw
-    if current:
-        lines.append(current)
     return lines or [text]
 
 
@@ -4534,6 +4587,17 @@ def _append_bgm_debug(message: str) -> None:
         pass
 
 
+def _approval_keyboard() -> Dict[str, Any]:
+    return {
+        "inline_keyboard": [
+            [
+                {"text": "✅ 업로드 승인", "callback_data": "approve"},
+                {"text": "⏸ 업로드 보류", "callback_data": "swap"},
+            ]
+        ]
+    }
+
+
 def send_telegram_approval_request(
     token: str,
     chat_id: str,
@@ -4551,14 +4615,7 @@ def send_telegram_approval_request(
     payload = {
         "chat_id": chat_id,
         "text": body,
-        "reply_markup": {
-            "inline_keyboard": [
-                [
-                    {"text": "✅ 승인", "callback_data": "approve"},
-                    {"text": "🔄 교환", "callback_data": "swap"},
-                ]
-            ]
-        },
+        "reply_markup": _approval_keyboard(),
     }
     try:
         resp = requests.post(url, json=payload, timeout=30)
@@ -4568,6 +4625,66 @@ def send_telegram_approval_request(
     except Exception as exc:
         print(f"[Telegram 버튼 전송 오류] {exc}")
     return None
+
+
+def send_telegram_video_approval_request(
+    token: str,
+    chat_id: str,
+    video_path: str,
+    caption_text: str,
+) -> Optional[str]:
+    """
+    렌더링된 영상을 텔레그램으로 보내고 인라인 승인 버튼을 붙인다.
+    실패하면 sendDocument, 마지막으로 텍스트 승인 요청으로 폴백.
+    """
+    if not token or not chat_id:
+        return None
+    body = (caption_text or "").strip()
+    caption = body[:900] + ("..." if len(body) > 900 else "")
+    keyboard = _approval_keyboard()
+
+    if video_path and os.path.exists(video_path):
+        send_video_url = f"https://api.telegram.org/bot{token}/sendVideo"
+        try:
+            with open(video_path, "rb") as handle:
+                resp = requests.post(
+                    send_video_url,
+                    data={
+                        "chat_id": chat_id,
+                        "caption": caption,
+                        "supports_streaming": "true",
+                        "reply_markup": json.dumps(keyboard, ensure_ascii=False),
+                    },
+                    files={"video": handle},
+                    timeout=180,
+                )
+            if resp.ok:
+                return str(resp.json().get("result", {}).get("message_id", ""))
+            print(f"[Telegram 비디오 전송 실패] status={resp.status_code} body={resp.text[:300]}")
+        except Exception as exc:
+            print(f"[Telegram 비디오 전송 오류] {exc}")
+
+        send_doc_url = f"https://api.telegram.org/bot{token}/sendDocument"
+        try:
+            with open(video_path, "rb") as handle:
+                resp = requests.post(
+                    send_doc_url,
+                    data={
+                        "chat_id": chat_id,
+                        "caption": caption,
+                        "reply_markup": json.dumps(keyboard, ensure_ascii=False),
+                    },
+                    files={"document": handle},
+                    timeout=180,
+                )
+            if resp.ok:
+                return str(resp.json().get("result", {}).get("message_id", ""))
+            print(f"[Telegram 문서 전송 실패] status={resp.status_code} body={resp.text[:300]}")
+        except Exception as exc:
+            print(f"[Telegram 문서 전송 오류] {exc}")
+
+    # 최종 폴백: 텍스트 승인 요청
+    return send_telegram_approval_request(token, chat_id, body or "영상 승인 요청")
 
 
 def _answer_callback_query(token: str, callback_query_id: str, text: str = "") -> None:
@@ -4584,7 +4701,7 @@ def _answer_callback_query(token: str, callback_query_id: str, text: str = "") -
 
 def _disable_approval_buttons(token: str, chat_id: str, message_id: str, result: str) -> None:
     """버튼 클릭 후 메시지를 결과 텍스트로 교체해 버튼 비활성화."""
-    label = "✅ 승인됨" if result == "approve" else "🔄 교환됨"
+    label = "✅ 승인됨" if result == "approve" else "⏸ 보류됨"
     try:
         requests.post(
             f"https://api.telegram.org/bot{token}/editMessageReplyMarkup",
@@ -4624,6 +4741,8 @@ def wait_for_approval(
     progress,
     status_box,
     approval_message_id: Optional[str] = None,
+    stage_label: str = "텔레그램 버튼 응답 대기 중...",
+    timeout_decision: str = "approve",
 ) -> str:
     """
     텔레그램에서 승인/교환 응답 대기.
@@ -4636,7 +4755,7 @@ def wait_for_approval(
     swap_set = {kw.lower() for kw in config.swap_keywords}
 
     while time.time() - start_time < config.telegram_timeout_sec:
-        _status_update(progress, status_box, 0.25, "텔레그램 버튼 응답 대기 중...")
+        _status_update(progress, status_box, 0.25, stage_label)
         try:
             updates = get_telegram_updates(config.telegram_bot_token, offset)
         except Exception:
@@ -4682,7 +4801,7 @@ def wait_for_approval(
                     return "approve"
 
                 if cb_data in ("swap", "exchange"):
-                    _answer_callback_query(config.telegram_bot_token, cb_id, "🔄 교환 처리합니다.")
+                    _answer_callback_query(config.telegram_bot_token, cb_id, "⏸ 업로드 보류 처리합니다.")
                     if approval_message_id:
                         _disable_approval_buttons(
                             config.telegram_bot_token,
@@ -4712,7 +4831,7 @@ def wait_for_approval(
         _save_offset(config.telegram_offset_path, offset)
         time.sleep(3)  # 5초→3초로 단축해 응답성 향상
 
-    return "approve"
+    return timeout_decision
 
 
 def _write_local_log(path: str, record: dict) -> None:
@@ -4727,12 +4846,30 @@ def _format_hashtags(tags: List[str]) -> str:
 
 def _normalize_ko_lines(texts_ko: List[str], texts_ja: List[str]) -> List[str]:
     if not texts_ko:
-        return texts_ja
+        return [_to_ko_literal_tone(line) for line in texts_ja]
     normalized: List[str] = []
     for idx, ja in enumerate(texts_ja):
         ko = texts_ko[idx] if idx < len(texts_ko) else ""
-        normalized.append(ko if ko else ja)
+        normalized.append(_to_ko_literal_tone(ko if ko else ja))
     return normalized
+
+
+def _build_bilingual_caption_texts(
+    config: AppConfig,
+    texts_ja: List[str],
+    texts_ko: List[str],
+) -> List[str]:
+    ja_caps = _get_caption_texts(config, texts_ja)
+    ko_norm = _normalize_ko_lines(texts_ko, texts_ja)
+    ko_caps = _get_caption_texts(config, ko_norm)
+    merged: List[str] = []
+    for idx, ja_line in enumerate(ja_caps):
+        ko_line = ko_caps[idx] if idx < len(ko_caps) else ""
+        if ko_line and ko_line != ja_line:
+            merged.append(f"{ja_line}\n{ko_line}")
+        else:
+            merged.append(ja_line)
+    return merged
 
 
 def _build_upload_report_ko(
@@ -5066,7 +5203,8 @@ def _auto_jp_flow(
     hashtags = meta.get("hashtags", script.get("hashtags", []))
     mood = meta.get("bgm_mood", script.get("mood", "mystery_suspense"))
     pinned = meta.get("pinned_comment", script.get("pinned_comment", ""))
-    pinned_ko = meta.get("pinned_comment_ko", pinned)
+    pinned_ko = _to_ko_literal_tone(meta.get("pinned_comment_ko", pinned))
+    pinned_bilingual = _compose_bilingual_text(pinned, pinned_ko)
     if topic_key:
         _notify("📝", "기획팀 완료", f"완성! 오늘 주제: {topic_key}")
 
@@ -5077,8 +5215,8 @@ def _auto_jp_flow(
     caption_styles = _build_caption_styles(roles, len(texts))
     caption_variant = _select_caption_variant(config)
     caption_styles = _apply_caption_variant(caption_styles, caption_variant)
-    caption_texts = _get_caption_texts(config, texts)
     texts_ko_norm = _normalize_ko_lines(texts_ko, texts)
+    caption_texts = _build_bilingual_caption_texts(config, texts, texts_ko_norm)
 
     # 인스타그램 인기 오디오 스타일: BGM을 fast_exciting 쪽으로 편향
     if getattr(config, "instagram_use_popular_audio", False) and mood == "mystery_suspense":
@@ -5173,12 +5311,13 @@ def _auto_jp_flow(
     assets: List[str] = [placeholder] * len(texts)
 
     # ── YouTube 설명 텍스트 ───────────────────────────────
-    description_lines = [pinned, "", " ".join(hashtags)]
+    description_lines = [pinned_bilingual, "", " ".join(hashtags)]
     description = "\n".join(description_lines)
 
     # ── 텔레그램 미리보기 (한글+일본어 대본) ─────────────
     body_preview = ""
-    for i, (ja_line, ko_line) in enumerate(zip(texts, texts_ko)):
+    for i, ja_line in enumerate(texts):
+        ko_line = texts_ko_norm[i] if i < len(texts_ko_norm) else ""
         role = content_list[i].get("role", "body") if i < len(content_list) else "body"
         kw = visual_keywords[i] if i < len(visual_keywords) else ""
         body_preview += f"  [{role}] JA: {ja_line}\n          KO: {ko_line}\n          🎬 {kw}\n"
@@ -5191,24 +5330,16 @@ def _auto_jp_flow(
         f"[제목 JA] {video_title}\n"
         f"[해시태그] {' '.join(hashtags)}\n\n"
         f"[대본 (총 {len(texts)}개 세그먼트)]\n{body_preview}"
-        f"[고정댓글] {pinned}\n"
+        f"[고정댓글 JA] {pinned}\n"
+        f"[고정댓글 KO 직역] {pinned_ko}\n"
         f"━━━━━━━━━━━━━━━━━━━━\n"
-        f"아래 버튼으로 응답해주세요."
+        f"아래 버튼으로 응답해주세요. (영상 렌더링 후 최종 승인 필요)"
     )
 
     if config.require_approval:
-        _telemetry_log("텔레그램 승인 요청 전송", config)
-        _status_update(progress, status_box, 0.30, "텔레그램 승인 요청 전송")
-        approval_msg_id = send_telegram_approval_request(
-            config.telegram_bot_token, config.telegram_admin_chat_id, request_text
-        )
-        decision = wait_for_approval(config, progress, status_box, approval_message_id=approval_msg_id)
-        if decision == "swap":
-            _telemetry_log("승인 요청 결과: 교환", config)
-            send_telegram_message(config.telegram_bot_token, config.telegram_admin_chat_id, "🔄 교환 처리됨. 새 주제로 다시 생성합니다.")
-            _auto_jp_flow(config, progress, status_box, extra_hint=extra_hint)
-            return False
-        _telemetry_log(f"승인 요청 결과: {decision}", config)
+        _telemetry_log("초안 미리보기 전송", config)
+        _status_update(progress, status_box, 0.30, "초안 미리보기 전송")
+        send_telegram_message(config.telegram_bot_token, config.telegram_admin_chat_id, request_text)
     else:
         _telemetry_log("승인 단계 생략 (자동 진행)", config)
 
@@ -5288,6 +5419,47 @@ def _auto_jp_flow(
         except Exception as thumb_err:
             _telemetry_log(f"썸네일 생성 실패: {thumb_err}", config)
 
+    # ── 최종 승인: 렌더링된 영상 미리보기 전송 후 업로드 여부 결정 ─────────
+    if config.require_approval:
+        approval_caption = (
+            "[업로드 전 최종 승인]\n"
+            f"제목: {video_title}\n"
+            f"무드: {mood} / BGM: {bgm_display}\n"
+            f"고정댓글 JA: {pinned}\n"
+            f"고정댓글 KO 직역: {pinned_ko}\n"
+            f"해시태그: {' '.join(hashtags)}\n"
+            "버튼으로 업로드 여부를 선택해주세요."
+        )
+        _status_update(progress, status_box, 0.78, "텔레그램에 렌더링 영상 전송 중")
+        _telemetry_log("업로드 전 최종 승인 요청(영상 포함) 전송", config)
+        approval_msg_id = send_telegram_video_approval_request(
+            config.telegram_bot_token,
+            config.telegram_admin_chat_id,
+            output_path,
+            approval_caption,
+        )
+        decision = wait_for_approval(
+            config,
+            progress,
+            status_box,
+            approval_message_id=approval_msg_id,
+            stage_label="업로드 승인 대기 중...",
+            timeout_decision="swap",
+        )
+        _telemetry_log(f"최종 승인 결과: {decision}", config)
+        if decision != "approve":
+            hold_msg = (
+                "⏸ 업로드 보류 처리됨.\n"
+                f"로컬 파일: {output_path}\n"
+                "필요하면 수동 업로드하거나 다시 생성하세요."
+            )
+            send_telegram_message(config.telegram_bot_token, config.telegram_admin_chat_id, hold_msg)
+            _notify("⏸", "마케팅팀 보류", "승인 전이라 업로드를 중단합니다.")
+            _status_update(progress, status_box, 1.0, "보류(업로드 안 함)")
+            if use_streamlit:
+                st.video(output_path)
+            return True
+
     # ── 플랫폼 업로드 (Instagram 우선, YouTube/TikTok) ─────
     video_id = ""
     video_url = ""
@@ -5321,7 +5493,7 @@ def _auto_jp_flow(
                     product_number = meta.get("product_number", "") or _pick_product_number_for_short(config)
                     if product_number:
                         comment_text = build_pinned_comment_with_voting(
-                            product_number, config.linktree_url, pinned_base=pinned
+                            product_number, config.linktree_url, pinned_base=pinned_bilingual
                         )
                         if add_instagram_comment(
                             config.instagram_access_token, video_id, comment_text
@@ -5383,7 +5555,7 @@ def _auto_jp_flow(
                 product_number = meta.get("product_number", "") or _pick_product_number_for_short(config)
                 if product_number:
                     comment_text = build_pinned_comment_with_voting(
-                        product_number, config.linktree_url, pinned_base=pinned
+                        product_number, config.linktree_url, pinned_base=pinned_bilingual
                     )
                     if insert_video_comment(config, video_id, comment_text):
                         _telemetry_log(f"고정댓글 작성 완료 (제품 {product_number})", config)
@@ -5452,7 +5624,8 @@ def _auto_jp_flow(
             f"[완료] 일본인 타겟 숏츠\n"
             f"제목: {video_title}\n"
             f"무드: {mood}\n"
-            f"고정댓글: {pinned}\n"
+            f"고정댓글 JA: {pinned}\n"
+            f"고정댓글 KO 직역: {pinned_ko}\n"
             f"로컬: {output_path}"
         )
         send_telegram_message(config.telegram_bot_token, config.telegram_admin_chat_id, summary_text)
@@ -5702,9 +5875,10 @@ def run_streamlit_app() -> None:
                     caption_styles = _build_caption_styles(roles, len(texts))
                     caption_variant = _select_caption_variant(config)
                     caption_styles = _apply_caption_variant(caption_styles, caption_variant)
-                    caption_texts = _get_caption_texts(config, texts)
                     texts_ko_norm = _normalize_ko_lines(_texts_ko, texts)
-                    pinned_ko = _meta.get("pinned_comment_ko", pinned_val)
+                    caption_texts = _build_bilingual_caption_texts(config, texts, texts_ko_norm)
+                    pinned_ko = _to_ko_literal_tone(_meta.get("pinned_comment_ko", pinned_val))
+                    pinned_bilingual = _compose_bilingual_text(pinned_val, pinned_ko)
 
                     placeholder = _ensure_placeholder_image(config)
                     assets = [placeholder] * len(texts)
@@ -5819,21 +5993,57 @@ def run_streamlit_app() -> None:
                             )
                         except Exception as thumb_err:
                             _telemetry_log(f"수동 썸네일 생성 실패: {thumb_err}", config)
+                    should_upload = True
+                    if config.require_approval:
+                        approval_caption = (
+                            "[업로드 전 최종 승인]\n"
+                            f"제목: {video_title_val}\n"
+                            f"무드: {mood}\n"
+                            f"고정댓글 JA: {pinned_val}\n"
+                            f"고정댓글 KO 직역: {pinned_ko}\n"
+                            f"해시태그: {hashtags_val}\n"
+                            "버튼으로 업로드 여부를 선택해주세요."
+                        )
+                        _status_update(progress, status_box, 0.78, "텔레그램에 렌더링 영상 전송 중")
+                        approval_msg_id = send_telegram_video_approval_request(
+                            config.telegram_bot_token,
+                            config.telegram_admin_chat_id,
+                            output_path,
+                            approval_caption,
+                        )
+                        decision = wait_for_approval(
+                            config,
+                            progress,
+                            status_box,
+                            approval_message_id=approval_msg_id,
+                            stage_label="업로드 승인 대기 중...",
+                            timeout_decision="swap",
+                        )
+                        if decision != "approve":
+                            should_upload = False
+                            send_telegram_message(
+                                config.telegram_bot_token,
+                                config.telegram_admin_chat_id,
+                                f"⏸ 수동 업로드 보류 처리됨.\n로컬 파일: {output_path}",
+                            )
                     video_id = ""
                     video_url = ""
                     upload_error = ""
                     upload_reason = ""
+                    if not should_upload:
+                        upload_error = "approval_hold"
+                        upload_reason = "approval_hold"
                     use_instagram = (
                         getattr(config, "enable_instagram_upload", False)
                         and not getattr(config, "jp_youtube_only", False)
                         and config.instagram_access_token
                         and config.instagram_user_id
                     )
-                    if use_instagram:
+                    if should_upload and use_instagram:
                         _status_update(progress, status_box, 0.85, "인스타그램 릴스 업로드")
                         try:
                             from platforms.instagram import add_instagram_comment, upload_instagram_reel
-                            cap_ig = f"{video_title_val}\n\n{pinned_val}\n\n{hashtags_val}"
+                            cap_ig = f"{video_title_val}\n\n{pinned_bilingual}\n\n{hashtags_val}"
                             result = upload_instagram_reel(
                                 config.instagram_access_token,
                                 config.instagram_user_id,
@@ -5846,19 +6056,19 @@ def run_streamlit_app() -> None:
                                 if getattr(config, "enable_pinned_comment", False) and config.linktree_url and video_id:
                                     pn = _meta.get("product_number", "") or _pick_product_number_for_short(config)
                                     if pn:
-                                        comment_text = build_pinned_comment_with_voting(pn, config.linktree_url, pinned_base=pinned_val)
+                                        comment_text = build_pinned_comment_with_voting(pn, config.linktree_url, pinned_base=pinned_bilingual)
                                         add_instagram_comment(config.instagram_access_token, video_id, comment_text)
                             else:
                                 upload_error = result.get("error", "알 수 없는 오류")
                         except Exception as e:
                             upload_error = str(e)
-                    elif config.enable_youtube_upload:
+                    elif should_upload and config.enable_youtube_upload:
                         _status_update(progress, status_box, 0.85, "유튜브 업로드")
                         result = upload_video(
                             config=config,
                             file_path=output_path,
                             title=video_title_val,
-                            description=pinned_val + "\n\n" + hashtags_val,
+                            description=pinned_bilingual + "\n\n" + hashtags_val,
                             tags=hashtags_val.split(),
                         )
                         upload_error = str(result.get("error", "") or "").strip()
@@ -5878,7 +6088,7 @@ def run_streamlit_app() -> None:
                                 config,
                                 file_path=output_path,
                                 title=video_title_val,
-                                description=pinned_val + "\n\n" + hashtags_val,
+                                description=pinned_bilingual + "\n\n" + hashtags_val,
                                 tags=hashtags_val.split(),
                                 thumb_path=thumb_path,
                                 error=upload_error,
@@ -5893,11 +6103,15 @@ def run_streamlit_app() -> None:
                                 product_number = _meta.get("product_number", "") or _pick_product_number_for_short(config)
                                 if product_number:
                                     comment_text = build_pinned_comment_with_voting(
-                                        product_number, config.linktree_url, pinned_base=pinned_val
+                                        product_number, config.linktree_url, pinned_base=pinned_bilingual
                                     )
                                     insert_video_comment(config, video_id, comment_text)
                     else:
-                        _status_update(progress, status_box, 0.85, "유튜브 업로드(스킵)")
+                        if not should_upload:
+                            _status_update(progress, status_box, 0.85, "승인 보류(업로드 안 함)")
+                            st.info("승인 보류로 업로드를 건너뛰었습니다.")
+                        else:
+                            _status_update(progress, status_box, 0.85, "유튜브 업로드(스킵)")
                     if video_url:
                         report = _build_upload_report_ko(
                             title=video_title_val,
@@ -6527,12 +6741,13 @@ def run_batch(count: int, seed: str = "", beats: int = 7) -> None:
         _meta_b = script.get("meta", {})
         mood = _meta_b.get("bgm_mood", script.get("mood", "mystery_suspense"))
         texts = _script_to_beats(script)
+        texts_ko = _script_to_beats_ko(script)
         visual_kws = _script_to_visual_keywords(script)
         roles = _script_to_roles(script)
         caption_styles = _build_caption_styles(roles, len(texts))
         caption_variant = _select_caption_variant(config)
         caption_styles = _apply_caption_variant(caption_styles, caption_variant)
-        caption_texts = _get_caption_texts(config, texts)
+        caption_texts = _build_bilingual_caption_texts(config, texts, texts_ko)
         placeholder = _ensure_placeholder_image(config)
         assets: List[str] = [placeholder] * len(texts)
         now = datetime.utcnow().strftime("%Y%m%d_%H%M%S")
@@ -6627,11 +6842,42 @@ def run_batch(count: int, seed: str = "", beats: int = 7) -> None:
                 )
             except Exception:
                 thumb_path = ""
+        should_upload = True
+        if config.require_approval:
+            approval_caption = (
+                "[업로드 전 최종 승인]\n"
+                f"제목: {_meta_b.get('title_ja', _meta_b.get('title', ''))}\n"
+                f"무드: {mood}\n"
+                "배치 생성 영상입니다. 업로드하려면 승인 버튼을 눌러주세요."
+            )
+            approval_msg_id = send_telegram_video_approval_request(
+                config.telegram_bot_token,
+                config.telegram_admin_chat_id,
+                output_path,
+                approval_caption,
+            )
+            decision = wait_for_approval(
+                config,
+                None,
+                None,
+                approval_message_id=approval_msg_id,
+                stage_label="업로드 승인 대기 중...",
+                timeout_decision="swap",
+            )
+            if decision != "approve":
+                should_upload = False
+                send_telegram_message(
+                    config.telegram_bot_token,
+                    config.telegram_admin_chat_id,
+                    f"⏸ 배치 업로드 보류 처리됨.\n로컬 파일: {output_path}",
+                )
         video_id = ""
         video_url = ""
         _title_b = _meta_b.get("title_ja", _meta_b.get("title", script.get("video_title", "")))
         _hashtags_b = _meta_b.get("hashtags", script.get("hashtags", []))
         _pinned_b = _meta_b.get("pinned_comment", script.get("pinned_comment", ""))
+        _pinned_ko_b = _to_ko_literal_tone(_meta_b.get("pinned_comment_ko", _pinned_b))
+        _pinned_bilingual_b = _compose_bilingual_text(_pinned_b, _pinned_ko_b)
         upload_error = ""
         upload_reason = ""
         use_instagram = (
@@ -6640,10 +6886,10 @@ def run_batch(count: int, seed: str = "", beats: int = 7) -> None:
             and config.instagram_access_token
             and config.instagram_user_id
         )
-        if use_instagram:
+        if should_upload and use_instagram:
             try:
                 from platforms.instagram import add_instagram_comment, upload_instagram_reel
-                cap_b = f"{_title_b}\n\n{_pinned_b}\n\n" + " ".join(_hashtags_b)
+                cap_b = f"{_title_b}\n\n{_pinned_bilingual_b}\n\n" + " ".join(_hashtags_b)
                 result = upload_instagram_reel(
                     config.instagram_access_token,
                     config.instagram_user_id,
@@ -6656,18 +6902,18 @@ def run_batch(count: int, seed: str = "", beats: int = 7) -> None:
                     if getattr(config, "enable_pinned_comment", False) and config.linktree_url and video_id:
                         pn = _meta_b.get("product_number", "") or _pick_product_number_for_short(config)
                         if pn:
-                            ct = build_pinned_comment_with_voting(pn, config.linktree_url, pinned_base=_pinned_b)
+                            ct = build_pinned_comment_with_voting(pn, config.linktree_url, pinned_base=_pinned_bilingual_b)
                             add_instagram_comment(config.instagram_access_token, video_id, ct)
                 else:
                     upload_error = result.get("error", "알 수 없는 오류")
             except Exception as e:
                 upload_error = str(e)
-        elif config.enable_youtube_upload:
+        elif should_upload and config.enable_youtube_upload:
             result = upload_video(
                 config=config,
                 file_path=output_path,
                 title=_title_b,
-                description=_pinned_b + "\n\n" + " ".join(_hashtags_b),
+                description=_pinned_bilingual_b + "\n\n" + " ".join(_hashtags_b),
                 tags=_hashtags_b,
             )
             upload_error = str(result.get("error", "") or "").strip()
@@ -6687,7 +6933,7 @@ def run_batch(count: int, seed: str = "", beats: int = 7) -> None:
                     config,
                     file_path=output_path,
                     title=_title_b,
-                    description=_pinned_b + "\n\n" + " ".join(_hashtags_b),
+                    description=_pinned_bilingual_b + "\n\n" + " ".join(_hashtags_b),
                     tags=_hashtags_b,
                     thumb_path=thumb_path,
                     error=upload_error,
@@ -6699,9 +6945,12 @@ def run_batch(count: int, seed: str = "", beats: int = 7) -> None:
                     product_number = _meta_b.get("product_number", "") or _pick_product_number_for_short(config)
                     if product_number:
                         comment_text = build_pinned_comment_with_voting(
-                            product_number, config.linktree_url, pinned_base=_pinned_b
+                            product_number, config.linktree_url, pinned_base=_pinned_bilingual_b
                         )
                         insert_video_comment(config, video_id, comment_text)
+        elif not should_upload:
+            upload_error = "approval_hold"
+            upload_reason = "approval_hold"
         log_row = {
             "date_jst": _get_local_now(config).strftime("%Y-%m-%d %H:%M:%S"),
             "title_ja": _title_b,
