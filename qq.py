@@ -1879,7 +1879,7 @@ _VISUAL_SEARCH_STOPWORDS = {
     "reaction", "scene", "light", "lights", "street", "city", "old", "new",
 }
 _ROLE_QUERY_HINTS: Dict[str, str] = {
-    "hook": "brand logo sign close up",
+    "hook": "brand logo app icon close up countdown timer",
     "problem": "old advertisement archive newspaper",
     "failure": "closed store empty street",
     "success": "crowded store launch success",
@@ -1917,6 +1917,24 @@ def _detect_brand_query_hint(topic_en: str, script_ja: str, keyword: str) -> str
     return ""
 
 
+def _extract_countdown_hint(topic_en: str, script_ja: str, keyword: str) -> str:
+    src = " ".join([topic_en or "", script_ja or "", keyword or ""])
+    if not src.strip():
+        return ""
+    m = re.search(r"(\d{1,2})\s*(?:秒|sec|seconds?)", src, flags=re.IGNORECASE)
+    if not m:
+        m = re.search(r"\b(\d{1,2})\b", src)
+    if not m:
+        return ""
+    try:
+        sec = int(m.group(1))
+    except Exception:
+        return ""
+    if sec <= 0 or sec > 30:
+        return ""
+    return f"{sec} second countdown timer"
+
+
 def _refine_visual_keyword(
     keyword: str,
     topic_en: str,
@@ -1928,8 +1946,14 @@ def _refine_visual_keyword(
     topic = (topic_en or "").strip()
     role_hint = _ROLE_QUERY_HINTS.get(role, "dramatic close up")
     brand_hint = forced_brand_hint.strip() or _detect_brand_query_hint(topic, script_ja, kw)
+    countdown_hint = _extract_countdown_hint(topic, script_ja, kw)
     if brand_hint:
-        return f"{brand_hint} {role_hint}".strip()
+        extras: List[str] = []
+        if role == "hook":
+            extras.append("attention grabbing")
+        if countdown_hint:
+            extras.append(countdown_hint)
+        return " ".join([brand_hint] + extras + [role_hint]).strip()
 
     if not kw:
         kw = topic
@@ -1958,6 +1982,8 @@ def _refine_visual_keyword(
         for w in ("brand", "restaurant", "product", "app", "logo", "bottle", "sneaker")
     ):
         refined = f"{refined} headline close up".strip()
+    if countdown_hint and countdown_hint not in refined:
+        refined = f"{refined} {countdown_hint}".strip()
     return refined or "mystery story headline close up"
 
 
@@ -2473,8 +2499,8 @@ def tags_from_text(text: str) -> List[str]:
 
 _SYSTEM_FONT_CANDIDATES = [
     # 트렌디 일본어 폰트가 설치된 경우 우선
-    "/usr/share/fonts/truetype/zenkakugothicnew/ZenKakuGothicNew-Bold.ttf",
     "/usr/share/fonts/truetype/mplus/MPLUSRounded1c-ExtraBold.ttf",
+    "/usr/share/fonts/truetype/zenkakugothicnew/ZenKakuGothicNew-Bold.ttf",
     "/usr/share/fonts/truetype/bizudpgothic/BIZUDPGothic-Bold.ttf",
     # Streamlit Cloud / Ubuntu
     "/usr/share/fonts/truetype/noto/NotoSansCJK-Regular.ttc",
@@ -2490,8 +2516,8 @@ _SYSTEM_FONT_CANDIDATES = [
 
 # 일본어 가독성용 Noto Sans JP Bold (일본 예능 자막 스타일)
 _JAPANESE_FONT_CANDIDATES = [
-    "/usr/share/fonts/truetype/zenkakugothicnew/ZenKakuGothicNew-Bold.ttf",
     "/usr/share/fonts/truetype/mplus/MPLUSRounded1c-ExtraBold.ttf",
+    "/usr/share/fonts/truetype/zenkakugothicnew/ZenKakuGothicNew-Bold.ttf",
     "/usr/share/fonts/truetype/bizudpgothic/BIZUDPGothic-Bold.ttf",
     "/usr/share/fonts/opentype/noto/NotoSansCJK-Bold.ttc",
     "/usr/share/fonts/truetype/noto/NotoSansCJK-Bold.ttc",
@@ -2502,12 +2528,12 @@ _JAPANESE_FONT_CANDIDATES = [
 
 _TRENDY_JP_FONT_DOWNLOADS: List[Tuple[str, str]] = [
     (
-        "ZenKakuGothicNew-Bold.ttf",
-        "https://github.com/google/fonts/raw/main/ofl/zenkakugothicnew/ZenKakuGothicNew-Bold.ttf",
-    ),
-    (
         "MPLUSRounded1c-ExtraBold.ttf",
         "https://github.com/google/fonts/raw/main/ofl/mplusrounded1c/MPLUSRounded1c-ExtraBold.ttf",
+    ),
+    (
+        "ZenKakuGothicNew-Bold.ttf",
+        "https://github.com/google/fonts/raw/main/ofl/zenkakugothicnew/ZenKakuGothicNew-Bold.ttf",
     ),
     (
         "BIZUDPGothic-Bold.ttf",
@@ -2908,8 +2934,8 @@ def _draw_subtitle(
     else:
         progress = 0.0
 
-    # 폰트 크기: 기존 대비 소폭 축소 (과도한 화면 점유 완화)
-    font_size = max(50, canvas_width // 16)
+    # 폰트 크기: 요청에 맞춰 아주 소폭 확대
+    font_size = max(52, canvas_width // 15)
     pad_x = int(canvas_width * 0.05)
     max_text_w = canvas_width - pad_x * 2
     raw_text = str(text or "")
@@ -3245,6 +3271,16 @@ def _build_search_query_candidates(query: str) -> List[str]:
     parts = [t for t in reduced.split() if len(t) >= 4]
     if parts:
         candidates.append(" ".join(parts[:4]))
+    # 브랜드 로고 검색어 강제 보강
+    brand_hints = _brand_fallback_queries_from_keyword(raw)
+    for hint in brand_hints:
+        if hint:
+            candidates.append(hint)
+    # 3초/5초 같은 숫자 문맥이 있으면 카운트다운 이미지 검색어 추가
+    countdown_hint = _extract_countdown_hint(raw, raw, raw)
+    if countdown_hint:
+        candidates.append(countdown_hint)
+        candidates.append(f"{countdown_hint} social media")
     uniq: List[str] = []
     for item in candidates:
         if item and item not in uniq:
@@ -3426,12 +3462,119 @@ def fetch_pixabay_image(
     return None
 
 
+def fetch_serpapi_image(
+    query: str,
+    api_key: str,
+    output_dir: str = "/tmp/serpapi_images",
+) -> Optional[str]:
+    if not api_key:
+        return None
+    save_dir = _ensure_writable_dir(output_dir, "/tmp/serpapi_images")
+    try:
+        params = {
+            "engine": "google_images",
+            "q": query,
+            "api_key": api_key,
+            "num": 12,
+            "safe": "active",
+        }
+        resp = requests.get("https://serpapi.com/search.json", params=params, timeout=40)
+        if resp.status_code != 200:
+            return None
+        results = resp.json().get("images_results", []) or []
+        if not results:
+            return None
+        tokens = _extract_query_tokens(query)
+        scored: List[Tuple[int, Dict[str, Any]]] = []
+        for item in results[:12]:
+            title = str(item.get("title", "") or "").lower()
+            source = str(item.get("source", "") or "").lower()
+            text = f"{title} {source}"
+            score = 0
+            for tok in tokens:
+                if tok in text:
+                    score += 3
+            if "logo" in text:
+                score += 2
+            scored.append((score, item))
+        scored.sort(key=lambda x: x[0], reverse=True)
+        candidates = [row[1] for row in scored[:6]] if scored else results[:6]
+        for item in candidates:
+            image_url = item.get("original") or item.get("thumbnail")
+            if not image_url:
+                continue
+            try:
+                r = requests.get(image_url, stream=True, timeout=40)
+                r.raise_for_status()
+                ext = os.path.splitext(urlparse(str(image_url)).path)[1] or ".jpg"
+                path = os.path.join(save_dir, f"sp_{random.randint(100000, 999999)}{ext}")
+                with open(path, "wb") as out:
+                    for chunk in r.iter_content(chunk_size=65536):
+                        out.write(chunk)
+                return path
+            except Exception:
+                continue
+    except Exception:
+        return None
+    return None
+
+
+def fetch_wikimedia_image(
+    query: str,
+    output_dir: str = "/tmp/wikimedia_images",
+) -> Optional[str]:
+    save_dir = _ensure_writable_dir(output_dir, "/tmp/wikimedia_images")
+    try:
+        params = {
+            "action": "query",
+            "format": "json",
+            "generator": "search",
+            "gsrsearch": query,
+            "gsrnamespace": 6,
+            "gsrlimit": 8,
+            "prop": "imageinfo",
+            "iiprop": "url",
+        }
+        resp = requests.get("https://commons.wikimedia.org/w/api.php", params=params, timeout=30)
+        if resp.status_code != 200:
+            return None
+        pages = (resp.json().get("query", {}) or {}).get("pages", {}) or {}
+        if not pages:
+            return None
+        for page in pages.values():
+            infos = page.get("imageinfo", []) if isinstance(page, dict) else []
+            if not infos:
+                continue
+            url = str(infos[0].get("url", "") or "")
+            if not url:
+                continue
+            try:
+                r = requests.get(url, stream=True, timeout=40)
+                r.raise_for_status()
+                ext = os.path.splitext(urlparse(url).path)[1] or ".jpg"
+                path = os.path.join(save_dir, f"wm_{random.randint(100000, 999999)}{ext}")
+                with open(path, "wb") as out:
+                    for chunk in r.iter_content(chunk_size=65536):
+                        out.write(chunk)
+                return path
+            except Exception:
+                continue
+    except Exception:
+        return None
+    return None
+
+
 def fetch_segment_images(
     config: AppConfig,
     keywords: List[str],
 ) -> List[Optional[str]]:
     if not keywords:
         return []
+    run_stamp = datetime.utcnow().strftime("%Y%m%d_%H%M%S_%f")
+    px_dir = f"/tmp/pixabay_images/{run_stamp}"
+    pex_dir = f"/tmp/pexels_bg_images/{run_stamp}"
+    sp_dir = f"/tmp/serpapi_images/{run_stamp}"
+    wm_dir = f"/tmp/wikimedia_images/{run_stamp}"
     unique_kws = [kw for kw in dict.fromkeys(keywords) if kw]
     kw_to_path: Dict[str, Optional[str]] = {}
     for kw in unique_kws:
@@ -3440,9 +3583,13 @@ def fetch_segment_images(
         _telemetry_log(f"이미지 검색 키워드: {kw} -> 후보 {query_candidates[:3]}", config)
         for candidate in query_candidates:
             if config.pixabay_api_key:
-                path = fetch_pixabay_image(candidate, config.pixabay_api_key, "/tmp/pixabay_images")
+                path = fetch_pixabay_image(candidate, config.pixabay_api_key, px_dir)
             if not path and config.pexels_api_key:
-                path = fetch_pexels_image(candidate, config.pexels_api_key, "/tmp/pexels_bg_images")
+                path = fetch_pexels_image(candidate, config.pexels_api_key, pex_dir)
+            if not path and config.serpapi_api_key:
+                path = fetch_serpapi_image(candidate, config.serpapi_api_key, sp_dir)
+            if not path:
+                path = fetch_wikimedia_image(candidate, wm_dir)
             if path:
                 break
         if not path:
@@ -3450,9 +3597,13 @@ def fetch_segment_images(
             fallback_pool = brand_fallbacks if brand_fallbacks else _GLOBAL_BG_FALLBACK_QUERIES
             for fbq in fallback_pool:
                 if config.pixabay_api_key:
-                    path = fetch_pixabay_image(fbq, config.pixabay_api_key, "/tmp/pixabay_images")
+                    path = fetch_pixabay_image(fbq, config.pixabay_api_key, px_dir)
                 if not path and config.pexels_api_key:
-                    path = fetch_pexels_image(fbq, config.pexels_api_key, "/tmp/pexels_bg_images")
+                    path = fetch_pexels_image(fbq, config.pexels_api_key, pex_dir)
+                if not path and config.serpapi_api_key:
+                    path = fetch_serpapi_image(fbq, config.serpapi_api_key, sp_dir)
+                if not path:
+                    path = fetch_wikimedia_image(fbq, wm_dir)
                 if path:
                     break
         kw_to_path[kw] = path
@@ -3835,6 +3986,7 @@ def _estimate_durations(texts: List[str], total_duration: float) -> List[float]:
 
 _HIGHLIGHT_CACHE: Dict[Tuple[str, int], float] = {}
 _RUN_NOTIFIER: Optional["RunTimelineNotifier"] = None
+_LAST_GENERATED_BG_TOPIC_KEY: str = ""
 
 
 class RunTimelineNotifier:
@@ -4271,9 +4423,18 @@ def _ensure_placeholder_image(config: AppConfig) -> str:
     return path
 
 
-def _get_generated_bg_paths(config: AppConfig, count: int) -> List[Optional[str]]:
+def _get_generated_bg_paths(
+    config: AppConfig,
+    count: int,
+    topic_key: str = "",
+) -> List[Optional[str]]:
+    global _LAST_GENERATED_BG_TOPIC_KEY
     if count <= 0:
         return []
+    topic_norm = (topic_key or "").strip().lower()
+    if topic_norm and _LAST_GENERATED_BG_TOPIC_KEY and _LAST_GENERATED_BG_TOPIC_KEY != topic_norm:
+        # 주제가 바뀌면 이전 생성 배경은 즉시 폐기 (이전 영상 잔상 방지)
+        _clear_dir_cache(config.generated_bg_dir, allowed_ext=(".jpg", ".jpeg", ".png", ".webp"))
     files = _list_image_files(config.generated_bg_dir)
     if not files:
         return []
@@ -4283,7 +4444,7 @@ def _get_generated_bg_paths(config: AppConfig, count: int) -> List[Optional[str]
     for path in files:
         try:
             age = now_ts - os.path.getmtime(path)
-            if age <= 60 * 90:  # 90분 이내
+            if age <= 60 * 20:  # 20분 이내
                 fresh_files.append(path)
         except Exception:
             continue
@@ -4292,6 +4453,8 @@ def _get_generated_bg_paths(config: AppConfig, count: int) -> List[Optional[str]
     else:
         return []
     if len(files) >= count:
+        if topic_norm:
+            _LAST_GENERATED_BG_TOPIC_KEY = topic_norm
         return files[:count]
     # 부족하면 반복
     repeated: List[Optional[str]] = []
@@ -4299,6 +4462,8 @@ def _get_generated_bg_paths(config: AppConfig, count: int) -> List[Optional[str]
     while len(repeated) < count:
         repeated.append(files[idx % len(files)])
         idx += 1
+    if topic_norm:
+        _LAST_GENERATED_BG_TOPIC_KEY = topic_norm
     return repeated
 
 
@@ -5509,10 +5674,10 @@ def _build_bilingual_caption_texts(
 
 def _guess_ass_font_name(font_path: str) -> str:
     name = os.path.basename(str(font_path or "")).lower()
-    if "zenkakugothicnew" in name:
-        return "Zen Kaku Gothic New"
     if "mplusrounded1c" in name:
         return "M PLUS Rounded 1c"
+    if "zenkakugothicnew" in name:
+        return "Zen Kaku Gothic New"
     if "bizudpgothic" in name:
         return "BIZ UDPGothic"
     if "notosansjp" in name:
@@ -5572,7 +5737,7 @@ def _build_ass_subtitle_file(
 
         default_style = pysubs2.SSAStyle(
             fontname=font_name,
-            fontsize=max(44, int(config.width * 0.05)),
+            fontsize=max(46, int(config.width * 0.053)),
             bold=True,
             italic=False,
             underline=False,
@@ -5851,29 +6016,37 @@ def _clear_dir_cache(path: str, allowed_ext: Optional[Tuple[str, ...]] = None) -
         return 0
     removed = 0
     try:
-        for name in os.listdir(path):
-            full = os.path.join(path, name)
-            if not os.path.isfile(full):
-                continue
-            if allowed_ext and not name.lower().endswith(allowed_ext):
-                continue
-            try:
-                os.remove(full)
-                removed += 1
-            except Exception:
-                continue
+        for root, _, files in os.walk(path, topdown=False):
+            for name in files:
+                full = os.path.join(root, name)
+                if allowed_ext and not name.lower().endswith(allowed_ext):
+                    continue
+                try:
+                    os.remove(full)
+                    removed += 1
+                except Exception:
+                    continue
+            if root != path:
+                try:
+                    if not os.listdir(root):
+                        os.rmdir(root)
+                except Exception:
+                    pass
     except Exception:
         return removed
     return removed
 
 
 def _reset_runtime_caches(config: AppConfig) -> None:
-    global _HIGHLIGHT_CACHE
+    global _HIGHLIGHT_CACHE, _LAST_GENERATED_BG_TOPIC_KEY
     _HIGHLIGHT_CACHE.clear()
+    _LAST_GENERATED_BG_TOPIC_KEY = ""
     cache_dirs = [
         config.generated_bg_dir,
         "/tmp/pixabay_images",
         "/tmp/pexels_bg_images",
+        "/tmp/serpapi_images",
+        "/tmp/wikimedia_images",
         "/tmp/pixabay_bg",
         "/tmp/pexels_bg",
         "/tmp/pexels_bg_videos",
@@ -6471,7 +6644,7 @@ def _auto_jp_flow(
 
     # ── 배경 선택: Minecraft 영상 vs 상황 이미지 (A/B) ─────────────
     generated_bg_paths = (
-        _get_generated_bg_paths(config, len(texts))
+        _get_generated_bg_paths(config, len(texts), topic_key=topic_key)
         if getattr(config, "use_generated_bg_priority", False)
         else []
     )
@@ -7175,7 +7348,7 @@ def run_streamlit_app() -> None:
                         visual_keywords=_kws_m,
                     )
                     gen_bg_manual = (
-                        _get_generated_bg_paths(config, len(texts))
+                        _get_generated_bg_paths(config, len(texts), topic_key=topic_key)
                         if getattr(config, "use_generated_bg_priority", False)
                         else []
                     )
@@ -8126,7 +8299,7 @@ def run_batch(count: int, seed: str = "", beats: int = 7) -> None:
             visual_keywords=visual_kws,
         )
         gen_bg_b = (
-            _get_generated_bg_paths(config, len(texts))
+            _get_generated_bg_paths(config, len(texts), topic_key=topic_key)
             if getattr(config, "use_generated_bg_priority", False)
             else []
         )
