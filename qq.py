@@ -12,6 +12,7 @@ import textwrap
 import time
 from html import unescape
 from urllib.parse import urljoin, urlencode, urlparse
+from collections import Counter
 from dataclasses import dataclass
 from datetime import datetime, timedelta
 from zoneinfo import ZoneInfo
@@ -508,6 +509,7 @@ class AppConfig:
     ab_report_days: int
     ab_report_max_items: int
     ab_report_state_path: str
+    video_metrics_state_path: str
     jp_youtube_only: bool
     # 플랫폼: instagram(기본), youtube, tiktok(준비)
     upload_platform: str
@@ -553,6 +555,11 @@ def load_config() -> AppConfig:
         _get_secret("AB_REPORT_STATE_PATH", "data/state/ab_report_state.json")
         or "data/state/ab_report_state.json",
         "/tmp/auto_shorts_state/ab_report_state.json",
+    )
+    video_metrics_state_path = _ensure_writable_file(
+        _get_secret("VIDEO_METRICS_STATE_PATH", "data/state/video_metrics_state.json")
+        or "data/state/video_metrics_state.json",
+        "/tmp/auto_shorts_state/video_metrics_state.json",
     )
     pixabay_api_key = (_get_secret("PIXABAY_API_KEY", "") or "").strip()
     pexels_api_key = (_get_secret("PEXELS_API_KEY", "") or "").strip()
@@ -646,6 +653,7 @@ def load_config() -> AppConfig:
         ab_report_days=int(_get_secret("AB_REPORT_DAYS", "7") or 7),
         ab_report_max_items=int(_get_secret("AB_REPORT_MAX_ITEMS", "20") or 20),
         ab_report_state_path=ab_report_state_path,
+        video_metrics_state_path=video_metrics_state_path,
         upload_platform=(_get_secret("UPLOAD_PLATFORM", "youtube") or "youtube").strip().lower(),
         enable_instagram_upload=_get_bool("ENABLE_INSTAGRAM_UPLOAD", False),
         instagram_access_token=(_get_secret("INSTAGRAM_ACCESS_TOKEN", "") or "").strip(),
@@ -1658,12 +1666,18 @@ def _script_to_visual_keywords(script: Dict[str, Any]) -> List[str]:
     """각 세그먼트의 visual_search_keyword 리스트 반환."""
     timeline = _get_story_timeline(script)
     if timeline:
-        return [
-            item.get("visual_search_keyword")
-            or item.get("visual_keyword_en")
-            or "archival newspaper headline close up"
-            for item in timeline
-        ]
+        topic = str((script.get("meta", {}) or {}).get("topic_en", "") or "")
+        keywords: List[str] = []
+        for item in timeline:
+            role = str(item.get("role", "") or "")
+            script_ja = str(item.get("script_ja", "") or "")
+            raw_kw = (
+                item.get("visual_search_keyword")
+                or item.get("visual_keyword_en")
+                or "archival newspaper headline close up"
+            )
+            keywords.append(_refine_visual_keyword(str(raw_kw), topic, role, script_ja))
+        return keywords
     # 구 스키마 fallback — 전체 공통 키워드 반복
     default_kw = script.get("bg_search_query", "archival newspaper headline close up")
     texts = _script_to_beats(script)
@@ -1860,6 +1874,7 @@ _BRAND_QUERY_HINTS: List[Tuple[re.Pattern[str], str]] = [
     (re.compile(r"(pepsi|ペプシ|펩시)", re.IGNORECASE), "Pepsi logo can soda advertisement"),
     (re.compile(r"(nike|ナイキ)", re.IGNORECASE), "Nike logo sneaker store display"),
     (re.compile(r"(instagram|インスタ|인스타)", re.IGNORECASE), "Instagram logo smartphone app screen"),
+    (re.compile(r"(tiktok|틱톡|ティックトック|douyin)", re.IGNORECASE), "TikTok logo app icon smartphone screen"),
     (re.compile(r"(ramen|ラーメン|라면)", re.IGNORECASE), "ramen noodles bowl close up"),
 ]
 
@@ -4199,6 +4214,20 @@ def _get_generated_bg_paths(config: AppConfig, count: int) -> List[Optional[str]
     files = _list_image_files(config.generated_bg_dir)
     if not files:
         return []
+    # 최근 생성분만 사용해 이전 주제 이미지 재사용(캐시 잔존) 방지
+    now_ts = time.time()
+    fresh_files: List[str] = []
+    for path in files:
+        try:
+            age = now_ts - os.path.getmtime(path)
+            if age <= 60 * 90:  # 90분 이내
+                fresh_files.append(path)
+        except Exception:
+            continue
+    if fresh_files:
+        files = fresh_files
+    else:
+        return []
     if len(files) >= count:
         return files[:count]
     # 부족하면 반복
@@ -5262,6 +5291,49 @@ def _write_local_log(path: str, record: dict) -> None:
         file.write(json.dumps(record, ensure_ascii=False) + "\n")
 
 
+def _mark_topic_once(path: str, topic: str, title: str = "") -> bool:
+    key = (topic or "").strip()
+    if not key:
+        return False
+    used_topics = _load_used_topics(path)
+    if _is_used_topic(used_topics, key):
+        return False
+    _mark_used_topic(path, key, title=title)
+    return True
+
+
+def _write_approved_content_log(
+    config: AppConfig,
+    *,
+    topic_key: str,
+    title: str,
+    mood: str,
+    hashtags: List[str],
+    pinned_ja: str,
+    pinned_ko: str,
+    texts_ja: List[str],
+    texts_ko: List[str],
+    background_mode: str,
+    caption_variant: str,
+    video_path: str,
+) -> None:
+    record = {
+        "date_jst": _get_local_now(config).strftime("%Y-%m-%d %H:%M:%S"),
+        "topic_key": topic_key,
+        "title_ja": title,
+        "mood": mood,
+        "hashtags_ja": " ".join(hashtags or []),
+        "pinned_comment_ja": pinned_ja,
+        "pinned_comment_ko": pinned_ko,
+        "script_ja": texts_ja or [],
+        "script_ko": texts_ko or [],
+        "background_mode": background_mode,
+        "caption_variant": caption_variant,
+        "video_path": video_path,
+    }
+    _write_local_log(os.path.join(config.output_dir, "approved_contents.jsonl"), record)
+
+
 def _format_hashtags(tags: List[str]) -> str:
     return " ".join(tags)
 
@@ -5625,6 +5697,222 @@ def _write_json_file(path: str, data: Any) -> None:
         json.dump(data, file, ensure_ascii=False, indent=2)
 
 
+def _clear_dir_cache(path: str, allowed_ext: Optional[Tuple[str, ...]] = None) -> int:
+    if not path or not os.path.exists(path):
+        return 0
+    removed = 0
+    try:
+        for name in os.listdir(path):
+            full = os.path.join(path, name)
+            if not os.path.isfile(full):
+                continue
+            if allowed_ext and not name.lower().endswith(allowed_ext):
+                continue
+            try:
+                os.remove(full)
+                removed += 1
+            except Exception:
+                continue
+    except Exception:
+        return removed
+    return removed
+
+
+def _reset_runtime_caches(config: AppConfig) -> None:
+    global _HIGHLIGHT_CACHE
+    _HIGHLIGHT_CACHE.clear()
+    cache_dirs = [
+        config.generated_bg_dir,
+        "/tmp/pixabay_images",
+        "/tmp/pexels_bg_images",
+        "/tmp/pixabay_bg",
+        "/tmp/pexels_bg",
+        "/tmp/pexels_bg_videos",
+        "/tmp/pixabay_bg_videos",
+    ]
+    removed_total = 0
+    for d in cache_dirs:
+        removed_total += _clear_dir_cache(
+            d,
+            allowed_ext=(".jpg", ".jpeg", ".png", ".webp", ".mp4", ".mkv", ".webm", ".ass"),
+        )
+    if removed_total:
+        _telemetry_log(f"런타임 캐시 초기화: {removed_total}개 파일 정리", config)
+
+
+def _load_recent_run_records(config: AppConfig, limit: int = 120) -> List[Dict[str, Any]]:
+    path = os.path.join(config.output_dir, "runs.jsonl")
+    if not os.path.exists(path):
+        return []
+    records: List[Dict[str, Any]] = []
+    try:
+        with open(path, "r", encoding="utf-8") as file:
+            lines = file.readlines()[-max(20, limit * 2):]
+        for line in lines:
+            try:
+                rec = json.loads(line)
+            except Exception:
+                continue
+            if not isinstance(rec, dict):
+                continue
+            records.append(rec)
+    except Exception:
+        return []
+    # 최신 순으로 dedupe(video_id 기준)
+    seen: set[str] = set()
+    deduped: List[Dict[str, Any]] = []
+    for rec in reversed(records):
+        vid = str(rec.get("youtube_video_id", "") or "").strip()
+        if not vid or vid in seen:
+            continue
+        seen.add(vid)
+        deduped.append(rec)
+        if len(deduped) >= limit:
+            break
+    return deduped
+
+
+def _extract_growth_terms(text: str) -> List[str]:
+    src = str(text or "").lower()
+    parts = re.split(r"[^a-z0-9\u3040-\u30ff\u4e00-\u9fff]+", src)
+    stop = {
+        "shorts", "youtube", "video", "story", "mystery", "shock", "news",
+        "の", "が", "を", "に", "は", "で", "と", "て", "する", "した",
+        "これ", "それ", "この", "その", "そして", "でも", "実は",
+    }
+    return [p for p in parts if len(p) >= 2 and p not in stop]
+
+
+def _parse_datetime_loose(value: str) -> Optional[datetime]:
+    raw = str(value or "").strip()
+    if not raw:
+        return None
+    for fmt in ("%Y-%m-%d %H:%M:%S", "%Y-%m-%dT%H:%M:%S", "%Y-%m-%d"):
+        try:
+            return datetime.strptime(raw[:19], fmt)
+        except Exception:
+            continue
+    try:
+        return datetime.fromisoformat(raw)
+    except Exception:
+        return None
+
+
+def _refresh_video_metrics_state(config: AppConfig, limit: int = 120) -> Dict[str, Any]:
+    state = _read_json_file(config.video_metrics_state_path, {"videos": {}, "last_refresh": ""})
+    if not isinstance(state, dict):
+        state = {"videos": {}, "last_refresh": ""}
+    videos = state.get("videos", {})
+    if not isinstance(videos, dict):
+        videos = {}
+
+    records = _load_recent_run_records(config, limit=limit)
+    if not records:
+        state["videos"] = videos
+        return state
+
+    now = _get_local_now(config)
+    api_key = getattr(config, "youtube_api_key", "") or ""
+    fetch_budget = 30
+    for rec in records:
+        vid = str(rec.get("youtube_video_id", "") or "").strip()
+        if not vid:
+            continue
+        current = videos.get(vid, {}) if isinstance(videos.get(vid), dict) else {}
+        fetched_at = _parse_datetime_loose(str(current.get("fetched_at", "") or ""))
+        should_fetch = bool(api_key)
+        if should_fetch and fetched_at is not None:
+            should_fetch = (now - fetched_at).total_seconds() >= 6 * 3600
+        stats: Dict[str, int] = {}
+        if should_fetch and fetch_budget > 0:
+            stats = _fetch_youtube_stats(vid, api_key)
+            fetch_budget -= 1
+        elif isinstance(current, dict):
+            stats = {
+                "viewCount": int(current.get("viewCount", 0) or 0),
+                "likeCount": int(current.get("likeCount", 0) or 0),
+                "commentCount": int(current.get("commentCount", 0) or 0),
+            }
+        videos[vid] = {
+            "video_id": vid,
+            "title": str(rec.get("title_ja", "") or ""),
+            "topic_theme": str(rec.get("topic_theme", "") or ""),
+            "hashtags_ja": str(rec.get("hashtags_ja", "") or ""),
+            "youtube_url": str(rec.get("youtube_url", "") or ""),
+            "viewCount": int(stats.get("viewCount", current.get("viewCount", 0) or 0) or 0),
+            "likeCount": int(stats.get("likeCount", current.get("likeCount", 0) or 0) or 0),
+            "commentCount": int(stats.get("commentCount", current.get("commentCount", 0) or 0) or 0),
+            "fetched_at": now.strftime("%Y-%m-%d %H:%M:%S"),
+        }
+
+    state["videos"] = videos
+    state["last_refresh"] = now.strftime("%Y-%m-%d %H:%M:%S")
+    _write_json_file(config.video_metrics_state_path, state)
+    return state
+
+
+def _build_growth_feedback_hint(config: AppConfig) -> str:
+    state = _refresh_video_metrics_state(config, limit=120)
+    videos = state.get("videos", {})
+    if not isinstance(videos, dict) or not videos:
+        return ""
+    items = [v for v in videos.values() if isinstance(v, dict)]
+    items = [v for v in items if int(v.get("viewCount", 0) or 0) > 0]
+    if len(items) < 3:
+        return ""
+    ranked = sorted(
+        items,
+        key=lambda x: int(x.get("viewCount", 0) or 0) + int(x.get("likeCount", 0) or 0) * 20,
+        reverse=True,
+    )
+    top = ranked[: min(6, len(ranked))]
+    bottom = ranked[-min(4, len(ranked)) :]
+
+    top_tags = Counter()
+    top_terms = Counter()
+    for row in top:
+        for t in str(row.get("hashtags_ja", "") or "").split():
+            if t.startswith("#"):
+                top_tags[t] += 1
+        joined = f"{row.get('title','')} {row.get('topic_theme','')}"
+        for term in _extract_growth_terms(joined):
+            top_terms[term] += 1
+
+    low_terms = Counter()
+    for row in bottom:
+        joined = f"{row.get('title','')} {row.get('topic_theme','')}"
+        for term in _extract_growth_terms(joined):
+            low_terms[term] += 1
+
+    best_tags = [tag for tag, _ in top_tags.most_common(4)]
+    best_terms = [term for term, _ in top_terms.most_common(5)]
+    avoid_terms = [term for term, _ in low_terms.most_common(3) if term not in best_terms]
+
+    avg_views = int(sum(int(r.get("viewCount", 0) or 0) for r in top) / max(1, len(top)))
+    avg_like_rate = 0.0
+    try:
+        avg_like_rate = (
+            sum((int(r.get("likeCount", 0) or 0) / max(1, int(r.get("viewCount", 0) or 1))) for r in top)
+            / max(1, len(top))
+        ) * 100.0
+    except Exception:
+        avg_like_rate = 0.0
+
+    lines = [
+        "[성과 회고 데이터]",
+        f"- 상위 성과 평균 조회수: {avg_views}",
+        f"- 상위 평균 좋아요율: {avg_like_rate:.2f}%",
+    ]
+    if best_terms:
+        lines.append(f"- 상위 반복 키워드: {', '.join(best_terms[:3])}")
+    if best_tags:
+        lines.append(f"- 상위 해시태그: {' '.join(best_tags)}")
+    if avoid_terms:
+        lines.append(f"- 저성과 반복 키워드 회피: {', '.join(avoid_terms)}")
+    lines.append("- 이번 주제는 상위 키워드 1~2개를 반영하고, 저성과 키워드는 피해서 작성")
+    return "\n".join(lines)
+
+
 def _get_local_now(config: AppConfig) -> datetime:
     tz_name = (config.auto_run_tz or "Asia/Tokyo").strip()
     try:
@@ -5936,7 +6224,9 @@ def _auto_jp_flow(
         )
         return False
     _set_run_notifier(RunTimelineNotifier(config, enabled=True))
+    _reset_runtime_caches(config)
     _notify("🚀", "AI 쇼츠 파이프라인 시작!")
+    approved_for_publish = not config.require_approval
 
     # ── 대본 생성 ─────────────────────────────────────────
     if getattr(config, "retry_pending_uploads", False):
@@ -5948,14 +6238,20 @@ def _auto_jp_flow(
     meta = {}
     content_list = []
     topic_key = ""
+    growth_hint = _build_growth_feedback_hint(config)
+    base_hint = (extra_hint or "").strip()
+    if growth_hint:
+        base_hint = (base_hint + "\n\n" + growth_hint).strip() if base_hint else growth_hint
+    llm_hint = base_hint
     for attempt in range(3):
         try:
-            script = generate_script_jp(config, extra_hint=extra_hint)
+            script = generate_script_jp(config, extra_hint=llm_hint)
             _telemetry_log("대본 생성 완료", config)
         except Exception as exc:
             _telemetry_log(f"대본 생성 실패: {exc}", config)
             _ui_error(f"대본 생성 실패: {exc}", use_streamlit)
             _notify("❌", "기획팀 실패", str(exc))
+            _reset_runtime_caches(config)
             return False
         meta = script.get("meta", {})
         content_list = _get_story_timeline(script)
@@ -5964,7 +6260,7 @@ def _auto_jp_flow(
             used_topics = _load_used_topics(config.used_topics_path)
             if _is_used_topic(used_topics, topic_key):
                 _telemetry_log(f"중복 주제 감지 → 재생성: {topic_key}", config)
-                extra_hint = (extra_hint + f"\n이전 주제는 제외: {topic_key}").strip()
+                llm_hint = (base_hint + f"\n이전 주제는 제외: {topic_key}").strip()
                 continue
         break
     if topic_key:
@@ -5975,6 +6271,7 @@ def _auto_jp_flow(
             _ui_warning(msg, use_streamlit)
             send_telegram_message(config.telegram_bot_token, config.telegram_admin_chat_id, msg)
             _notify("❌", "기획팀 실패", "중복 주제로 중단")
+            _reset_runtime_caches(config)
             return False
 
     # ── 새 스키마 필드 추출 ───────────────────────────────
@@ -5985,6 +6282,8 @@ def _auto_jp_flow(
     pinned = meta.get("pinned_comment", script.get("pinned_comment", ""))
     pinned_ko = _to_ko_literal_tone(meta.get("pinned_comment_ko", pinned))
     pinned_bilingual = _compose_bilingual_text(pinned, pinned_ko)
+    if topic_key:
+        _mark_topic_once(config.used_topics_path, topic_key, title=video_title)
     if topic_key:
         _notify("📝", "기획팀 완료", f"완성! 오늘 주제: {topic_key}")
 
@@ -6125,6 +6424,7 @@ def _auto_jp_flow(
         _ui_error(err_msg, use_streamlit)
         send_telegram_message(config.telegram_bot_token, config.telegram_admin_chat_id, err_msg)
         _notify("❌", "제작팀 실패", str(tts_err))
+        _reset_runtime_caches(config)
         return False
 
     # ── 영상 렌더링 ───────────────────────────────────────
@@ -6187,6 +6487,7 @@ def _auto_jp_flow(
         _telemetry_log(f"영상 렌더링 실패: {render_err}", config)
         _ui_error(f"영상 렌더링 실패: {render_err}", use_streamlit)
         _notify("❌", "영상팀 실패", str(render_err))
+        _reset_runtime_caches(config)
         return False
 
     # ── 썸네일 생성 ───────────────────────────────────────
@@ -6253,7 +6554,9 @@ def _auto_jp_flow(
             _status_update(progress, status_box, 1.0, "보류(업로드 안 함)")
             if use_streamlit:
                 st.video(output_path)
+            _reset_runtime_caches(config)
             return True
+        approved_for_publish = True
 
     # ── 플랫폼 업로드 (Instagram 우선, YouTube/TikTok) ─────
     video_id = ""
@@ -6374,12 +6677,29 @@ def _auto_jp_flow(
         "youtube_url": video_url,
         "instagram_media_id": video_id if use_instagram else "",
         "platform": "instagram" if use_instagram else "youtube",
+        "topic_key": topic_key,
+        "approved_for_publish": "1" if approved_for_publish else "0",
         "caption_variant": caption_variant,
         "background_mode": background_mode,
         "bgm_file": os.path.basename(bgm_path) if bgm_path else "",
         "status": "ok" if not upload_error else "error",
         "error": upload_error,
     }
+    if approved_for_publish:
+        _write_approved_content_log(
+            config,
+            topic_key=topic_key,
+            title=video_title,
+            mood=mood,
+            hashtags=hashtags,
+            pinned_ja=pinned,
+            pinned_ko=pinned_ko,
+            texts_ja=texts,
+            texts_ko=texts_ko_norm,
+            background_mode=background_mode,
+            caption_variant=caption_variant,
+            video_path=output_path,
+        )
     try:
         append_publish_log(config, log_row)
     except Exception:
@@ -6424,8 +6744,10 @@ def _auto_jp_flow(
             f"로컬: {output_path}"
         )
         send_telegram_message(config.telegram_bot_token, config.telegram_admin_chat_id, summary_text)
-    if topic_key:
-        _mark_used_topic(config.used_topics_path, topic_key, title=video_title)
+    try:
+        _refresh_video_metrics_state(config, limit=120)
+    except Exception:
+        pass
     _notify("📦", "정리 작업", "임시 파일 정리 및 로그 저장 완료")
     _maybe_send_ab_report(config, use_streamlit=use_streamlit)
     if _RUN_NOTIFIER:
@@ -6433,6 +6755,7 @@ def _auto_jp_flow(
         if video_url:
             platforms.append("YouTube")
         _RUN_NOTIFIER.finish(platforms, _get_next_run_time(config))
+    _reset_runtime_caches(config)
     return True
 
 
@@ -6585,7 +6908,11 @@ def run_streamlit_app() -> None:
         if generate_button and manual_hint:
             _status_update(progress, status_box, 0.05, "대본 생성 중")
             try:
-                script = generate_script_jp(config, extra_hint=manual_hint)
+                growth_hint = _build_growth_feedback_hint(config)
+                hint = manual_hint.strip()
+                if growth_hint:
+                    hint = (hint + "\n\n" + growth_hint).strip()
+                script = generate_script_jp(config, extra_hint=hint)
                 st.session_state["script_jp"] = script
                 _status_update(progress, status_box, 0.2, "대본 생성 완료")
             except Exception as exc:
@@ -6664,6 +6991,8 @@ def run_streamlit_app() -> None:
                     if topic_key and _is_used_topic(_load_used_topics(config.used_topics_path), topic_key):
                         st.warning(f"이미 사용한 주제입니다. 다른 주제를 사용하세요: {topic_key}")
                         return
+                    if topic_key:
+                        _mark_topic_once(config.used_topics_path, topic_key, title=video_title_val)
                     _status_update(progress, status_box, 0.15, f"BGM 매칭 중 ({mood})")
                     bgm_path = match_bgm_by_mood(config, mood)
                     if not bgm_path or not os.path.exists(bgm_path):
@@ -6809,6 +7138,7 @@ def run_streamlit_app() -> None:
                     except Exception as render_err:
                         _telemetry_log(f"수동 렌더링 실패: {render_err}", config)
                         st.error(f"영상 렌더링 실패: {render_err}")
+                        _reset_runtime_caches(config)
                         return
                     # 썸네일 생성
                     thumb_path = ""
@@ -6978,12 +7308,29 @@ def run_streamlit_app() -> None:
                         "video_path": output_path,
                         "youtube_video_id": video_id,
                         "youtube_url": video_url,
+                        "topic_key": topic_key,
+                        "approved_for_publish": "1" if should_upload else "0",
                         "caption_variant": caption_variant,
                         "background_mode": background_mode,
                         "bgm_file": os.path.basename(bgm_path) if bgm_path else "",
                         "status": "ok" if not upload_error else "error",
                         "error": upload_error,
                     }
+                    if should_upload:
+                        _write_approved_content_log(
+                            config,
+                            topic_key=topic_key,
+                            title=video_title_val,
+                            mood=mood,
+                            hashtags=hashtags_val.split(),
+                            pinned_ja=pinned_val,
+                            pinned_ko=pinned_ko,
+                            texts_ja=texts,
+                            texts_ko=texts_ko_norm,
+                            background_mode=background_mode,
+                            caption_variant=caption_variant,
+                            video_path=output_path,
+                        )
                     try:
                         append_publish_log(config, log_row)
                     except Exception:
@@ -7003,9 +7350,11 @@ def run_streamlit_app() -> None:
                             "status": log_row["status"],
                         },
                     )
-                    topic_key = _pick_topic_key(_meta)
-                    if topic_key:
-                        _mark_used_topic(config.used_topics_path, topic_key, title=video_title_val)
+                    try:
+                        _refresh_video_metrics_state(config, limit=120)
+                    except Exception:
+                        pass
+                    _reset_runtime_caches(config)
                     _status_update(progress, status_box, 1.0, "완료")
                     st.video(output_path)
                     if video_url:
@@ -7571,19 +7920,35 @@ def run_streamlit_app() -> None:
 
 def run_batch(count: int, seed: str = "", beats: int = 7) -> None:
     config = load_config()
+    growth_hint = _build_growth_feedback_hint(config)
+    base_hint = (seed or "").strip()
     for index in range(count):
+        _reset_runtime_caches(config)
         script = None
         topic_key = ""
+        llm_hint = base_hint
+        if growth_hint:
+            llm_hint = (llm_hint + "\n\n" + growth_hint).strip() if llm_hint else growth_hint
         for attempt in range(3):
-            script = generate_script_jp(config, extra_hint=seed)
+            script = generate_script_jp(config, extra_hint=llm_hint)
             _meta_tmp = script.get("meta", {})
             topic_key = _pick_topic_key(_meta_tmp)
             if topic_key and _is_used_topic(_load_used_topics(config.used_topics_path), topic_key):
+                llm_hint = (base_hint + f"\n이전 주제는 제외: {topic_key}").strip()
+                if growth_hint:
+                    llm_hint = (llm_hint + "\n\n" + growth_hint).strip()
                 continue
             break
         if topic_key and _is_used_topic(_load_used_topics(config.used_topics_path), topic_key):
+            _reset_runtime_caches(config)
             continue
         _meta_b = script.get("meta", {})
+        if topic_key:
+            _mark_topic_once(
+                config.used_topics_path,
+                topic_key,
+                title=_meta_b.get("title_ja", _meta_b.get("title", "")),
+            )
         mood = _meta_b.get("bgm_mood", script.get("mood", "mystery_suspense"))
         texts = _script_to_beats(script)
         texts_ko = _script_to_beats_ko(script)
@@ -7849,12 +8214,29 @@ def run_batch(count: int, seed: str = "", beats: int = 7) -> None:
             "video_path": output_path,
             "youtube_video_id": video_id,
             "youtube_url": video_url,
+            "topic_key": topic_key,
+            "approved_for_publish": "1" if should_upload else "0",
             "caption_variant": caption_variant,
             "background_mode": background_mode,
             "bgm_file": os.path.basename(bgm_path) if bgm_path else "",
             "status": "ok" if not upload_error else "error",
             "error": upload_error,
         }
+        if should_upload:
+            _write_approved_content_log(
+                config,
+                topic_key=topic_key,
+                title=_title_b,
+                mood=mood,
+                hashtags=_hashtags_b,
+                pinned_ja=_pinned_b,
+                pinned_ko=_pinned_ko_b,
+                texts_ja=texts,
+                texts_ko=texts_ko,
+                background_mode=background_mode,
+                caption_variant=caption_variant,
+                video_path=output_path,
+            )
         try:
             append_publish_log(config, log_row)
         except Exception:
@@ -7874,8 +8256,11 @@ def run_batch(count: int, seed: str = "", beats: int = 7) -> None:
                 "status": log_row["status"],
             },
         )
-        if topic_key:
-            _mark_used_topic(config.used_topics_path, topic_key, title=_title_b)
+        try:
+            _refresh_video_metrics_state(config, limit=120)
+        except Exception:
+            pass
+        _reset_runtime_caches(config)
 
 
 def _run_streamlit_app_safe() -> None:
