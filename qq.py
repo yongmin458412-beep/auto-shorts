@@ -1069,7 +1069,7 @@ def _apply_majisho_interlude_assets(
             break
     if target_idx < 0:
         return bg_video_paths, bg_image_paths
-    asset_path = str(getattr(config, "majisho_asset_path", "") or "").strip()
+    asset_path = _resolve_primary_photo_asset(config) or str(getattr(config, "majisho_asset_path", "") or "").strip()
     if not asset_path or not os.path.exists(asset_path):
         return bg_video_paths, bg_image_paths
 
@@ -3387,6 +3387,8 @@ def _draw_subtitle(
             return image
     else:
         progress = 0.0
+    if not str(text or "").strip():
+        return image
 
     # 폰트 크기: 요청에 맞춰 아주 소폭 확대
     font_size = max(52, canvas_width // 15)
@@ -3471,18 +3473,10 @@ def _draw_subtitle(
         stroke_fill = (0, 0, 0)
         stroke_width = 3
 
-    # 애니메이션: 팝업(scale) + 튀어오르기(bounce) + 페이드아웃 + 새벽 빛 효과(glow)
     scale = 1.0
     y_bounce = 0
     alpha_mul = 1.0
-    glow_alpha = 0  # 텍스트 주변 발광 효과 강도
-    if duration and t is not None and duration > 0:
-        pop_t = min(max(progress / 0.12, 0.0), 1.0)  # 팝인 속도 약간 빠르게
-        scale = 0.88 + 0.12 * pop_t                   # 스케일 범위 확대 (0.88→1.0)
-        y_bounce = int((1.0 - pop_t) * 16)            # 바운스 높이 증가
-        glow_alpha = int(max(0, (1.0 - pop_t)) * 80)  # 팝인 초반 발광
-        if progress > 0.82:
-            alpha_mul = max(0.0, 1.0 - (progress - 0.82) / 0.18)  # 페이드아웃 구간 확대
+    glow_alpha = 0
 
     # 반투명 배경 박스 (japanese_variety는 박스 없음, reaction은 말풍선)
     box_pad = 18
@@ -4077,6 +4071,30 @@ def fetch_segment_images(
 
     placeholder = _ensure_placeholder_image(config)
     return [kw_to_path.get(kw) or placeholder for kw in keywords]
+
+
+def _prepare_related_image_backgrounds(
+    config: AppConfig,
+    visual_keywords: List[str],
+    count: int,
+) -> Tuple[List[Optional[str]], List[Optional[str]], str]:
+    size = max(0, int(count))
+    if size <= 0:
+        return [], [], "image"
+    keywords = [str(k).strip() for k in (visual_keywords or []) if str(k).strip()]
+    if not keywords:
+        keywords = ["japan daily life vertical photo"] * size
+    if len(keywords) < size:
+        keywords = (keywords + [keywords[-1]] * size)[:size]
+    else:
+        keywords = keywords[:size]
+    images = fetch_segment_images(config, keywords)
+    placeholder = _ensure_placeholder_image(config)
+    if not images:
+        images = [placeholder] * size
+    if len(images) < size:
+        images = (images + [placeholder] * size)[:size]
+    return [None] * size, images[:size], "image"
 
 
 def fetch_pexels_video(
@@ -4758,11 +4776,7 @@ def render_video(
             bg_img = _enhance_bg_image_quality(bg_img)
             bg_img = _fit_image_to_canvas(bg_img, (W, H))
             _base_bg_arr = np.array(bg_img)
-            _motion_cfg = {
-                "zoom": random.uniform(0.06, 0.11),
-                "dir_x": random.choice([-1, 1]),
-                "dir_y": random.choice([-1, 1]),
-            }
+            _motion_cfg = None
 
         # 클로저 캡처 (Python for-loop 캡처 이슈 방지)
         _cap = cap_text
@@ -4803,7 +4817,7 @@ def render_video(
                 img = enlarged.crop((cx, cy, cx + W, cy + H))
             if _use_template:
                 img = _apply_korean_template(img, W, H)
-            if draw_subtitles:
+            if draw_subtitles and (__style not in {"asmr_tag", "asmr"}):
                 img = _draw_subtitle(
                     img,
                     __cap,
@@ -5184,15 +5198,19 @@ def _apply_primary_photo_override(
         placeholder = _ensure_placeholder_image(config)
         bg_image_paths = (bg_image_paths + [placeholder] * max_len)[:max_len]
     role_list = [str(r or "").strip().lower() for r in (roles or [])]
-    target_idx = 0
+    target_idx = 1 if max_len > 1 else 0
     if role_list:
+        found_asmr = False
         for idx, role in enumerate(role_list):
             if idx >= max_len:
                 break
-            if role not in {"asmr_tag", "asmr"}:
+            if role in {"asmr_tag", "asmr"}:
                 target_idx = idx
+                found_asmr = True
                 break
-    # 훅 세그먼트 1장만 사용자 사진으로, 이후는 연관 이미지 유지
+        if not found_asmr:
+            return bg_video_paths, bg_image_paths
+    # 첫 대본 이후 삽입되는 ASMR(마지쇼) 1초 구간에만 사용자 사진 적용
     if 0 <= target_idx < max_len:
         bg_video_paths[target_idx] = None
         bg_image_paths[target_idx] = photo_path
@@ -6381,11 +6399,16 @@ def _build_bilingual_caption_texts(
     config: AppConfig,
     texts_ja: List[str],
     texts_ko: List[str],
+    roles: Optional[List[str]] = None,
 ) -> List[str]:
     ko_norm = _normalize_ko_lines(texts_ko, texts_ja)
     merged: List[str] = []
     max_chars = max(8, int(getattr(config, "caption_max_chars", 14) or 14))
     for idx, ja_src in enumerate(texts_ja):
+        role = str((roles[idx] if roles and idx < len(roles) else "") or "").strip().lower()
+        if role in {"asmr_tag", "asmr"}:
+            merged.append("")
+            continue
         ko_src = ko_norm[idx] if idx < len(ko_norm) else ""
         ja_line = _split_caption_chunks(
             re.sub(r"\s+", " ", str(ja_src or "").strip()),
@@ -6535,7 +6558,8 @@ def _build_ass_subtitle_file(
                 if style_name in {"reaction", "outro", "outro_loop"}:
                     role_style = "Reaction"
                 elif style_name in {"asmr_tag", "asmr"}:
-                    role_style = "Asmr"
+                    start_sec += seg_dur
+                    continue
                 elif style_name == "japanese_variety":
                     role_style = "Variety"
             subs.events.append(
@@ -7561,7 +7585,7 @@ def _auto_jp_flow(
     caption_variant = _select_caption_variant(config)
     caption_styles = _apply_caption_variant(caption_styles, caption_variant)
     texts_ko_norm = _normalize_ko_lines(texts_ko, texts)
-    caption_texts = _build_bilingual_caption_texts(config, texts, texts_ko_norm)
+    caption_texts = _build_bilingual_caption_texts(config, texts, texts_ko_norm, roles=roles)
 
     # 인스타그램 인기 오디오 스타일: BGM을 fast_exciting 쪽으로 편향
     if getattr(config, "instagram_use_popular_audio", False) and mood == "mystery_suspense":
@@ -7586,67 +7610,13 @@ def _auto_jp_flow(
             use_streamlit,
         )
 
-    # ── 배경 선택: Minecraft 영상 vs 상황 이미지 (A/B) ─────────────
-    generated_bg_paths = (
-        _get_generated_bg_paths(config, len(texts), topic_key=topic_key)
-        if getattr(config, "use_generated_bg_priority", False)
-        else []
+    # ── 배경 선택: 전 구간 연관 이미지 기반 ─────────────
+    bg_video_paths, bg_image_paths, background_mode = _prepare_related_image_backgrounds(
+        config,
+        visual_keywords,
+        len(texts),
     )
-    bg_video_paths: List[Optional[str]] = []
-    bg_image_paths: List[Optional[str]] = []
-    forced_bg_mode = _infer_background_mode_by_content(meta, texts, visual_keywords)
-    background_mode = _select_background_mode(config, meta=meta, texts=texts, visual_keywords=visual_keywords)
-    if forced_bg_mode:
-        _telemetry_log(f"배경 모드 강제 선택(콘텐츠 규칙): {background_mode}", config)
-    else:
-        _telemetry_log(f"배경 모드 선택(AB): {background_mode}", config)
-    if generated_bg_paths:
-        background_mode = "image"
-        bg_video_paths = [None] * len(texts)
-        bg_image_paths = generated_bg_paths
-        _telemetry_log("생성 배경 이미지 사용", config)
-    elif background_mode == "minecraft":
-        backgrounds_dir = os.path.join(config.assets_dir, "backgrounds")
-        mc_path = fetch_youtube_minecraft_parkour_video(
-            backgrounds_dir,
-            config.width,
-            config.height,
-            config=config,
-            force_fresh=bool(getattr(config, "force_fresh_minecraft_download", False)),
-        )
-        if mc_path and _is_video_readable(mc_path):
-            bg_video_paths = [mc_path] * len(texts)
-            placeholder = _ensure_placeholder_image(config)
-            bg_image_paths = [placeholder] * len(texts)
-            _telemetry_log("Minecraft Parkour 배경 영상 사용", config)
-            _ui_info("배경 영상: Minecraft Parkour (YouTube)", use_streamlit)
-        else:
-            fallback_video = _fetch_context_video_background(config, visual_keywords)
-            if fallback_video:
-                background_mode = "context_video"
-                bg_video_paths = [fallback_video] * len(texts)
-                placeholder = _ensure_placeholder_image(config)
-                bg_image_paths = [placeholder] * len(texts)
-                _telemetry_log("Minecraft 실패 → 컨텍스트 영상 대체 사용", config)
-            else:
-                background_mode = "image"
-                _notify("⚠️", "배경 영상 실패", "Minecraft 다운로드 실패, 이미지로 대체")
-                _telemetry_log("Minecraft 다운로드 실패 → 이미지 모드 전환", config)
-    if background_mode == "image":
-        bg_video_paths = [None] * len(texts)
-        bg_image_paths = fetch_segment_images(config, visual_keywords)
-        _telemetry_log("키워드 이미지 수집 완료", config)
-        placeholder = _ensure_placeholder_image(config)
-        if not bg_image_paths:
-            placeholder = _ensure_placeholder_image(config)
-            bg_image_paths = [placeholder] * len(texts)
-        if bg_image_paths and all((not p) or p == placeholder for p in bg_image_paths):
-            fallback_video = _fetch_context_video_background(config, visual_keywords)
-            if fallback_video:
-                background_mode = "context_video"
-                bg_video_paths = [fallback_video] * len(texts)
-                bg_image_paths = [placeholder] * len(texts)
-                _telemetry_log("이미지 결과 부족 → 컨텍스트 영상 대체", config)
+    _telemetry_log("키워드 이미지 수집 완료(전 구간 이미지 모드)", config)
     bg_video_paths, bg_image_paths = _apply_majisho_interlude_assets(
         config,
         roles,
@@ -8305,74 +8275,20 @@ def run_streamlit_app() -> None:
                     caption_variant = _select_caption_variant(config)
                     caption_styles = _apply_caption_variant(caption_styles, caption_variant)
                     texts_ko_norm = _normalize_ko_lines(_texts_ko, texts)
-                    caption_texts = _build_bilingual_caption_texts(config, texts, texts_ko_norm)
+                    caption_texts = _build_bilingual_caption_texts(config, texts, texts_ko_norm, roles=roles)
                     pinned_ko = _to_ko_literal_tone(_meta.get("pinned_comment_ko", pinned_val))
                     pinned_bilingual = _compose_bilingual_text(pinned_val, pinned_ko)
 
                     placeholder = _ensure_placeholder_image(config)
                     assets = [placeholder] * len(texts)
 
-                    # 배경 선택: Minecraft vs 이미지
-                    bg_vids_manual: List[Optional[str]] = [None] * len(texts)
-                    bg_imgs_manual: List[Optional[str]] = [None] * len(texts)
+                    # 배경 선택: 전 구간 연관 이미지
                     _kws_m = _script_to_visual_keywords(script)
-                    _forced_bg_manual = _infer_background_mode_by_content(_meta, texts, _kws_m)
-                    background_mode = _select_background_mode(
+                    bg_vids_manual, bg_imgs_manual, background_mode = _prepare_related_image_backgrounds(
                         config,
-                        meta=_meta,
-                        texts=texts,
-                        visual_keywords=_kws_m,
+                        _kws_m,
+                        len(texts),
                     )
-                    gen_bg_manual = (
-                        _get_generated_bg_paths(config, len(texts), topic_key=topic_key)
-                        if getattr(config, "use_generated_bg_priority", False)
-                        else []
-                    )
-                    if gen_bg_manual:
-                        background_mode = "image"
-                        bg_imgs_manual = gen_bg_manual
-                        _telemetry_log("수동 렌더링: 생성 배경 이미지 사용", config)
-                    elif background_mode == "minecraft":
-                        if _forced_bg_manual:
-                            _telemetry_log("수동 렌더링: 콘텐츠 규칙으로 Minecraft 선택", config)
-                        _status_update(progress, status_box, 0.25, "배경 영상 다운로드 중 (Minecraft Parkour)")
-                        _bg_dir_m = os.path.join(config.assets_dir, "backgrounds")
-                        _mc_m = fetch_youtube_minecraft_parkour_video(
-                            _bg_dir_m,
-                            config.width,
-                            config.height,
-                            config=config,
-                            force_fresh=bool(getattr(config, "force_fresh_minecraft_download", False)),
-                        )
-                        if _mc_m and _is_video_readable(_mc_m):
-                            bg_vids_manual = [_mc_m] * len(texts)
-                            placeholder = _ensure_placeholder_image(config)
-                            bg_imgs_manual = [placeholder] * len(texts)
-                            _telemetry_log("수동 렌더링: Minecraft Parkour 배경 사용", config)
-                        else:
-                            fallback_video = _fetch_context_video_background(config, _kws_m)
-                            if fallback_video:
-                                background_mode = "context_video"
-                                bg_vids_manual = [fallback_video] * len(texts)
-                                placeholder = _ensure_placeholder_image(config)
-                                bg_imgs_manual = [placeholder] * len(texts)
-                                _telemetry_log("수동 렌더링: 컨텍스트 영상 대체 사용", config)
-                            else:
-                                background_mode = "image"
-                                _ui_warning("Minecraft 다운로드 실패 — 이미지로 대체", True)
-                    if background_mode == "image":
-                        bg_imgs_manual = fetch_segment_images(config, _kws_m)
-                        placeholder = _ensure_placeholder_image(config)
-                        if not bg_imgs_manual:
-                            placeholder = _ensure_placeholder_image(config)
-                            bg_imgs_manual = [placeholder] * len(texts)
-                        if bg_imgs_manual and all((not p) or p == placeholder for p in bg_imgs_manual):
-                            fallback_video = _fetch_context_video_background(config, _kws_m)
-                            if fallback_video:
-                                background_mode = "context_video"
-                                bg_vids_manual = [fallback_video] * len(texts)
-                                bg_imgs_manual = [placeholder] * len(texts)
-                                _telemetry_log("수동 렌더링: 이미지 부족 → 컨텍스트 영상 대체", config)
                     bg_vids_manual, bg_imgs_manual = _apply_majisho_interlude_assets(
                         config,
                         roles,
@@ -9236,11 +9152,11 @@ def run_streamlit_app() -> None:
 
 def run_batch(count: int, seed: str = "", beats: int = 7) -> None:
     config = load_config()
-    duplicate_guard_hint = _build_topic_exclusion_hint(config, limit=24)
-    growth_hint = _build_growth_feedback_hint(config)
     base_hint = (seed or "").strip()
     for index in range(count):
         _pre_generation_bootstrap(config)
+        duplicate_guard_hint = _build_topic_exclusion_hint(config, limit=24)
+        growth_hint = _build_growth_feedback_hint(config)
         script = None
         topic_key = ""
         llm_hint = base_hint
@@ -9303,7 +9219,7 @@ def run_batch(count: int, seed: str = "", beats: int = 7) -> None:
         caption_styles = _build_caption_styles(roles, len(texts))
         caption_variant = _select_caption_variant(config)
         caption_styles = _apply_caption_variant(caption_styles, caption_variant)
-        caption_texts = _build_bilingual_caption_texts(config, texts, texts_ko)
+        caption_texts = _build_bilingual_caption_texts(config, texts, texts_ko, roles=roles)
         placeholder = _ensure_placeholder_image(config)
         assets: List[str] = [placeholder] * len(texts)
         now = datetime.utcnow().strftime("%Y%m%d_%H%M%S")
@@ -9322,57 +9238,12 @@ def run_batch(count: int, seed: str = "", beats: int = 7) -> None:
         )
         output_path = os.path.join(config.output_dir, f"shorts_{now}_{index}.mp4")
         bgm_path = match_bgm_by_mood(config, mood)
-        # 배경 선택: Minecraft vs 이미지
-        bg_vids_b: List[Optional[str]] = [None] * len(texts)
-        bg_imgs_b: List[Optional[str]] = [None] * len(texts)
-        background_mode = _select_background_mode(
+        # 배경 선택: 전 구간 연관 이미지
+        bg_vids_b, bg_imgs_b, background_mode = _prepare_related_image_backgrounds(
             config,
-            meta=_meta_b,
-            texts=texts,
-            visual_keywords=visual_kws,
+            visual_kws,
+            len(texts),
         )
-        gen_bg_b = (
-            _get_generated_bg_paths(config, len(texts), topic_key=topic_key)
-            if getattr(config, "use_generated_bg_priority", False)
-            else []
-        )
-        if gen_bg_b:
-            background_mode = "image"
-            bg_imgs_b = gen_bg_b
-        elif background_mode == "minecraft":
-            _bg_dir = os.path.join(config.assets_dir, "backgrounds")
-            _mc_b = fetch_youtube_minecraft_parkour_video(
-                _bg_dir,
-                config.width,
-                config.height,
-                config=config,
-                force_fresh=bool(getattr(config, "force_fresh_minecraft_download", False)),
-            )
-            if _mc_b and _is_video_readable(_mc_b):
-                bg_vids_b = [_mc_b] * len(texts)
-                placeholder = _ensure_placeholder_image(config)
-                bg_imgs_b = [placeholder] * len(texts)
-            else:
-                fallback_video = _fetch_context_video_background(config, visual_kws)
-                if fallback_video:
-                    background_mode = "context_video"
-                    bg_vids_b = [fallback_video] * len(texts)
-                    placeholder = _ensure_placeholder_image(config)
-                    bg_imgs_b = [placeholder] * len(texts)
-                else:
-                    background_mode = "image"
-        if background_mode == "image":
-            bg_imgs_b = fetch_segment_images(config, visual_kws)
-            placeholder = _ensure_placeholder_image(config)
-            if not bg_imgs_b:
-                placeholder = _ensure_placeholder_image(config)
-                bg_imgs_b = [placeholder] * len(texts)
-            if bg_imgs_b and all((not p) or p == placeholder for p in bg_imgs_b):
-                fallback_video = _fetch_context_video_background(config, visual_kws)
-                if fallback_video:
-                    background_mode = "context_video"
-                    bg_vids_b = [fallback_video] * len(texts)
-                    bg_imgs_b = [placeholder] * len(texts)
         bg_vids_b, bg_imgs_b = _apply_majisho_interlude_assets(
             config,
             roles,
