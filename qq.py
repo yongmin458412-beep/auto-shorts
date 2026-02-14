@@ -455,6 +455,7 @@ class AppConfig:
     auto_run_lock_path: str
     used_topics_path: str
     generated_bg_dir: str
+    use_generated_bg_priority: bool
     telegram_bot_token: str
     telegram_admin_chat_id: str
     telegram_timeout_sec: int
@@ -568,7 +569,13 @@ def load_config() -> AppConfig:
         youtube_privacy_status=_get_secret("YOUTUBE_PRIVACY_STATUS", "public") or "public",
         serpapi_api_key=_get_secret("SERPAPI_API_KEY", "") or "",
         pexels_api_key=pexels_api_key,
-        ja_dialect_style=_get_secret("JA_DIALECT_STYLE", "") or "",
+        ja_dialect_style=(
+            _get_secret(
+                "JA_DIALECT_STYLE",
+                "関西寄りの親しみあるタメ口（全国視聴者に通じる軽い方言）",
+            )
+            or "関西寄りの親しみあるタメ口（全国視聴者に通じる軽い方言）"
+        ),
         bgm_mode=_get_secret("BGM_MODE", "auto") or "auto",  # 기본값 auto: BGM 자동 선택
         bgm_volume=float(_get_secret("BGM_VOLUME", "0.2") or 0.2),  # 일본 쇼츠: TTS 가독성 위해 20%
         bgm_fallback_enabled=_get_bool("BGM_FALLBACK_ENABLED", True),
@@ -582,6 +589,7 @@ def load_config() -> AppConfig:
         auto_run_lock_path=auto_run_lock_path,
         used_topics_path=used_topics_path,
         generated_bg_dir=_get_secret("GENERATED_BG_DIR", "data/assets/generated_bg") or "data/assets/generated_bg",
+        use_generated_bg_priority=_get_bool("USE_GENERATED_BG_PRIORITY", False),
         telegram_bot_token=_get_secret("TELEGRAM_BOT_TOKEN", "") or "",
         telegram_admin_chat_id=_get_secret("TELEGRAM_ADMIN_CHAT_ID", "") or "",
         telegram_timeout_sec=int(_get_secret("TELEGRAM_TIMEOUT_SEC", "600") or 600),
@@ -595,9 +603,9 @@ def load_config() -> AppConfig:
         use_bg_videos=_get_bool("USE_BG_VIDEOS", True),  # 기본값 True: 배경영상 항상 활성화
         render_threads=int(_get_secret("RENDER_THREADS", "1") or 1),
         use_korean_template=_get_bool("USE_KOREAN_TEMPLATE", True),
-        caption_max_chars=int(_get_secret("CAPTION_MAX_CHARS", "18") or 18),
-        caption_hold_ratio=float(_get_secret("CAPTION_HOLD_RATIO", "1.0") or 1.0),
-        caption_trim=_get_bool("CAPTION_TRIM", False),
+        caption_max_chars=int(_get_secret("CAPTION_MAX_CHARS", "14") or 14),
+        caption_hold_ratio=float(_get_secret("CAPTION_HOLD_RATIO", "0.9") or 0.9),
+        caption_trim=_get_bool("CAPTION_TRIM", True),
         thumbnail_enabled=_get_bool("THUMBNAIL_ENABLED", True),
         thumbnail_use_hook=_get_bool("THUMBNAIL_USE_HOOK", True),
         thumbnail_max_chars=int(_get_secret("THUMBNAIL_MAX_CHARS", "22") or 22),
@@ -780,22 +788,22 @@ def _check_story_quality(items: List[Dict[str, Any]]) -> List[str]:
             issues.append(f"{label} 일본어 느낌 부족")
 
     # Hook 임팩트
-    if not re.search(r"(衝撃|ヤバ|マジ|嘘|閲覧注意|知らない|やべ|危険|99%)", hook):
+    if not re.search(r"(衝撃|ヤバ|マジ|嘘|閲覧注意|知らない|やべ|危険|99%|ガチ|まじか|ほんま)", hook):
         issues.append("Hook 임팩트 부족")
     # Problem: 裏側/問題系
-    if not re.search(r"(問題|裏|秘密|闇|危険|違和感|炎上|黒歴史)", problem):
+    if not re.search(r"(問題|裏|秘密|闇|危険|違和感|炎上|黒歴史|やばい|罠|トリック)", problem):
         issues.append("Problem 내용 약함")
     # Failure: 실패/비판
-    if not re.search(r"(失敗|炎上|批判|最悪|叩かれ|伸びなかった|滑った)", failure):
+    if not re.search(r"(失敗|炎上|批判|最悪|叩かれ|伸びなかった|滑った|ハマらなかった|空振り)", failure):
         issues.append("Failure 내용 약함")
     # Success: 반전/성공
-    if not re.search(r"(でも|ところが|実は|まさか|逆転|成功|大ヒット)", success):
+    if not re.search(r"(でも|ところが|実は|まさか|逆転|成功|大ヒット|一気に伸びた|バズった)", success):
         issues.append("Success 반전 부족")
     # Point: 핵심
-    if not re.search(r"(ポイント|理由|核心|決め手)", point):
+    if not re.search(r"(ポイント|理由|核心|決め手|ミソ|キモ)", point):
         issues.append("Point 문장 약함")
     # Reaction: 1인칭
-    if not re.search(r"(俺|私|やば|マジ|草|w|笑)", reaction):
+    if not re.search(r"(俺|私|やば|マジ|草|w|笑|ほんま|なんやねん|うわ)", reaction):
         issues.append("Reaction 1인칭/감정 부족")
 
     return issues
@@ -1208,11 +1216,13 @@ def generate_script_jp(
     if not config.openai_api_key:
         raise RuntimeError("OPENAI_API_KEY가 없습니다.")
 
+    dialect_style = (getattr(config, "ja_dialect_style", "") or "").strip()
     theme_pool = "\n".join(f"- {t}" for t in JP_CONTENT_THEMES)
     user_text = (
         "以下のテーマ例を参考に、日本人向けの現代ミステリー/裏話ショート台本を作成してください。\n"
         "Hook → Problem → Failure → Success → Point → Reaction の6段構成を守り、タメ口でテンポよく書いてください。\n"
-        "必ずJSONのみを出力してください。\n\n"
+        + (f"日本語の口調は必ず「{dialect_style}」のニュアンスで統一してください。\n" if dialect_style else "")
+        + "必ずJSONのみを出力してください。\n\n"
         f"[テーマ例]\n{theme_pool}\n\n"
         + (f"[追加ヒント]\n{extra_hint}\n\n" if extra_hint else "")
         + "上記のシステムプロンプトとJSON形式を厳守し、純粋なJSONのみを出力してください。"
@@ -1593,27 +1603,85 @@ _GENERIC_VIDEO_TOKENS = {
     "calm", "relax", "relaxing", "nature", "landscape", "scenery",
     "ocean", "sea", "forest", "sky", "clouds", "sunset", "sunrise",
     "ambient", "background", "broll", "b-roll", "slow", "soft", "peaceful",
+    "video", "image", "photo", "footage", "clip", "scene", "vertical",
+    "dramatic", "cinematic", "aesthetic", "beautiful", "trending",
 }
+_VISUAL_SEARCH_STOPWORDS = {
+    "close", "up", "shot", "shots", "style", "mood", "with", "and", "the",
+    "man", "woman", "people", "person", "face", "looking", "holding", "view",
+    "photo", "image", "video", "footage", "dramatic", "cinematic", "background",
+    "reaction", "scene", "light", "lights", "street", "city", "old", "new",
+}
+_ROLE_QUERY_HINTS: Dict[str, str] = {
+    "hook": "dramatic close up",
+    "problem": "investigation evidence documents",
+    "failure": "public criticism protest news",
+    "success": "factory production success",
+    "point": "product detail close up",
+    "reaction": "person shocked reaction",
+}
+_BRAND_QUERY_HINTS: List[Tuple[re.Pattern[str], str]] = [
+    (re.compile(r"(mcdonald|マクドナルド|맥도날드)", re.IGNORECASE), "McDonald's restaurant french fries burger"),
+    (re.compile(r"(coca[- ]?cola|コカ.?コーラ|코카콜라)", re.IGNORECASE), "Coca Cola bottle vending machine"),
+    (re.compile(r"(pepsi|ペプシ|펩시)", re.IGNORECASE), "Pepsi can soda taste test"),
+    (re.compile(r"(nike|ナイキ)", re.IGNORECASE), "Nike sneaker store display"),
+    (re.compile(r"(instagram|インスタ|인스타)", re.IGNORECASE), "smartphone Instagram app screen"),
+    (re.compile(r"(ramen|ラーメン|라면)", re.IGNORECASE), "ramen noodles bowl close up"),
+]
+
+
+def _extract_query_tokens(text: str) -> List[str]:
+    tokens = [t.lower() for t in re.split(r"[^a-zA-Z0-9]+", text or "") if t]
+    return [
+        t for t in tokens
+        if len(t) >= 3 and t not in _VISUAL_SEARCH_STOPWORDS
+    ]
+
+
+def _detect_brand_query_hint(topic_en: str, script_ja: str, keyword: str) -> str:
+    combined = " ".join([topic_en or "", script_ja or "", keyword or ""])
+    for pattern, hint in _BRAND_QUERY_HINTS:
+        if pattern.search(combined):
+            return hint
+    return ""
 
 
 def _refine_visual_keyword(keyword: str, topic_en: str, role: str, script_ja: str) -> str:
     kw = (keyword or "").strip()
     topic = (topic_en or "").strip()
+    role_hint = _ROLE_QUERY_HINTS.get(role, "dramatic close up")
+    brand_hint = _detect_brand_query_hint(topic, script_ja, kw)
+    if brand_hint:
+        return f"{brand_hint} {role_hint}".strip()
+
     if not kw:
         kw = topic
-    # 너무 일반적이거나 짧으면 주제 키워드를 강제 접두
-    tokens = {t for t in re.split(r"[^a-zA-Z0-9]+", kw.lower()) if t}
-    is_generic = (not tokens) or tokens.issubset(_GENERIC_VIDEO_TOKENS) or len(tokens) <= 2
-    if topic and (is_generic or topic.lower() not in kw.lower()):
-        kw = f"{topic} {kw}".strip()
-    # 훅은 시선을 잡는 아카이브/헤드라인류 키워드 보강
+    topic_tokens = _extract_query_tokens(topic)
+    kw_tokens = _extract_query_tokens(kw)
+    token_set = set(kw_tokens)
+    is_generic = (not token_set) or token_set.issubset(_GENERIC_VIDEO_TOKENS) or len(token_set) <= 2
+
+    merged_tokens = kw_tokens[:]
+    if topic_tokens:
+        if is_generic:
+            merged_tokens = topic_tokens[:5]
+        else:
+            for token in topic_tokens:
+                if token not in merged_tokens:
+                    merged_tokens.append(token)
+    if not merged_tokens:
+        merged_tokens = ["mystery", "story"]
+
+    refined = " ".join(merged_tokens[:6]).strip()
+    if role_hint and role_hint not in refined:
+        refined = f"{refined} {role_hint}".strip()
+
     if role == "hook" and not any(
-        w in kw.lower()
-        for w in ("archive", "archival", "headline", "newspaper", "photo", "footage", "courtroom", "police", "factory")
+        w in refined.lower()
+        for w in ("brand", "restaurant", "product", "app", "logo", "bottle", "sneaker")
     ):
-        kw = f"{kw} archival photo".strip()
-    # 최후 보정
-    return kw or "archival newspaper headline close up"
+        refined = f"{refined} headline close up".strip()
+    return refined or "mystery story headline close up"
 
 
 def _fallback_mood_key(mood: str) -> str:
@@ -2670,6 +2738,49 @@ _GLOBAL_BG_FALLBACK_QUERIES = [
 ]
 
 
+def _normalize_search_query(query: str) -> str:
+    tokens = [
+        t for t in re.split(r"[^a-zA-Z0-9]+", (query or "").lower())
+        if t and t not in _VISUAL_SEARCH_STOPWORDS
+    ]
+    if not tokens:
+        return (query or "").strip()
+    return " ".join(tokens[:7]).strip()
+
+
+def _build_search_query_candidates(query: str) -> List[str]:
+    raw = (query or "").strip()
+    reduced = _normalize_search_query(raw)
+    candidates = [raw, reduced]
+    # 제품/브랜드 키워드만 남긴 짧은 쿼리도 추가
+    parts = [t for t in reduced.split() if len(t) >= 4]
+    if parts:
+        candidates.append(" ".join(parts[:4]))
+    uniq: List[str] = []
+    for item in candidates:
+        if item and item not in uniq:
+            uniq.append(item)
+    return uniq
+
+
+def _score_pixabay_hit(hit: Dict[str, Any], query_tokens: List[str]) -> int:
+    tags = str(hit.get("tags", "") or "").lower()
+    user = str(hit.get("user", "") or "").lower()
+    text = f"{tags} {user}"
+    if not query_tokens:
+        return 0
+    score = 0
+    for token in query_tokens:
+        if token in text:
+            score += 5
+    # vertical 선호 가중치
+    width = int(hit.get("imageWidth") or 0)
+    height = int(hit.get("imageHeight") or 0)
+    if height > width > 0:
+        score += 2
+    return score
+
+
 def fetch_pixabay_video(
     query: str,
     api_key: str,
@@ -2761,12 +2872,13 @@ def fetch_pixabay_image(
 
     def _try_q(q: str) -> Optional[str]:
         try:
+            query_tokens = _extract_query_tokens(q)
             params = {
                 "key": api_key,
                 "q": q,
                 "image_type": "photo",
                 "orientation": "vertical",
-                "per_page": 10,
+                "per_page": 20,
                 "safesearch": "true",
             }
             resp = requests.get("https://pixabay.com/api/", params=params, timeout=30)
@@ -2775,8 +2887,18 @@ def fetch_pixabay_image(
             hits = resp.json().get("hits", []) or []
             if not hits:
                 return None
-            random.shuffle(hits)
-            for hit in hits[:6]:
+            ranked = sorted(
+                hits,
+                key=lambda h: _score_pixabay_hit(h, query_tokens),
+                reverse=True,
+            )
+            candidates = ranked[:8] if ranked else hits[:8]
+            # 너무 한 장만 반복되지 않도록 상위권에서 랜덤 선택
+            if len(candidates) > 3:
+                top = candidates[:3]
+                random.shuffle(top)
+                candidates = top + candidates[3:]
+            for hit in candidates:
                 url = hit.get("largeImageURL") or hit.get("webformatURL") or hit.get("previewURL")
                 if not url:
                     continue
@@ -2796,11 +2918,8 @@ def fetch_pixabay_image(
             return None
         return None
 
-    result = _try_q(query)
-    if result:
-        return result
-    for fbq in _GLOBAL_BG_FALLBACK_QUERIES:
-        result = _try_q(fbq)
+    for candidate in _build_search_query_candidates(query):
+        result = _try_q(candidate)
         if result:
             return result
     return None
@@ -2816,10 +2935,15 @@ def fetch_segment_images(
     kw_to_path: Dict[str, Optional[str]] = {}
     for kw in unique_kws:
         path: Optional[str] = None
-        if config.pixabay_api_key:
-            path = fetch_pixabay_image(kw, config.pixabay_api_key, "/tmp/pixabay_images")
-        if not path and config.pexels_api_key:
-            path = fetch_pexels_image(kw, config.pexels_api_key, "/tmp/pexels_bg_images")
+        query_candidates = _build_search_query_candidates(kw)
+        _telemetry_log(f"이미지 검색 키워드: {kw} -> 후보 {query_candidates[:3]}", config)
+        for candidate in query_candidates:
+            if config.pixabay_api_key:
+                path = fetch_pixabay_image(candidate, config.pixabay_api_key, "/tmp/pixabay_images")
+            if not path and config.pexels_api_key:
+                path = fetch_pexels_image(candidate, config.pexels_api_key, "/tmp/pexels_bg_images")
+            if path:
+                break
         if not path:
             for fbq in _GLOBAL_BG_FALLBACK_QUERIES:
                 if config.pixabay_api_key:
@@ -2829,6 +2953,7 @@ def fetch_segment_images(
                 if path:
                     break
         kw_to_path[kw] = path
+        _telemetry_log(f"이미지 검색 결과: {'성공' if path else '실패'} ({kw})", config)
 
     placeholder = _ensure_placeholder_image(config)
     return [kw_to_path.get(kw) or placeholder for kw in keywords]
@@ -4865,7 +4990,11 @@ def _auto_jp_flow(
         )
 
     # ── 배경 선택: Minecraft 영상 vs 상황 이미지 (A/B) ─────────────
-    generated_bg_paths = _get_generated_bg_paths(config, len(texts))
+    generated_bg_paths = (
+        _get_generated_bg_paths(config, len(texts))
+        if getattr(config, "use_generated_bg_priority", False)
+        else []
+    )
     bg_video_paths: List[Optional[str]] = []
     bg_image_paths: List[Optional[str]] = []
     forced_bg_mode = _infer_background_mode_by_content(meta, texts, visual_keywords)
@@ -5275,8 +5404,10 @@ def run_streamlit_app() -> None:
         "- `PEXELS_API_KEY` (이미지 자동 수집)\n"
         "- `SERPAPI_API_KEY` (트렌드 수집)\n"
         "- `OPENAI_VISION_MODEL` (이미지 태그 분석)\n"
+        "- `JA_DIALECT_STYLE` (일본어 말투/사투리 스타일)\n"
         "- `BGM_MODE`, `BGM_VOLUME` (배경음악)\n"
         "- `USE_BG_VIDEOS` (배경 영상 사용 여부)\n"
+        "- `USE_GENERATED_BG_PRIORITY` (generated_bg 폴더를 배경으로 우선 사용)\n"
         "- `RENDER_THREADS` (렌더링 스레드 수)\n\n"
         "- `USE_KOREAN_TEMPLATE` (한국형 템플릿 오버레이)\n"
         "- `CAPTION_MAX_CHARS` (자막 최대 글자수)\n"
@@ -5456,7 +5587,11 @@ def run_streamlit_app() -> None:
                         texts=texts,
                         visual_keywords=_kws_m,
                     )
-                    gen_bg_manual = _get_generated_bg_paths(config, len(texts))
+                    gen_bg_manual = (
+                        _get_generated_bg_paths(config, len(texts))
+                        if getattr(config, "use_generated_bg_priority", False)
+                        else []
+                    )
                     if gen_bg_manual:
                         background_mode = "image"
                         bg_imgs_manual = gen_bg_manual
@@ -6262,7 +6397,11 @@ def run_batch(count: int, seed: str = "", beats: int = 7) -> None:
             texts=texts,
             visual_keywords=visual_kws,
         )
-        gen_bg_b = _get_generated_bg_paths(config, len(texts))
+        gen_bg_b = (
+            _get_generated_bg_paths(config, len(texts))
+            if getattr(config, "use_generated_bg_priority", False)
+            else []
+        )
         if gen_bg_b:
             background_mode = "image"
             bg_imgs_b = gen_bg_b
