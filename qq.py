@@ -810,15 +810,23 @@ def _check_story_quality(items: List[Dict[str, Any]], meta: Optional[Dict[str, A
     # Problem: 裏側/問題系
     if not re.search(r"(問題|裏|秘密|闇|危険|違和感|炎上|黒歴史|やばい|罠|トリック)", problem):
         issues.append("Problem 내용 약함")
+    if problem and not problem.startswith(("実は", "そもそも", "実際")):
+        issues.append("Problem 전개 연결 약함")
     # Failure: 실패/비판
     if not re.search(r"(失敗|炎上|批判|最悪|叩かれ|伸びなかった|滑った|ハマらなかった|空振り)", failure):
         issues.append("Failure 내용 약함")
+    if failure and not failure.startswith(("でも", "だけど", "ところが")):
+        issues.append("Failure 전환 연결 약함")
     # Success: 반전/성공
     if not re.search(r"(でも|ところが|実は|まさか|逆転|成功|大ヒット|一気に伸びた|バズった)", success):
         issues.append("Success 반전 부족")
+    if success and not success.startswith(("ところが", "しかし", "でも")):
+        issues.append("Success 전환 연결 약함")
     # Point: 핵심
     if not re.search(r"(ポイント|理由|核心|決め手|ミソ|キモ)", point):
         issues.append("Point 문장 약함")
+    if point and not point.startswith(("ガチでヤバいポイントは", "結局", "要するに")):
+        issues.append("Point 정리문 약함")
     # Reaction: 1인칭
     if not re.search(r"(俺|私|やば|マジ|草|w|笑|ほんま|なんやねん|うわ)", reaction):
         issues.append("Reaction 1인칭/감정 부족")
@@ -894,6 +902,67 @@ def _enforce_aggressive_hook(meta: Dict[str, Any], items: List[Dict[str, Any]]) 
             item["script_ko"] = f"야, {label}가 한때 진짜 망할 뻔한 거 알고 있었어?"
         return items
     return items
+
+
+def _normalize_story_line(text: str, max_len: int = 90) -> str:
+    value = re.sub(r"\s+", " ", str(text or "").strip())
+    if not value:
+        return value
+    if len(value) > max_len:
+        value = value[:max_len].rstrip(" 、,") + "…"
+    return value
+
+
+def _ensure_prefix(text: str, prefix: str) -> str:
+    value = str(text or "").strip()
+    if not value:
+        return prefix.rstrip("、")
+    if value.startswith(prefix) or value.startswith(prefix.rstrip("、")):
+        return value
+    return f"{prefix}{value}"
+
+
+def _enforce_story_arc(meta: Dict[str, Any], items: List[Dict[str, Any]]) -> List[Dict[str, Any]]:
+    """
+    Hook→Problem→Failure→Success→Point→Reaction 흐름이 명확히 보이도록
+    역할별 연결 접두어와 최소 임팩트를 보정.
+    """
+    if not items:
+        return items
+    label = _topic_label_for_hook(meta, "")
+    fixed: List[Dict[str, Any]] = []
+    for item in items:
+        cur = dict(item)
+        role = str(cur.get("role", "") or "").strip().lower()
+        ja = _normalize_story_line(cur.get("script_ja", ""))
+        if role == "problem":
+            if len(ja) < 8:
+                ja = f"実は、{label}にはほとんど知られてない裏の仕組みがある。"
+            elif not ja.startswith(("実は", "そもそも", "実際")):
+                ja = _ensure_prefix(ja, "実は、")
+        elif role == "failure":
+            if not re.search(r"(失敗|炎上|批判|最悪|叩かれ|伸びなかった|滑った)", ja):
+                ja = f"でも最初は、{ja}って空気で普通に叩かれて失敗扱いされた。"
+            elif not ja.startswith(("でも", "だけど", "ところが")):
+                ja = _ensure_prefix(ja, "でも最初は、")
+        elif role == "success":
+            if not re.search(r"(ところが|でも|逆転|成功|一気に伸びた|バズった)", ja):
+                ja = f"ところが、見せ方を変えた瞬間に評価が逆転して一気に伸びた。"
+            elif not ja.startswith(("ところが", "しかし", "でも")):
+                ja = _ensure_prefix(ja, "ところが、")
+        elif role == "point":
+            if not re.search(r"(ポイント|理由|決め手|ミソ|キモ)", ja):
+                ja = f"ガチでヤバいポイントは、{ja}"
+            elif not ja.startswith(("ガチでヤバいポイントは", "結局", "要するに")):
+                ja = _ensure_prefix(ja, "ガチでヤバいポイントは、")
+        elif role == "reaction":
+            if not re.search(r"(俺|私|やば|マジ|草|w|笑|うわ)", ja):
+                ja = f"俺は正直、{ja}"
+        cur["script_ja"] = _normalize_story_line(ja, max_len=92)
+        if not str(cur.get("script_ko", "") or "").strip():
+            cur["script_ko"] = _to_ko_literal_tone(cur["script_ja"])
+        fixed.append(cur)
+    return fixed
 
 
 # ─────────────────────────────────────────────
@@ -1187,6 +1256,11 @@ JP_SHORTS_SYSTEM_PROMPT: str = """あなたは日本のYouTube Shortsトレン�
 5) Point: 成功の核心を一言で言い切る。
 6) Reaction: 1人称の独り言で締める。
 
+[構成強化ルール]
+- 各パートは必ず前のパートの結果として続くこと（因果を切らない）。
+- 接続語を明示すること（実は / でも最初は / ところが / つまり）。
+- Hook→Problem→Failureで緊張を上げ、Success→Pointで回収する。
+
 [注意]
 - 句読点少なめ・テンポ重視
 - 長文禁止、1行を短く
@@ -1361,6 +1435,7 @@ def generate_script_jp(
     user_text = (
         "以下のテーマ例を参考に、日本人向けの現代ミステリー/裏話ショート台本を作成してください。\n"
         "Hook → Problem → Failure → Success → Point → Reaction の6段構成を守り、タメ口でテンポよく書いてください。\n"
+        "各行が前行の結果として自然につながるように書いてください（因果関係を必ず維持）。\n"
         "幽霊/怪談/オカルト/古代史/中世史/1800年代以前のネタは使わないでください。\n"
         "視聴者の日常に直結するテーマ(ブランド・アプリ・食べ物・サービス)のみ選んでください。\n"
         + (f"日本語の口調は必ず「{dialect_style}」のニュアンスで統一してください。\n" if dialect_style else "")
@@ -1492,6 +1567,7 @@ def generate_script_jp(
         normalized = sorted(normalized, key=lambda x: x.get("order", 99))
         normalized = _compress_to_story_parts(normalized)
         normalized = _enforce_aggressive_hook(meta, normalized)
+        normalized = _enforce_story_arc(meta, normalized)
         issues = _check_story_quality(normalized, meta=meta)
         if issues:
             feedback = " / ".join(issues)
@@ -2734,12 +2810,31 @@ def _draw_subtitle(
 
     # 폰트 크기: 기존 대비 소폭 축소 (과도한 화면 점유 완화)
     font_size = max(50, canvas_width // 16)
-    font = _load_font(font_path, font_size)
     pad_x = int(canvas_width * 0.05)
     max_text_w = canvas_width - pad_x * 2
-    lines = _wrap_cjk_text(text, max_text_w, font_size)
-    line_h = font_size + 14
-    total_h = line_h * len(lines) + 20
+    raw_parts = [part.strip() for part in str(text or "").splitlines() if part.strip()]
+    is_bilingual = len(raw_parts) >= 2
+
+    if is_bilingual:
+        ja_text = raw_parts[0]
+        ko_text = raw_parts[1]
+        primary_lines = _wrap_cjk_text(ja_text, max_text_w, font_size)[:2]
+        secondary_base_size = max(30, int(font_size * 0.64))
+        secondary_lines = _wrap_cjk_text(ko_text, max_text_w, secondary_base_size)[:2]
+        primary_line_h = font_size + 12
+        secondary_line_h = secondary_base_size + 10
+        total_h = (
+            primary_line_h * len(primary_lines)
+            + secondary_line_h * len(secondary_lines)
+            + 24
+        )
+    else:
+        primary_lines = _wrap_cjk_text(text, max_text_w, font_size)[:3]
+        secondary_lines = []
+        secondary_base_size = max(30, int(font_size * 0.64))
+        primary_line_h = font_size + 14
+        secondary_line_h = secondary_base_size + 10
+        total_h = primary_line_h * len(primary_lines) + 20
     # ── Shorts 안전 영역: 화면 55% 지점을 자막 중앙으로 ──
     # 하단 UI 안전선: canvas_height * 0.68 이하
     safe_bottom = int(canvas_height * 0.68)
@@ -2814,7 +2909,7 @@ def _draw_subtitle(
     text_layer = Image.new("RGBA", image.size, (0, 0, 0, 0))
     draw = ImageDraw.Draw(text_layer)
     y = box_y
-    for line in lines:
+    for line in primary_lines:
         scaled_size = max(20, int(font_size * scale))
         scaled_font = _load_font(font_path, scaled_size)
         try:
@@ -2844,7 +2939,39 @@ def _draw_subtitle(
             stroke_width=stroke_width,
             stroke_fill=(stroke_fill[0], stroke_fill[1], stroke_fill[2], int(255 * alpha_mul)),
         )
-        y += line_h
+        y += primary_line_h
+
+    if secondary_lines:
+        secondary_fill = (230, 230, 230)
+        secondary_stroke = (0, 0, 0)
+        secondary_stroke_width = max(2, stroke_width - 2)
+        if is_reaction:
+            secondary_fill = (45, 35, 0)
+        elif is_japanese_variety:
+            secondary_fill = (255, 255, 255)
+            secondary_stroke_width = max(2, stroke_width - 3)
+        for line in secondary_lines:
+            scaled_size = max(16, int(secondary_base_size * scale))
+            scaled_font = _load_font(font_path, scaled_size)
+            try:
+                lw = scaled_font.getbbox(line)[2]
+            except Exception:
+                lw = len(line) * scaled_size
+            lx = max(pad_x, (canvas_width - lw) // 2)
+            draw.text(
+                (lx, y + y_bounce),
+                line,
+                font=scaled_font,
+                fill=(secondary_fill[0], secondary_fill[1], secondary_fill[2], int(235 * alpha_mul)),
+                stroke_width=secondary_stroke_width,
+                stroke_fill=(
+                    secondary_stroke[0],
+                    secondary_stroke[1],
+                    secondary_stroke[2],
+                    int(235 * alpha_mul),
+                ),
+            )
+            y += secondary_line_h
     image = Image.alpha_composite(image.convert("RGBA"), text_layer).convert("RGB")
     return image
 
@@ -4966,12 +5093,14 @@ def _build_bilingual_caption_texts(
     texts_ja: List[str],
     texts_ko: List[str],
 ) -> List[str]:
-    ja_caps = _get_caption_texts(config, texts_ja)
     ko_norm = _normalize_ko_lines(texts_ko, texts_ja)
-    ko_caps = _get_caption_texts(config, ko_norm)
+    ja_chars = max(10, int(getattr(config, "caption_max_chars", 14) or 14))
+    ko_chars = max(8, int(ja_chars * 0.85))
     merged: List[str] = []
-    for idx, ja_line in enumerate(ja_caps):
-        ko_line = ko_caps[idx] if idx < len(ko_caps) else ""
+    for idx, ja_src in enumerate(texts_ja):
+        ko_src = ko_norm[idx] if idx < len(ko_norm) else ""
+        ja_line = _shorten_caption_text(ja_src, max_chars=ja_chars)
+        ko_line = _shorten_caption_text(ko_src, max_chars=ko_chars)
         if ko_line and ko_line != ja_line:
             merged.append(f"{ja_line}\n{ko_line}")
         else:
