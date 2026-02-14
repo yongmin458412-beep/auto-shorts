@@ -3011,6 +3011,42 @@ def _pick_asset_path_by_tags(config: AppConfig, tags: List[str]) -> str:
     return candidates[0]
 
 
+def _pick_template_asset_path(config: AppConfig) -> str:
+    # 우선순위 태그: template_main > fixed_template > template > frame
+    for tag_group in (
+        ["template_main"],
+        ["fixed_template"],
+        ["template"],
+        ["frame"],
+    ):
+        path = _pick_asset_path_by_tags(config, tag_group)
+        if path and os.path.exists(path):
+            return path
+    return ""
+
+
+def _load_template_layout(template_path: str) -> Dict[str, Any]:
+    if not template_path:
+        return {}
+    base_no_ext, _ = os.path.splitext(template_path)
+    candidates = [
+        f"{template_path}.layout.json",
+        f"{base_no_ext}.layout.json",
+        f"{base_no_ext}.json",
+    ]
+    for candidate in candidates:
+        if not os.path.exists(candidate):
+            continue
+        try:
+            with open(candidate, "r", encoding="utf-8") as file:
+                data = json.load(file)
+            if isinstance(data, dict):
+                return data
+        except Exception:
+            continue
+    return {}
+
+
 def tags_from_text(text: str) -> List[str]:
     parts = [part.strip() for part in text.split(",")]
     return [part for part in parts if part]
@@ -3360,6 +3396,45 @@ def _crop_center_square(image: Image.Image) -> Image.Image:
     return image.crop((left, top, left + side, top + side))
 
 
+def _layout_rect_from_spec(
+    spec: Any,
+    canvas_width: int,
+    canvas_height: int,
+) -> Optional[Tuple[int, int, int, int]]:
+    if not isinstance(spec, dict):
+        return None
+    try:
+        x_raw = float(spec.get("x", 0.0))
+        y_raw = float(spec.get("y", 0.0))
+        w_raw = float(spec.get("w", 0.0))
+        h_raw = float(spec.get("h", 0.0))
+    except Exception:
+        return None
+    unit = str(spec.get("unit", "") or "").strip().lower()
+    if unit in {"px", "pixel", "pixels"}:
+        x = int(round(x_raw))
+        y = int(round(y_raw))
+        w = int(round(w_raw))
+        h = int(round(h_raw))
+    else:
+        # unit 미지정 시: 0~1 값이면 비율로 간주
+        if x_raw <= 1.0 and y_raw <= 1.0 and w_raw <= 1.0 and h_raw <= 1.0:
+            x = int(round(canvas_width * x_raw))
+            y = int(round(canvas_height * y_raw))
+            w = int(round(canvas_width * w_raw))
+            h = int(round(canvas_height * h_raw))
+        else:
+            x = int(round(x_raw))
+            y = int(round(y_raw))
+            w = int(round(w_raw))
+            h = int(round(h_raw))
+    w = max(1, min(canvas_width, w))
+    h = max(1, min(canvas_height, h))
+    x = max(0, min(canvas_width - w, x))
+    y = max(0, min(canvas_height - h, y))
+    return (x, y, x + w, y + h)
+
+
 def _draw_fixed_template_title(
     image: Image.Image,
     title_text: str,
@@ -3368,15 +3443,21 @@ def _draw_fixed_template_title(
     canvas_height: int,
     top_ratio: float = 0.27,
     bottom_ratio: float = 0.39,
+    title_rect: Optional[Tuple[int, int, int, int]] = None,
 ) -> Image.Image:
     text = str(title_text or "").strip()
     if not text:
         return image
-    top = int(canvas_height * max(0.08, min(0.8, top_ratio)))
-    bottom = int(canvas_height * max(0.12, min(0.95, bottom_ratio)))
+    if title_rect:
+        left, top, right, bottom = title_rect
+    else:
+        left = 0
+        right = canvas_width
+        top = int(canvas_height * max(0.08, min(0.8, top_ratio)))
+        bottom = int(canvas_height * max(0.12, min(0.95, bottom_ratio)))
     if bottom <= top:
         return image
-    max_w = int(canvas_width * 0.90)
+    max_w = max(80, int((right - left) * 0.95))
     font_size = max(26, int(canvas_width * 0.068))
     lines: List[str] = []
     for _ in range(8):
@@ -3398,7 +3479,8 @@ def _draw_fixed_template_title(
             lw = font.getbbox(line)[2]
         except Exception:
             lw = len(line) * font_size
-        x = max(10, (canvas_width - lw) // 2)
+        center_x = left + (right - left) // 2
+        x = max(10, center_x - (lw // 2))
         draw.text(
             (x, y),
             line,
@@ -3417,12 +3499,17 @@ def _compose_fixed_template_background(
     title_text: str,
     canvas_width: int,
     canvas_height: int,
+    template_path_override: str = "",
+    template_layout: Optional[Dict[str, Any]] = None,
 ) -> Image.Image:
-    template_path = str(getattr(config, "fixed_template_path", "") or "").strip()
+    template_path = str(template_path_override or getattr(config, "fixed_template_path", "") or "").strip()
+    layout = template_layout if isinstance(template_layout, dict) else _load_template_layout(template_path)
     if template_path and os.path.exists(template_path):
         base = _fit_image_to_canvas(_open_image_rgb_safe(template_path), (canvas_width, canvas_height))
     else:
         base = Image.new("RGB", (canvas_width, canvas_height), color=(238, 236, 226))
+    title_rect = _layout_rect_from_spec(layout.get("title_box"), canvas_width, canvas_height)
+    content_rect = _layout_rect_from_spec(layout.get("content_box"), canvas_width, canvas_height)
     base = _draw_fixed_template_title(
         base,
         title_text=title_text,
@@ -3431,21 +3518,30 @@ def _compose_fixed_template_background(
         canvas_height=canvas_height,
         top_ratio=float(getattr(config, "fixed_template_title_top_ratio", 0.27) or 0.27),
         bottom_ratio=float(getattr(config, "fixed_template_title_bottom_ratio", 0.39) or 0.39),
+        title_rect=title_rect,
     )
     if not content_image_path or (not os.path.exists(content_image_path)):
         return base
     content = _crop_center_square(_open_image_rgb_safe(content_image_path))
     content = _enhance_bg_image_quality(content)
-    scale = float(getattr(config, "fixed_template_content_scale", 0.70) or 0.70)
-    scale = max(0.45, min(0.9, scale))
-    side = int(min(canvas_width, canvas_height) * scale)
-    side = max(220, min(side, min(canvas_width, canvas_height) - 24))
+    if content_rect:
+        c_left, c_top, c_right, c_bottom = content_rect
+        rect_w = max(40, c_right - c_left)
+        rect_h = max(40, c_bottom - c_top)
+        side = min(rect_w, rect_h)
+        x = c_left + max(0, (rect_w - side) // 2)
+        y = c_top + max(0, (rect_h - side) // 2)
+    else:
+        scale = float(getattr(config, "fixed_template_content_scale", 0.70) or 0.70)
+        scale = max(0.45, min(0.9, scale))
+        side = int(min(canvas_width, canvas_height) * scale)
+        side = max(220, min(side, min(canvas_width, canvas_height) - 24))
+        center_x = canvas_width // 2
+        center_y_ratio = float(getattr(config, "fixed_template_center_y_ratio", 0.68) or 0.68)
+        center_y = int(canvas_height * max(0.45, min(0.85, center_y_ratio)))
+        x = max(8, min(canvas_width - side - 8, center_x - side // 2))
+        y = max(int(canvas_height * 0.42), min(canvas_height - side - 12, center_y - side // 2))
     content = content.resize((side, side), Image.LANCZOS)
-    center_x = canvas_width // 2
-    center_y_ratio = float(getattr(config, "fixed_template_center_y_ratio", 0.68) or 0.68)
-    center_y = int(canvas_height * max(0.45, min(0.85, center_y_ratio)))
-    x = max(8, min(canvas_width - side - 8, center_x - side // 2))
-    y = max(int(canvas_height * 0.42), min(canvas_height - side - 12, center_y - side // 2))
     out = base.convert("RGBA")
     shadow = Image.new("RGBA", out.size, (0, 0, 0, 0))
     sdraw = ImageDraw.Draw(shadow)
@@ -5517,6 +5613,10 @@ def render_video(
     clips = []
     fixed_template_enabled = bool(getattr(config, "fixed_template_enabled", False))
     fixed_template_path = str(getattr(config, "fixed_template_path", "") or "").strip()
+    library_template_path = _pick_template_asset_path(config) if fixed_template_enabled else ""
+    if library_template_path:
+        fixed_template_path = library_template_path
+        config.fixed_template_path = library_template_path
     if fixed_template_enabled and (not (fixed_template_path and os.path.exists(fixed_template_path))):
         auto_candidates = [
             os.path.join(config.assets_dir, "branding", "fixed_template.png"),
@@ -5531,7 +5631,13 @@ def render_video(
                 break
         if fixed_template_path:
             config.fixed_template_path = fixed_template_path
+    fixed_template_layout = _load_template_layout(fixed_template_path) if fixed_template_enabled else {}
     use_fixed_template_layout = fixed_template_enabled
+    if use_fixed_template_layout:
+        if fixed_template_path:
+            _telemetry_log(f"고정 템플릿 사용: {os.path.basename(fixed_template_path)}", config)
+        if fixed_template_layout:
+            _telemetry_log("템플릿 레이아웃(JSON) 적용", config)
 
     # 경로 → VideoFileClip 캐시 (같은 파일 중복 오픈 방지)
     _vid_cache: Dict[str, Any] = {}
@@ -5614,6 +5720,8 @@ def render_video(
                     title_text=title_text,
                     canvas_width=W,
                     canvas_height=H,
+                    template_path_override=fixed_template_path,
+                    template_layout=fixed_template_layout,
                 )
             else:
                 bg_img = _open_image_rgb_safe(bg_img_path)
