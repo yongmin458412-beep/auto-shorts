@@ -5114,19 +5114,19 @@ def send_telegram_video_approval_request(
     caption_text: str,
 ) -> Optional[str]:
     """
-    렌더링된 영상을 텔레그램으로 보낸 뒤,
-    별도의 버튼 메시지(sendMessage)로 승인 요청을 보낸다.
-    버튼 메시지의 message_id를 반환한다.
+    렌더링된 영상 + 대본 캡션 + 승인 버튼을 한 메시지로 전송한다.
+    성공 시 해당 메시지의 message_id를 반환한다.
     """
     if not token or not chat_id:
         return None
     body = (caption_text or "").strip()
-    caption = body[:900] + ("..." if len(body) > 900 else "")
+    caption = body[:980] + ("..." if len(body) > 980 else "")
+    keyboard_json = json.dumps(_approval_keyboard(), ensure_ascii=False)
 
-    # 1) 영상 전송 시도 (버튼은 분리 전송)
     sent_video = False
     media_path = video_path
     preview_generated = False
+    message_id: Optional[str] = None
     try:
         if video_path and os.path.exists(video_path):
             file_size = os.path.getsize(video_path)
@@ -5154,12 +5154,17 @@ def send_telegram_video_approval_request(
                         "chat_id": chat_id,
                         "caption": (caption + ("\n\n(미리보기 20초)" if preview_generated else ""))[:1024],
                         "supports_streaming": "true",
+                        "reply_markup": keyboard_json,
                     },
                     files={"video": handle},
                     timeout=180,
                 )
             if resp.ok:
                 sent_video = True
+                try:
+                    message_id = str(resp.json().get("result", {}).get("message_id", "") or "")
+                except Exception:
+                    message_id = ""
             else:
                 print(f"[Telegram 비디오 전송 실패] status={resp.status_code} body={resp.text[:300]}")
         except Exception as exc:
@@ -5174,23 +5179,30 @@ def send_telegram_video_approval_request(
                         data={
                             "chat_id": chat_id,
                             "caption": (caption + ("\n\n(미리보기 파일)" if preview_generated else ""))[:1024],
+                            "reply_markup": keyboard_json,
                         },
                         files={"document": handle},
                         timeout=180,
                     )
                 if resp.ok:
                     sent_video = True
+                    try:
+                        message_id = str(resp.json().get("result", {}).get("message_id", "") or "")
+                    except Exception:
+                        message_id = ""
                 else:
                     print(f"[Telegram 문서 전송 실패] status={resp.status_code} body={resp.text[:300]}")
             except Exception as exc:
                 print(f"[Telegram 문서 전송 오류] {exc}")
 
-    # 2) 버튼 메시지를 별도로 반드시 전송
-    request_text = (
-        (body + "\n\n" if body else "")
-        + ("위 영상 확인 후 버튼을 눌러주세요." if sent_video else "영상 전송에 실패해 텍스트 승인으로 대체합니다.")
-    )
-    message_id = send_telegram_approval_request(token, chat_id, request_text)
+    # 영상/문서 실패 시 텍스트+버튼 단일 메시지로 대체
+    if not sent_video:
+        request_text = (
+            (body + "\n\n" if body else "")
+            + "영상 전송에 실패해 텍스트 승인으로 대체합니다. 버튼을 눌러주세요."
+        )
+        message_id = send_telegram_approval_request(token, chat_id, request_text)
+
     # 임시 프리뷰 파일 정리
     if preview_generated and media_path and media_path != video_path:
         try:
@@ -5198,7 +5210,7 @@ def send_telegram_video_approval_request(
                 os.remove(media_path)
         except Exception:
             pass
-    return message_id
+    return message_id if message_id else None
 
 
 def _answer_callback_query(token: str, callback_query_id: str, text: str = "") -> None:
@@ -5584,11 +5596,15 @@ def _build_ass_subtitle_file(
         variety_style.shadow = 1.0
 
         reaction_style = default_style.copy()
-        reaction_style.primarycolor = pysubs2.Color(25, 25, 25, 0)
-        reaction_style.backcolor = pysubs2.Color(92, 232, 255, 40)
-        reaction_style.borderstyle = 3
-        reaction_style.outline = 1.0
-        reaction_style.shadow = 0.0
+        # 마지막 혼잣말은 고대비(밝은 글자 + 검정 외곽선)로 고정
+        reaction_style.primarycolor = pysubs2.Color(120, 248, 255, 0)
+        reaction_style.secondarycolor = pysubs2.Color(120, 248, 255, 0)
+        reaction_style.outlinecolor = pysubs2.Color(0, 0, 0, 0)
+        reaction_style.backcolor = pysubs2.Color(28, 28, 28, 90)
+        reaction_style.borderstyle = 1
+        reaction_style.outline = 5.2
+        reaction_style.shadow = 1.2
+        reaction_style.bold = True
 
         subs.styles["Default"] = default_style
         subs.styles["Variety"] = variety_style
