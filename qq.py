@@ -4730,15 +4730,17 @@ def send_telegram_video_approval_request(
     caption_text: str,
 ) -> Optional[str]:
     """
-    렌더링된 영상을 텔레그램으로 보내고 인라인 승인 버튼을 붙인다.
-    실패하면 sendDocument, 마지막으로 텍스트 승인 요청으로 폴백.
+    렌더링된 영상을 텔레그램으로 보낸 뒤,
+    별도의 버튼 메시지(sendMessage)로 승인 요청을 보낸다.
+    버튼 메시지의 message_id를 반환한다.
     """
     if not token or not chat_id:
         return None
     body = (caption_text or "").strip()
     caption = body[:900] + ("..." if len(body) > 900 else "")
-    keyboard = _approval_keyboard()
 
+    # 1) 영상 전송 시도 (버튼은 분리 전송)
+    sent_video = False
     if video_path and os.path.exists(video_path):
         send_video_url = f"https://api.telegram.org/bot{token}/sendVideo"
         try:
@@ -4749,38 +4751,43 @@ def send_telegram_video_approval_request(
                         "chat_id": chat_id,
                         "caption": caption,
                         "supports_streaming": "true",
-                        "reply_markup": json.dumps(keyboard, ensure_ascii=False),
                     },
                     files={"video": handle},
                     timeout=180,
                 )
             if resp.ok:
-                return str(resp.json().get("result", {}).get("message_id", ""))
-            print(f"[Telegram 비디오 전송 실패] status={resp.status_code} body={resp.text[:300]}")
+                sent_video = True
+            else:
+                print(f"[Telegram 비디오 전송 실패] status={resp.status_code} body={resp.text[:300]}")
         except Exception as exc:
             print(f"[Telegram 비디오 전송 오류] {exc}")
 
-        send_doc_url = f"https://api.telegram.org/bot{token}/sendDocument"
-        try:
-            with open(video_path, "rb") as handle:
-                resp = requests.post(
-                    send_doc_url,
-                    data={
-                        "chat_id": chat_id,
-                        "caption": caption,
-                        "reply_markup": json.dumps(keyboard, ensure_ascii=False),
-                    },
-                    files={"document": handle},
-                    timeout=180,
-                )
-            if resp.ok:
-                return str(resp.json().get("result", {}).get("message_id", ""))
-            print(f"[Telegram 문서 전송 실패] status={resp.status_code} body={resp.text[:300]}")
-        except Exception as exc:
-            print(f"[Telegram 문서 전송 오류] {exc}")
+        if not sent_video:
+            send_doc_url = f"https://api.telegram.org/bot{token}/sendDocument"
+            try:
+                with open(video_path, "rb") as handle:
+                    resp = requests.post(
+                        send_doc_url,
+                        data={
+                            "chat_id": chat_id,
+                            "caption": caption,
+                        },
+                        files={"document": handle},
+                        timeout=180,
+                    )
+                if resp.ok:
+                    sent_video = True
+                else:
+                    print(f"[Telegram 문서 전송 실패] status={resp.status_code} body={resp.text[:300]}")
+            except Exception as exc:
+                print(f"[Telegram 문서 전송 오류] {exc}")
 
-    # 최종 폴백: 텍스트 승인 요청
-    return send_telegram_approval_request(token, chat_id, body or "영상 승인 요청")
+    # 2) 버튼 메시지를 별도로 반드시 전송
+    request_text = (
+        (body + "\n\n" if body else "")
+        + ("위 영상 확인 후 버튼을 눌러주세요." if sent_video else "영상 전송에 실패해 텍스트 승인으로 대체합니다.")
+    )
+    return send_telegram_approval_request(token, chat_id, request_text)
 
 
 def _answer_callback_query(token: str, callback_query_id: str, text: str = "") -> None:
@@ -5464,34 +5471,7 @@ def _auto_jp_flow(
         hook_text=texts[0] if texts else "",
     )
 
-    # ── 텔레그램 미리보기 (한글+일본어 대본) ─────────────
-    body_preview = ""
-    for i, ja_line in enumerate(texts):
-        ko_line = texts_ko_norm[i] if i < len(texts_ko_norm) else ""
-        role = content_list[i].get("role", "body") if i < len(content_list) else "body"
-        kw = visual_keywords[i] if i < len(visual_keywords) else ""
-        body_preview += f"  [{role}] JA: {ja_line}\n          KO: {ko_line}\n          🎬 {kw}\n"
-
-    request_text = (
-        f"[ 승인 요청 ] 일본인 타겟 숏츠\n"
-        f"━━━━━━━━━━━━━━━━━━━━\n"
-        f"무드: {mood}  |  BGM: {bgm_display}\n"
-        f"━━━━━━━━━━━━━━━━━━━━\n"
-        f"[제목 JA] {video_title}\n"
-        f"[해시태그] {' '.join(hashtags)}\n\n"
-        f"[대본 (총 {len(texts)}개 세그먼트)]\n{body_preview}"
-        f"[고정댓글 JA] {pinned}\n"
-        f"[고정댓글 KO 직역] {pinned_ko}\n"
-        f"━━━━━━━━━━━━━━━━━━━━\n"
-        f"아래 버튼으로 응답해주세요. (영상 렌더링 후 최종 승인 필요)"
-    )
-
-    if config.require_approval:
-        _telemetry_log("초안 미리보기 전송", config)
-        _status_update(progress, status_box, 0.30, "초안 미리보기 전송")
-        send_telegram_message(config.telegram_bot_token, config.telegram_admin_chat_id, request_text)
-    else:
-        _telemetry_log("승인 단계 생략 (자동 진행)", config)
+    _telemetry_log("초안 단계 완료 (승인은 업로드 직전에만 수행)", config)
 
     # ── TTS 생성 ─────────────────────────────────────────
     now = datetime.utcnow().strftime("%Y%m%d_%H%M%S")
