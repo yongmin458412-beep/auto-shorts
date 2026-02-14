@@ -466,6 +466,11 @@ class AppConfig:
     youtube_privacy_status: str
     serpapi_api_key: str
     pexels_api_key: str
+    google_cse_api_key: str
+    google_cse_cx: str
+    freepik_api_key: str
+    picsart_api_key: str
+    image_search_source_priority: List[str]
     ja_dialect_style: str
     bgm_mode: str
     bgm_volume: float
@@ -612,6 +617,14 @@ def load_config() -> AppConfig:
         youtube_privacy_status=_get_secret("YOUTUBE_PRIVACY_STATUS", "public") or "public",
         serpapi_api_key=_get_secret("SERPAPI_API_KEY", "") or "",
         pexels_api_key=pexels_api_key,
+        google_cse_api_key=(_get_secret("GOOGLE_CSE_API_KEY", "") or "").strip(),
+        google_cse_cx=(_get_secret("GOOGLE_CSE_CX", "") or "").strip(),
+        freepik_api_key=(_get_secret("FREEPIK_API_KEY", "") or "").strip(),
+        picsart_api_key=(_get_secret("PICSART_API_KEY", "") or "").strip(),
+        image_search_source_priority=(
+            _get_list("IMAGE_SEARCH_SOURCE_PRIORITY")
+            or ["google", "freepik", "serpapi", "pixabay", "pexels", "wikimedia"]
+        ),
         ja_dialect_style=(
             _get_secret(
                 "JA_DIALECT_STYLE",
@@ -3979,6 +3992,248 @@ def fetch_serpapi_image(
     return None
 
 
+def _download_image_file(image_url: str, output_dir: str, prefix: str = "img") -> Optional[str]:
+    if not image_url:
+        return None
+    save_dir = _ensure_writable_dir(output_dir, "/tmp/auto_shorts_images")
+    try:
+        headers = {
+            "User-Agent": (
+                "Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) "
+                "AppleWebKit/537.36 (KHTML, like Gecko) Chrome/124.0 Safari/537.36"
+            )
+        }
+        resp = requests.get(image_url, headers=headers, stream=True, timeout=45)
+        resp.raise_for_status()
+        content_type = str(resp.headers.get("Content-Type", "") or "").split(";")[0].strip().lower()
+        if content_type and (not content_type.startswith("image/")):
+            return None
+        ext = os.path.splitext(urlparse(str(image_url)).path)[1].lower()
+        if ext not in {".jpg", ".jpeg", ".png", ".webp"}:
+            guessed = mimetypes.guess_extension(content_type) if content_type else None
+            ext = guessed if guessed in {".jpg", ".jpeg", ".png", ".webp"} else ".jpg"
+        file_path = os.path.join(save_dir, f"{prefix}_{random.randint(100000, 999999)}{ext}")
+        with open(file_path, "wb") as out:
+            for chunk in resp.iter_content(chunk_size=65536):
+                if chunk:
+                    out.write(chunk)
+        return file_path if os.path.exists(file_path) else None
+    except Exception:
+        return None
+
+
+def _score_image_candidate_text(
+    text: str,
+    query_tokens: List[str],
+    prefer_logo: bool = False,
+) -> int:
+    src = (text or "").lower()
+    score = 0
+    for token in query_tokens:
+        if token and token in src:
+            score += 4
+    if prefer_logo:
+        if "logo" in src:
+            score += 5
+        if "icon" in src:
+            score += 3
+        if "official" in src:
+            score += 2
+        if any(host in src for host in ("wikipedia", "wikimedia", "brand", "tiktok", "mcdonald", "netflix")):
+            score += 1
+    return score
+
+
+def fetch_google_cse_image(
+    query: str,
+    api_key: str,
+    cse_cx: str,
+    output_dir: str = "/tmp/google_cse_images",
+) -> Optional[str]:
+    if not api_key or not cse_cx:
+        return None
+    save_dir = _ensure_writable_dir(output_dir, "/tmp/google_cse_images")
+    try:
+        params = {
+            "key": api_key,
+            "cx": cse_cx,
+            "q": query,
+            "searchType": "image",
+            "safe": "active",
+            "num": 10,
+        }
+        resp = requests.get("https://www.googleapis.com/customsearch/v1", params=params, timeout=40)
+        if resp.status_code != 200:
+            return None
+        items = resp.json().get("items", []) or []
+        if not items:
+            return None
+        tokens = _extract_query_tokens(query)
+        prefer_logo = bool(_brand_fallback_queries_from_keyword(query)) or ("logo" in query.lower())
+        scored: List[Tuple[int, Dict[str, Any]]] = []
+        for item in items:
+            if not isinstance(item, dict):
+                continue
+            text = " ".join(
+                [
+                    str(item.get("title", "") or ""),
+                    str(item.get("snippet", "") or ""),
+                    str(item.get("displayLink", "") or ""),
+                    str(item.get("link", "") or ""),
+                    str(((item.get("image") or {}) if isinstance(item.get("image"), dict) else {}).get("contextLink", "") or ""),
+                ]
+            )
+            score = _score_image_candidate_text(text, tokens, prefer_logo=prefer_logo)
+            if prefer_logo:
+                # 로고/앱아이콘 쿼리는 아이콘형 이미지를 우선
+                mime = str(item.get("mime", "") or "").lower()
+                if "png" in mime or "webp" in mime:
+                    score += 1
+            scored.append((score, item))
+        scored.sort(key=lambda x: x[0], reverse=True)
+        for _, item in scored[:8]:
+            image_url = str(item.get("link", "") or "").strip()
+            path = _download_image_file(image_url, save_dir, prefix="gcs")
+            if path:
+                return path
+    except Exception:
+        return None
+    return None
+
+
+def fetch_freepik_image(
+    query: str,
+    api_key: str,
+    output_dir: str = "/tmp/freepik_images",
+) -> Optional[str]:
+    if not api_key:
+        return None
+    save_dir = _ensure_writable_dir(output_dir, "/tmp/freepik_images")
+    try:
+        headers = {
+            "x-freepik-api-key": api_key,
+            "Accept": "application/json",
+        }
+        params = {
+            "term": query,
+            "limit": 20,
+            "order": "relevance",
+            "locale": "en-US",
+        }
+        resp = requests.get("https://api.freepik.com/v1/resources", headers=headers, params=params, timeout=45)
+        if resp.status_code != 200:
+            return None
+        data = resp.json().get("data", []) or []
+        if not data:
+            return None
+        tokens = _extract_query_tokens(query)
+        prefer_logo = bool(_brand_fallback_queries_from_keyword(query)) or ("logo" in query.lower())
+        scored: List[Tuple[int, Dict[str, Any]]] = []
+        for item in data:
+            if not isinstance(item, dict):
+                continue
+            text = " ".join(
+                [
+                    str(item.get("title", "") or ""),
+                    str(item.get("slug", "") or ""),
+                    str(item.get("type", "") or ""),
+                    str(item.get("url", "") or ""),
+                    " ".join(str(t) for t in (item.get("tags", []) or []) if isinstance(t, str)),
+                ]
+            )
+            score = _score_image_candidate_text(text, tokens, prefer_logo=prefer_logo)
+            scored.append((score, item))
+        scored.sort(key=lambda x: x[0], reverse=True)
+        for _, item in scored[:10]:
+            image_obj = item.get("image", {}) if isinstance(item.get("image"), dict) else {}
+            image_url = (
+                str(
+                    (image_obj.get("source", {}) or {}).get("url")
+                    or image_obj.get("url")
+                    or (item.get("preview", {}) if isinstance(item.get("preview"), dict) else {}).get("url")
+                    or item.get("url")
+                    or ""
+                ).strip()
+            )
+            if not image_url:
+                continue
+            path = _download_image_file(image_url, save_dir, prefix="fpk")
+            if path:
+                return path
+    except Exception:
+        return None
+    return None
+
+
+def _normalize_image_source_priority(raw_list: List[str]) -> List[str]:
+    alias = {
+        "google": "google",
+        "google_cse": "google",
+        "google_images": "google",
+        "freepik": "freepik",
+        "pixabay": "pixabay",
+        "pexels": "pexels",
+        "serpapi": "serpapi",
+        "wikimedia": "wikimedia",
+        "picsart": "picsart",
+    }
+    out: List[str] = []
+    for item in (raw_list or []):
+        key = alias.get(str(item or "").strip().lower(), "")
+        if key and key not in out:
+            out.append(key)
+    if not out:
+        out = ["google", "freepik", "serpapi", "pixabay", "pexels", "wikimedia"]
+    return out
+
+
+def _fetch_image_from_source(
+    source: str,
+    query: str,
+    config: AppConfig,
+    dirs: Dict[str, str],
+) -> Optional[str]:
+    src = str(source or "").strip().lower()
+    if src == "google":
+        return fetch_google_cse_image(
+            query=query,
+            api_key=str(getattr(config, "google_cse_api_key", "") or ""),
+            cse_cx=str(getattr(config, "google_cse_cx", "") or ""),
+            output_dir=dirs.get("google", "/tmp/google_cse_images"),
+        )
+    if src == "freepik":
+        return fetch_freepik_image(
+            query=query,
+            api_key=str(getattr(config, "freepik_api_key", "") or ""),
+            output_dir=dirs.get("freepik", "/tmp/freepik_images"),
+        )
+    if src == "pixabay":
+        return fetch_pixabay_image(
+            query=query,
+            api_key=str(getattr(config, "pixabay_api_key", "") or ""),
+            output_dir=dirs.get("pixabay", "/tmp/pixabay_images"),
+        )
+    if src == "pexels":
+        return fetch_pexels_image(
+            query=query,
+            api_key=str(getattr(config, "pexels_api_key", "") or ""),
+            output_dir=dirs.get("pexels", "/tmp/pexels_bg_images"),
+        )
+    if src == "serpapi":
+        return fetch_serpapi_image(
+            query=query,
+            api_key=str(getattr(config, "serpapi_api_key", "") or ""),
+            output_dir=dirs.get("serpapi", "/tmp/serpapi_images"),
+        )
+    if src == "wikimedia":
+        return fetch_wikimedia_image(
+            query=query,
+            output_dir=dirs.get("wikimedia", "/tmp/wikimedia_images"),
+        )
+    # picsart: API 플랜/엔드포인트별 편차가 커서 기본 검색 파이프라인에서는 사용하지 않음
+    return None
+
+
 def fetch_wikimedia_image(
     query: str,
     output_dir: str = "/tmp/wikimedia_images",
@@ -4033,37 +4288,47 @@ def fetch_segment_images(
     run_stamp = datetime.utcnow().strftime("%Y%m%d_%H%M%S_%f")
     px_dir = f"/tmp/pixabay_images/{run_stamp}"
     pex_dir = f"/tmp/pexels_bg_images/{run_stamp}"
+    gcs_dir = f"/tmp/google_cse_images/{run_stamp}"
+    fpk_dir = f"/tmp/freepik_images/{run_stamp}"
     sp_dir = f"/tmp/serpapi_images/{run_stamp}"
     wm_dir = f"/tmp/wikimedia_images/{run_stamp}"
+    source_order = _normalize_image_source_priority(
+        list(getattr(config, "image_search_source_priority", []) or [])
+    )
+    source_dirs = {
+        "pixabay": px_dir,
+        "pexels": pex_dir,
+        "google": gcs_dir,
+        "freepik": fpk_dir,
+        "serpapi": sp_dir,
+        "wikimedia": wm_dir,
+    }
     unique_kws = [kw for kw in dict.fromkeys(keywords) if kw]
     kw_to_path: Dict[str, Optional[str]] = {}
     for kw in unique_kws:
         path: Optional[str] = None
         query_candidates = _build_search_query_candidates(kw)
-        _telemetry_log(f"이미지 검색 키워드: {kw} -> 후보 {query_candidates[:3]}", config)
+        _telemetry_log(
+            f"이미지 검색 키워드: {kw} -> 후보 {query_candidates[:3]} / 소스순서={source_order}",
+            config,
+        )
         for candidate in query_candidates:
-            if config.pixabay_api_key:
-                path = fetch_pixabay_image(candidate, config.pixabay_api_key, px_dir)
-            if not path and config.pexels_api_key:
-                path = fetch_pexels_image(candidate, config.pexels_api_key, pex_dir)
-            if not path and config.serpapi_api_key:
-                path = fetch_serpapi_image(candidate, config.serpapi_api_key, sp_dir)
-            if not path:
-                path = fetch_wikimedia_image(candidate, wm_dir)
+            for source in source_order:
+                path = _fetch_image_from_source(source, candidate, config, source_dirs)
+                if path:
+                    _telemetry_log(f"이미지 소스 성공: {source} / {candidate}", config)
+                    break
             if path:
                 break
         if not path:
             brand_fallbacks = _brand_fallback_queries_from_keyword(kw)
             fallback_pool = brand_fallbacks if brand_fallbacks else _GLOBAL_BG_FALLBACK_QUERIES
             for fbq in fallback_pool:
-                if config.pixabay_api_key:
-                    path = fetch_pixabay_image(fbq, config.pixabay_api_key, px_dir)
-                if not path and config.pexels_api_key:
-                    path = fetch_pexels_image(fbq, config.pexels_api_key, pex_dir)
-                if not path and config.serpapi_api_key:
-                    path = fetch_serpapi_image(fbq, config.serpapi_api_key, sp_dir)
-                if not path:
-                    path = fetch_wikimedia_image(fbq, wm_dir)
+                for source in source_order:
+                    path = _fetch_image_from_source(source, fbq, config, source_dirs)
+                    if path:
+                        _telemetry_log(f"이미지 폴백 성공: {source} / {fbq}", config)
+                        break
                 if path:
                     break
         kw_to_path[kw] = path
@@ -8047,6 +8312,9 @@ def run_streamlit_app() -> None:
     st.sidebar.write(f"자동 업로드 시간({config.auto_run_tz}): {schedule_labels}")
     st.sidebar.write(f"MoviePy 사용 가능: {'예' if MOVIEPY_AVAILABLE else '아니오'}")
     st.sidebar.write(f"BGM 모드: {config.bgm_mode or 'off'}")
+    st.sidebar.write("이미지 소스 우선순위: " + ", ".join(_normalize_image_source_priority(config.image_search_source_priority)))
+    st.sidebar.write(f"Google CSE: {'설정됨' if (config.google_cse_api_key and config.google_cse_cx) else '미설정'}")
+    st.sidebar.write(f"Freepik: {'설정됨' if config.freepik_api_key else '미설정'}")
     if config.pixabay_api_key:
         key_tail = config.pixabay_api_key[-4:] if len(config.pixabay_api_key) >= 4 else config.pixabay_api_key
         st.sidebar.write(f"Pixabay BGM: 설정됨 (****{key_tail})")
@@ -8083,10 +8351,13 @@ def run_streamlit_app() -> None:
     st.sidebar.subheader("선택")
     st.sidebar.markdown(
         "- `YOUTUBE_*` (자동 업로드)\n"
-        "- `PIXABAY_API_KEY` (배경 이미지/영상)\n"
+        "- `GOOGLE_CSE_API_KEY`, `GOOGLE_CSE_CX` (Google 이미지 검색)\n"
+        "- `FREEPIK_API_KEY` (Freepik 이미지 검색)\n"
+        "- `IMAGE_SEARCH_SOURCE_PRIORITY` (예: `google,freepik,serpapi,pixabay,pexels,wikimedia`)\n"
+        "- `PIXABAY_API_KEY` (배경 이미지/영상, 폴백)\n"
         "- `PIXABAY_BGM_ENABLED` (Pixabay BGM 자동 다운로드 on/off)\n"
-        "- `PEXELS_API_KEY` (이미지 자동 수집)\n"
-        "- `SERPAPI_API_KEY` (트렌드 수집)\n"
+        "- `PEXELS_API_KEY` (이미지 자동 수집, 폴백)\n"
+        "- `SERPAPI_API_KEY` (Google Images via SerpApi 폴백)\n"
         "- `OPENAI_VISION_MODEL` (이미지 태그 분석)\n"
         "- `JA_DIALECT_STYLE` (일본어 말투/사투리 스타일)\n"
         "- `BGM_MODE`, `BGM_VOLUME` (배경음악)\n"
