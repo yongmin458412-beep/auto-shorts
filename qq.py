@@ -908,8 +908,6 @@ def _normalize_story_line(text: str, max_len: int = 90) -> str:
     value = re.sub(r"\s+", " ", str(text or "").strip())
     if not value:
         return value
-    if len(value) > max_len:
-        value = value[:max_len].rstrip(" 、,") + "…"
     return value
 
 
@@ -2818,9 +2816,9 @@ def _draw_subtitle(
     if is_bilingual:
         ja_text = raw_parts[0]
         ko_text = raw_parts[1]
-        primary_lines = _wrap_cjk_text(ja_text, max_text_w, font_size)[:2]
+        primary_lines = _wrap_cjk_text(ja_text, max_text_w, font_size)[:3]
         secondary_base_size = max(30, int(font_size * 0.64))
-        secondary_lines = _wrap_cjk_text(ko_text, max_text_w, secondary_base_size)[:2]
+        secondary_lines = _wrap_cjk_text(ko_text, max_text_w, secondary_base_size)[:3]
         primary_line_h = font_size + 12
         secondary_line_h = secondary_base_size + 10
         total_h = (
@@ -2829,7 +2827,7 @@ def _draw_subtitle(
             + 24
         )
     else:
-        primary_lines = _wrap_cjk_text(text, max_text_w, font_size)[:3]
+        primary_lines = _wrap_cjk_text(text, max_text_w, font_size)[:4]
         secondary_lines = []
         secondary_base_size = max(30, int(font_size * 0.64))
         primary_line_h = font_size + 14
@@ -5186,13 +5184,11 @@ def _build_bilingual_caption_texts(
     texts_ko: List[str],
 ) -> List[str]:
     ko_norm = _normalize_ko_lines(texts_ko, texts_ja)
-    ja_chars = max(10, int(getattr(config, "caption_max_chars", 14) or 14))
-    ko_chars = max(8, int(ja_chars * 0.85))
     merged: List[str] = []
     for idx, ja_src in enumerate(texts_ja):
         ko_src = ko_norm[idx] if idx < len(ko_norm) else ""
-        ja_line = _shorten_caption_text(ja_src, max_chars=ja_chars)
-        ko_line = _shorten_caption_text(ko_src, max_chars=ko_chars)
+        ja_line = re.sub(r"\s+", " ", str(ja_src or "").strip())
+        ko_line = re.sub(r"\s+", " ", str(ko_src or "").strip())
         if ko_line and ko_line != ja_line:
             merged.append(f"{ja_line}\n{ko_line}")
         else:
