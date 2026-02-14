@@ -4774,6 +4774,62 @@ def send_telegram_message(token: str, chat_id: str, text: str) -> bool:
     return success
 
 
+def _build_telegram_preview_video(
+    source_video_path: str,
+    output_dir: str,
+    max_duration_sec: float = 20.0,
+    target_width: int = 540,
+) -> Optional[str]:
+    """
+    텔레그램 전송용 경량 프리뷰 영상을 생성한다.
+    원본이 크거나 전송 실패 시 사용.
+    """
+    if not MOVIEPY_AVAILABLE or not VideoFileClip:
+        return None
+    if not source_video_path or not os.path.exists(source_video_path):
+        return None
+    os.makedirs(output_dir, exist_ok=True)
+    preview_name = f"telegram_preview_{int(time.time())}_{random.randint(1000,9999)}.mp4"
+    preview_path = os.path.join(output_dir, preview_name)
+    clip = None
+    sub = None
+    resized = None
+    try:
+        clip = VideoFileClip(source_video_path)
+        duration = float(clip.duration or 0.0)
+        if duration <= 0.0:
+            return None
+        end_t = min(duration, max_duration_sec)
+        sub = clip.subclip(0, end_t)
+        resized = sub
+        if getattr(sub, "w", 0) and sub.w > target_width:
+            resized = sub.resize(width=target_width)
+        fps = int(getattr(clip, "fps", 24) or 24)
+        resized.write_videofile(
+            preview_path,
+            codec="libx264",
+            audio_codec="aac",
+            bitrate="700k",
+            fps=min(24, max(15, fps)),
+            preset="veryfast",
+            threads=1,
+            logger=None,
+        )
+        if os.path.exists(preview_path):
+            return preview_path
+    except Exception as exc:
+        print(f"[Telegram 프리뷰 생성 실패] {exc}")
+    finally:
+        for obj in (resized, sub, clip):
+            if obj is None:
+                continue
+            try:
+                obj.close()
+            except Exception:
+                pass
+    return None
+
+
 def _telemetry_log(message: str, config: Optional[AppConfig] = None) -> bool:
     """
     디버그용 텔레그램 로그 전송 (진행 상황/오류 추적용)
@@ -4872,15 +4928,34 @@ def send_telegram_video_approval_request(
 
     # 1) 영상 전송 시도 (버튼은 분리 전송)
     sent_video = False
-    if video_path and os.path.exists(video_path):
+    media_path = video_path
+    preview_generated = False
+    try:
+        if video_path and os.path.exists(video_path):
+            file_size = os.path.getsize(video_path)
+            # Bot API 제한/전송 실패 가능성 대비: 큰 파일은 자동 프리뷰로 축소
+            if file_size > 45 * 1024 * 1024:
+                preview_path = _build_telegram_preview_video(
+                    source_video_path=video_path,
+                    output_dir=os.path.dirname(video_path) or ".",
+                    max_duration_sec=20.0,
+                    target_width=540,
+                )
+                if preview_path and os.path.exists(preview_path):
+                    media_path = preview_path
+                    preview_generated = True
+    except Exception:
+        pass
+
+    if media_path and os.path.exists(media_path):
         send_video_url = f"https://api.telegram.org/bot{token}/sendVideo"
         try:
-            with open(video_path, "rb") as handle:
+            with open(media_path, "rb") as handle:
                 resp = requests.post(
                     send_video_url,
                     data={
                         "chat_id": chat_id,
-                        "caption": caption,
+                        "caption": (caption + ("\n\n(미리보기 20초)" if preview_generated else ""))[:1024],
                         "supports_streaming": "true",
                     },
                     files={"video": handle},
@@ -4896,12 +4971,12 @@ def send_telegram_video_approval_request(
         if not sent_video:
             send_doc_url = f"https://api.telegram.org/bot{token}/sendDocument"
             try:
-                with open(video_path, "rb") as handle:
+                with open(media_path, "rb") as handle:
                     resp = requests.post(
                         send_doc_url,
                         data={
                             "chat_id": chat_id,
-                            "caption": caption,
+                            "caption": (caption + ("\n\n(미리보기 파일)" if preview_generated else ""))[:1024],
                         },
                         files={"document": handle},
                         timeout=180,
@@ -4918,7 +4993,15 @@ def send_telegram_video_approval_request(
         (body + "\n\n" if body else "")
         + ("위 영상 확인 후 버튼을 눌러주세요." if sent_video else "영상 전송에 실패해 텍스트 승인으로 대체합니다.")
     )
-    return send_telegram_approval_request(token, chat_id, request_text)
+    message_id = send_telegram_approval_request(token, chat_id, request_text)
+    # 임시 프리뷰 파일 정리
+    if preview_generated and media_path and media_path != video_path:
+        try:
+            if os.path.exists(media_path):
+                os.remove(media_path)
+        except Exception:
+            pass
+    return message_id
 
 
 def _answer_callback_query(token: str, callback_query_id: str, text: str = "") -> None:
