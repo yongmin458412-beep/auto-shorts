@@ -11,6 +11,7 @@ import shutil
 import subprocess
 import textwrap
 import time
+from difflib import SequenceMatcher
 from html import unescape
 from urllib.parse import urljoin, urlencode, urlparse
 from collections import Counter
@@ -2521,9 +2522,57 @@ def _apply_ffmpeg_audio_filter(input_path: str, output_path: str, filter_expr: s
         return False
 
 
-def _apply_baby_voice_filter(config: AppConfig, audio_path: str) -> str:
-    if not getattr(config, "tts_baby_voice", True):
+def _pick_boy_voice_fallback(config: AppConfig, current_voice: str = "") -> str:
+    preferred = ["echo", "alloy", "fable", "nova", "shimmer", "onyx"]
+    pool: List[str] = []
+    if current_voice:
+        pool.append(str(current_voice).strip())
+    pool.extend([str(v).strip() for v in (getattr(config, "openai_tts_voices", []) or []) if str(v).strip()])
+    deduped: List[str] = []
+    seen: set[str] = set()
+    for voice in pool:
+        if voice not in seen:
+            deduped.append(voice)
+            seen.add(voice)
+    for voice in preferred:
+        if voice in deduped and voice != current_voice:
+            return voice
+    for voice in preferred:
+        if voice != current_voice:
+            return voice
+    return current_voice or "echo"
+
+
+def _apply_boy_voice_filter(audio_path: str) -> str:
+    if not audio_path or not os.path.exists(audio_path):
         return audio_path
+    filtered = os.path.join(
+        os.path.dirname(audio_path) or ".",
+        f"boy_{os.path.basename(audio_path)}",
+    )
+    filt = (
+        "asetrate=44100*1.045,"
+        "atempo=0.957,"
+        "aresample=44100,"
+        "highpass=f=95,"
+        "treble=g=1.2,"
+        "volume=1.04"
+    )
+    if _apply_ffmpeg_audio_filter(audio_path, filtered, filt):
+        try:
+            os.replace(filtered, audio_path)
+        except Exception:
+            shutil.copyfile(filtered, audio_path)
+            try:
+                os.remove(filtered)
+            except Exception:
+                pass
+    return audio_path
+
+
+def _apply_baby_voice_filter(config: AppConfig, audio_path: str) -> Tuple[str, bool]:
+    if not getattr(config, "tts_baby_voice", True):
+        return audio_path, False
     pitch = float(getattr(config, "tts_baby_pitch", 1.20) or 1.20)
     pitch = max(1.02, min(pitch, 1.35))
     tempo = max(0.5, min(2.0, 1.0 / pitch))
@@ -2554,8 +2603,12 @@ def _apply_baby_voice_filter(config: AppConfig, audio_path: str) -> str:
             os.replace(filtered, audio_path)
         except Exception:
             shutil.copyfile(filtered, audio_path)
-            os.remove(filtered)
-    return audio_path
+            try:
+                os.remove(filtered)
+            except Exception:
+                pass
+        return audio_path, True
+    return audio_path, False
 
 
 def _apply_asmr_voice_filter(audio_path: str) -> str:
@@ -2605,7 +2658,12 @@ def tts_generate(
     os.makedirs(os.path.dirname(output_path), exist_ok=True)
     if not segments:
         result = _tts_generate_single(config, text, output_path, voice=voice or "shimmer")
-        return _apply_baby_voice_filter(config, result)
+        result, baby_ok = _apply_baby_voice_filter(config, result)
+        if getattr(config, "tts_baby_voice", True) and not baby_ok:
+            fallback_voice = _pick_boy_voice_fallback(config, voice)
+            result = _tts_generate_single(config, text, output_path, voice=fallback_voice)
+            result = _apply_boy_voice_filter(result)
+        return result
 
     if not MOVIEPY_AVAILABLE or AudioFileClip is None:
         joined = "。".join(
@@ -2616,7 +2674,12 @@ def tts_generate(
             ]
         )
         result = _tts_generate_single(config, joined, output_path, voice=voice or "shimmer")
-        return _apply_baby_voice_filter(config, result)
+        result, baby_ok = _apply_baby_voice_filter(config, result)
+        if getattr(config, "tts_baby_voice", True) and not baby_ok:
+            fallback_voice = _pick_boy_voice_fallback(config, voice)
+            result = _tts_generate_single(config, joined, output_path, voice=fallback_voice)
+            result = _apply_boy_voice_filter(result)
+        return result
 
     try:
         from moviepy.editor import concatenate_audioclips
@@ -2629,7 +2692,12 @@ def tts_generate(
             ]
         )
         result = _tts_generate_single(config, joined, output_path, voice=voice or "shimmer")
-        return _apply_baby_voice_filter(config, result)
+        result, baby_ok = _apply_baby_voice_filter(config, result)
+        if getattr(config, "tts_baby_voice", True) and not baby_ok:
+            fallback_voice = _pick_boy_voice_fallback(config, voice)
+            result = _tts_generate_single(config, joined, output_path, voice=fallback_voice)
+            result = _apply_boy_voice_filter(result)
+        return result
 
     temp_files: List[str] = []
     clips: List[Any] = []
@@ -2644,7 +2712,11 @@ def tts_generate(
                 f"tts_seg_{idx}_{random.randint(1000, 9999)}.mp3",
             )
             _tts_generate_single(config, line, tmp_path, voice=voice or "shimmer")
-            _apply_baby_voice_filter(config, tmp_path)
+            _, baby_ok = _apply_baby_voice_filter(config, tmp_path)
+            if getattr(config, "tts_baby_voice", True) and not baby_ok:
+                fallback_voice = _pick_boy_voice_fallback(config, voice)
+                _tts_generate_single(config, line, tmp_path, voice=fallback_voice)
+                _apply_boy_voice_filter(tmp_path)
             if role in {"asmr_tag", "asmr"}:
                 _apply_asmr_voice_filter(tmp_path)
             temp_files.append(tmp_path)
@@ -4863,12 +4935,71 @@ def _get_generated_bg_paths(
     return repeated
 
 
+def _pick_latest_image(path: str) -> Optional[str]:
+    if not path or not os.path.exists(path):
+        return None
+    candidates = _list_image_files(path)
+    if not candidates:
+        return None
+    try:
+        candidates.sort(key=lambda p: os.path.getmtime(p), reverse=True)
+    except Exception:
+        pass
+    return candidates[0]
+
+
+def _resolve_primary_photo_asset(config: AppConfig) -> Optional[str]:
+    assets_photo_dir = os.path.join(config.assets_dir, "user_photos")
+    os.makedirs(assets_photo_dir, exist_ok=True)
+
+    configured = str(getattr(config, "primary_photo_path", "") or "").strip()
+    if configured and os.path.exists(configured) and configured.lower().endswith((".jpg", ".jpeg", ".png", ".webp")):
+        ext = os.path.splitext(configured)[1].lower() or ".jpg"
+        target = os.path.join(assets_photo_dir, f"primary{ext}")
+        try:
+            src_abs = os.path.abspath(configured)
+            dst_abs = os.path.abspath(target)
+            need_copy = src_abs != dst_abs
+            if need_copy:
+                if os.path.exists(target):
+                    need_copy = (
+                        os.path.getsize(configured) != os.path.getsize(target)
+                        or int(os.path.getmtime(configured)) != int(os.path.getmtime(target))
+                    )
+                if need_copy:
+                    shutil.copy2(configured, target)
+            return target if os.path.exists(target) else configured
+        except Exception:
+            return configured
+
+    existing_primary = _pick_latest_image(assets_photo_dir)
+    if existing_primary:
+        return existing_primary
+
+    fallback_sources = [
+        os.path.join(config.assets_dir, "inbox"),
+        os.path.join(config.assets_dir, "images"),
+    ]
+    for src_dir in fallback_sources:
+        latest = _pick_latest_image(src_dir)
+        if not latest:
+            continue
+        ext = os.path.splitext(latest)[1].lower() or ".jpg"
+        target = os.path.join(assets_photo_dir, f"primary_from_assets{ext}")
+        try:
+            shutil.copy2(latest, target)
+            return target
+        except Exception:
+            continue
+    return None
+
+
 def _apply_primary_photo_override(
     config: AppConfig,
     bg_video_paths: List[Optional[str]],
     bg_image_paths: List[Optional[str]],
 ) -> Tuple[List[Optional[str]], List[Optional[str]]]:
-    photo_path = str(getattr(config, "primary_photo_path", "") or "").strip()
+    photo_path = _resolve_primary_photo_asset(config)
     if not photo_path or (not os.path.exists(photo_path)):
         return bg_video_paths, bg_image_paths
     if not bg_video_paths and not bg_image_paths:
@@ -6845,10 +6976,35 @@ def _load_used_topics(path: str) -> Dict[str, Any]:
     return _read_json_file(path, {"topics": []})
 
 
+def _normalize_topic_text(text: str) -> str:
+    src = str(text or "").strip().lower()
+    if not src:
+        return ""
+    return re.sub(r"[^a-z0-9가-힣ぁ-んァ-ヶ一-龥]+", "", src)
+
+
 def _is_used_topic(used_data: Dict[str, Any], topic: str) -> bool:
     topics = used_data.get("topics", [])
     topic_key = topic.strip().lower()
-    return any(str(item.get("key", "")).lower() == topic_key for item in topics)
+    topic_norm = _normalize_topic_text(topic_key)
+    if not topic_key and not topic_norm:
+        return False
+    for item in topics:
+        key = str(item.get("key", "")).strip().lower()
+        topic_txt = str(item.get("topic", "")).strip().lower()
+        title_txt = str(item.get("title", "")).strip().lower()
+        if key == topic_key or topic_txt == topic_key or title_txt == topic_key:
+            return True
+        item_norms = {
+            _normalize_topic_text(key),
+            _normalize_topic_text(topic_txt),
+            _normalize_topic_text(title_txt),
+            _normalize_topic_text(str(item.get("norm", ""))),
+        }
+        item_norms = {v for v in item_norms if v}
+        if topic_norm and topic_norm in item_norms:
+            return True
+    return False
 
 
 def _mark_used_topic(path: str, topic: str, title: str = "") -> None:
@@ -6861,6 +7017,7 @@ def _mark_used_topic(path: str, topic: str, title: str = "") -> None:
             "key": topic.strip().lower(),
             "topic": topic,
             "title": title,
+            "norm": _normalize_topic_text(topic),
             "ts": datetime.utcnow().strftime("%Y-%m-%d %H:%M:%S"),
         }
     )
@@ -6874,6 +7031,85 @@ def _pick_topic_key(meta: Dict[str, Any]) -> str:
         if isinstance(value, str) and value.strip():
             return value.strip()
     return ""
+
+
+def _collect_recent_topic_history(config: AppConfig, limit: int = 180) -> List[str]:
+    results: List[str] = []
+    seen: set[str] = set()
+
+    def _push(value: str) -> None:
+        text = str(value or "").strip()
+        norm = _normalize_topic_text(text)
+        if not text or not norm or norm in seen:
+            return
+        seen.add(norm)
+        results.append(text)
+
+    used_data = _load_used_topics(config.used_topics_path)
+    topics = used_data.get("topics", []) if isinstance(used_data, dict) else []
+    if isinstance(topics, list):
+        for item in reversed(topics[-max(30, limit) :]):
+            if not isinstance(item, dict):
+                continue
+            _push(str(item.get("topic", "") or ""))
+            _push(str(item.get("title", "") or ""))
+
+    runs_path = os.path.join(config.output_dir, "runs.jsonl")
+    if os.path.exists(runs_path):
+        try:
+            with open(runs_path, "r", encoding="utf-8") as file:
+                lines = file.readlines()[-max(50, limit * 3) :]
+            for line in reversed(lines):
+                if len(results) >= limit:
+                    break
+                try:
+                    rec = json.loads(line)
+                except Exception:
+                    continue
+                if not isinstance(rec, dict):
+                    continue
+                _push(str(rec.get("topic_key", "") or ""))
+                _push(str(rec.get("topic_theme", "") or ""))
+                _push(str(rec.get("title_ja", "") or ""))
+                _push(str(rec.get("title", "") or ""))
+        except Exception:
+            pass
+    return results[:limit]
+
+
+def _is_recent_topic_or_title_duplicate(
+    config: AppConfig,
+    topic_key: str = "",
+    title: str = "",
+    threshold: float = 0.92,
+) -> bool:
+    candidates = [str(topic_key or "").strip(), str(title or "").strip()]
+    cand_norms = [n for n in [_normalize_topic_text(c) for c in candidates] if n]
+    if not cand_norms:
+        return False
+    history = _collect_recent_topic_history(config, limit=220)
+    hist_norms = [_normalize_topic_text(h) for h in history]
+    hist_norms = [h for h in hist_norms if h]
+    for cand in cand_norms:
+        for prev in hist_norms:
+            if cand == prev:
+                return True
+            if len(cand) >= 10 and len(prev) >= 10 and (cand in prev or prev in cand):
+                return True
+            if SequenceMatcher(None, cand, prev).ratio() >= threshold:
+                return True
+    return False
+
+
+def _build_topic_exclusion_hint(config: AppConfig, limit: int = 28) -> str:
+    history = _collect_recent_topic_history(config, limit=max(8, limit))
+    if not history:
+        return ""
+    lines = [f"- {item}" for item in history[:limit]]
+    return (
+        "아래는 이미 제작/사용한 주제 목록이야. 같은 주제/유사 주제/비슷한 제목은 절대 사용하지 마.\n"
+        + "\n".join(lines)
+    )
 
 
 def _load_offset(path: str) -> int:
@@ -7016,9 +7252,12 @@ def _auto_jp_flow(
     content_list = []
     topic_key = ""
     growth_hint = _build_growth_feedback_hint(config)
+    duplicate_guard_hint = _build_topic_exclusion_hint(config, limit=24)
     base_hint = (extra_hint or "").strip()
     if growth_hint:
         base_hint = (base_hint + "\n\n" + growth_hint).strip() if base_hint else growth_hint
+    if duplicate_guard_hint:
+        base_hint = (base_hint + "\n\n" + duplicate_guard_hint).strip() if base_hint else duplicate_guard_hint
     llm_hint = base_hint
     for attempt in range(3):
         try:
@@ -7034,6 +7273,21 @@ def _auto_jp_flow(
         meta = script.get("meta", {})
         content_list = _get_story_timeline(script)
         topic_key = _pick_topic_key(meta)
+        candidate_title = str(
+            meta.get("title_ja")
+            or meta.get("title")
+            or script.get("video_title")
+            or ""
+        ).strip()
+        if _is_recent_topic_or_title_duplicate(config, topic_key=topic_key, title=candidate_title):
+            blocked = topic_key or candidate_title or "(unknown)"
+            _telemetry_log(f"중복 주제/제목 감지 → 재생성: {blocked}", config)
+            llm_hint = (
+                (base_hint + f"\n중복으로 금지된 주제/제목: {blocked}\n비슷한 주제와 제목도 금지.")
+                if base_hint
+                else f"중복으로 금지된 주제/제목: {blocked}\n비슷한 주제와 제목도 금지."
+            ).strip()
+            continue
         if topic_key:
             used_topics = _load_used_topics(config.used_topics_path)
             if _is_used_topic(used_topics, topic_key):
@@ -7041,6 +7295,20 @@ def _auto_jp_flow(
                 llm_hint = (base_hint + f"\n이전 주제는 제외: {topic_key}").strip()
                 continue
         break
+    final_title = str(
+        meta.get("title_ja")
+        or meta.get("title")
+        or script.get("video_title")
+        or ""
+    ).strip()
+    if _is_recent_topic_or_title_duplicate(config, topic_key=topic_key, title=final_title):
+        msg = f"이미 사용한 주제/제목과 유사합니다. 이번 작업을 중단합니다: {topic_key or final_title}"
+        _telemetry_log(msg, config)
+        _ui_warning(msg, use_streamlit)
+        send_telegram_message(config.telegram_bot_token, config.telegram_admin_chat_id, msg)
+        _notify("❌", "기획팀 실패", "중복 주제/제목으로 중단")
+        _reset_runtime_caches(config)
+        return False
     if topic_key:
         used_topics = _load_used_topics(config.used_topics_path)
         if _is_used_topic(used_topics, topic_key):
@@ -7786,6 +8054,9 @@ def run_streamlit_app() -> None:
                 else:
                     mood = _mood_val
                     topic_key = _pick_topic_key(_meta)
+                    if _is_recent_topic_or_title_duplicate(config, topic_key=topic_key, title=video_title_val):
+                        st.warning(f"이미 로그에 있는 주제/제목과 유사합니다. 다른 주제로 바꿔주세요: {topic_key or video_title_val}")
+                        return
                     if topic_key and _is_used_topic(_load_used_topics(config.used_topics_path), topic_key):
                         st.warning(f"이미 사용한 주제입니다. 다른 주제를 사용하세요: {topic_key}")
                         return
@@ -8736,6 +9007,7 @@ def run_streamlit_app() -> None:
 def run_batch(count: int, seed: str = "", beats: int = 7) -> None:
     config = load_config()
     growth_hint = _build_growth_feedback_hint(config)
+    duplicate_guard_hint = _build_topic_exclusion_hint(config, limit=24)
     base_hint = (seed or "").strip()
     for index in range(count):
         _reset_runtime_caches(config, deep=bool(getattr(config, "force_fresh_media_on_start", False)))
@@ -8744,17 +9016,45 @@ def run_batch(count: int, seed: str = "", beats: int = 7) -> None:
         llm_hint = base_hint
         if growth_hint:
             llm_hint = (llm_hint + "\n\n" + growth_hint).strip() if llm_hint else growth_hint
+        if duplicate_guard_hint:
+            llm_hint = (llm_hint + "\n\n" + duplicate_guard_hint).strip() if llm_hint else duplicate_guard_hint
         for attempt in range(3):
             script = generate_script_jp(config, extra_hint=llm_hint)
             script = _inject_majisho_asmr_beat(script, enabled=getattr(config, "enable_majisho_tag", True))
             _meta_tmp = script.get("meta", {})
             topic_key = _pick_topic_key(_meta_tmp)
+            candidate_title = str(
+                _meta_tmp.get("title_ja")
+                or _meta_tmp.get("title")
+                or script.get("video_title")
+                or ""
+            ).strip()
+            if _is_recent_topic_or_title_duplicate(config, topic_key=topic_key, title=candidate_title):
+                blocked = topic_key or candidate_title or "(unknown)"
+                llm_hint = (base_hint + f"\n중복으로 금지된 주제/제목: {blocked}\n비슷한 주제와 제목도 금지.").strip()
+                if growth_hint:
+                    llm_hint = (llm_hint + "\n\n" + growth_hint).strip()
+                if duplicate_guard_hint:
+                    llm_hint = (llm_hint + "\n\n" + duplicate_guard_hint).strip()
+                continue
             if topic_key and _is_used_topic(_load_used_topics(config.used_topics_path), topic_key):
                 llm_hint = (base_hint + f"\n이전 주제는 제외: {topic_key}").strip()
                 if growth_hint:
                     llm_hint = (llm_hint + "\n\n" + growth_hint).strip()
+                if duplicate_guard_hint:
+                    llm_hint = (llm_hint + "\n\n" + duplicate_guard_hint).strip()
                 continue
             break
+        _meta_tmp = script.get("meta", {}) if isinstance(script, dict) else {}
+        final_title = str(
+            _meta_tmp.get("title_ja")
+            or _meta_tmp.get("title")
+            or (script.get("video_title") if isinstance(script, dict) else "")
+            or ""
+        ).strip()
+        if _is_recent_topic_or_title_duplicate(config, topic_key=topic_key, title=final_title):
+            _reset_runtime_caches(config)
+            continue
         if topic_key and _is_used_topic(_load_used_topics(config.used_topics_path), topic_key):
             _reset_runtime_caches(config)
             continue
