@@ -2632,8 +2632,8 @@ def _draw_subtitle(
     else:
         progress = 0.0
 
-    # 폰트 크기: 1080px 기준 78px (일본어 가독성 위해 기존 72px에서 상향)
-    font_size = max(58, canvas_width // 14)
+    # 폰트 크기: 기존 대비 소폭 축소 (과도한 화면 점유 완화)
+    font_size = max(50, canvas_width // 16)
     font = _load_font(font_path, font_size)
     pad_x = int(canvas_width * 0.05)
     max_text_w = canvas_width - pad_x * 2
