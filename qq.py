@@ -3458,16 +3458,32 @@ def _draw_fixed_template_title(
     if bottom <= top:
         return image
     max_w = max(80, int((right - left) * 0.95))
-    font_size = max(26, int(canvas_width * 0.068))
-    lines: List[str] = []
-    for _ in range(8):
-        wrapped = _wrap_cjk_text(text, max_w, font_size)[:2]
-        if len(wrapped) <= 2:
-            lines = wrapped
+    # 요청사항: 제목은 한 줄, 더 작고 굵게
+    font_size = max(20, int(canvas_width * 0.052))
+    line = text.replace("\n", " ").strip()
+    for _ in range(18):
+        font = _load_font(font_path, font_size)
+        try:
+            lw = font.getbbox(line)[2]
+        except Exception:
+            lw = len(line) * font_size
+        if lw <= max_w or font_size <= 14:
             break
-        font_size -= 2
-    if not lines:
-        lines = _wrap_cjk_text(text, max_w, font_size)[:2]
+        font_size -= 1
+    # 길면 한 줄로 말줄임
+    if font_size <= 14:
+        while len(line) > 2:
+            font = _load_font(font_path, font_size)
+            probe = line + "…"
+            try:
+                lw = font.getbbox(probe)[2]
+            except Exception:
+                lw = len(probe) * font_size
+            if lw <= max_w:
+                line = probe
+                break
+            line = line[:-1].rstrip()
+    lines: List[str] = [line]
     draw_layer = Image.new("RGBA", image.size, (0, 0, 0, 0))
     draw = ImageDraw.Draw(draw_layer)
     font = _load_font(font_path, font_size)
@@ -3486,7 +3502,7 @@ def _draw_fixed_template_title(
             line,
             font=font,
             fill=(20, 20, 20, 245),
-            stroke_width=3,
+            stroke_width=4,
             stroke_fill=(255, 255, 255, 210),
         )
         y += line_h
@@ -3692,6 +3708,7 @@ def _draw_subtitle(
     t: Optional[float] = None,
     duration: Optional[float] = None,
     hold_ratio: float = 1.0,
+    box_top_override: Optional[int] = None,
 ) -> Image.Image:
     """자막을 YouTube Shorts 안전 영역(화면 60% 지점)에 렌더링.
     모바일 Shorts 하단 UI(제목·좋아요·댓글 등)가 화면 하단 ~30%를 덮으므로
@@ -3751,11 +3768,16 @@ def _draw_subtitle(
         secondary_line_h = secondary_base_size + 10
         section_gap = 0
         total_h = primary_line_h * len(primary_lines) + 20
-    # ── Shorts 안전 영역: 화면 55% 지점을 자막 중앙으로 ──
-    # 하단 UI 안전선: canvas_height * 0.68 이하
-    safe_bottom = int(canvas_height * 0.68)
-    box_y = safe_bottom - total_h
-    box_y = max(int(canvas_height * 0.45), box_y)  # 최소 45% 아래 유지
+    # ── 자막 위치 계산 ──
+    # 기본: Shorts 안전 영역 중심
+    # 오버라이드 제공 시: 지정된 top 위치 사용(사진 바로 아래 배치 용도)
+    if box_top_override is not None:
+        box_y = int(box_top_override)
+        box_y = max(0, min(canvas_height - total_h - 8, box_y))
+    else:
+        safe_bottom = int(canvas_height * 0.68)
+        box_y = safe_bottom - total_h
+        box_y = max(int(canvas_height * 0.45), box_y)  # 최소 45% 아래 유지
     # 스타일 결정 (reaction은 말풍선, japanese_variety는 일본 예능 스타일: 노란색+검정테두리)
     style_key = (style or "").strip().lower()
     is_reaction = style_key in {"reaction", "outro", "outro_loop"}
@@ -5638,6 +5660,16 @@ def render_video(
             _telemetry_log(f"고정 템플릿 사용: {os.path.basename(fixed_template_path)}", config)
         if fixed_template_layout:
             _telemetry_log("템플릿 레이아웃(JSON) 적용", config)
+    template_content_rect = (
+        _layout_rect_from_spec((fixed_template_layout or {}).get("content_box"), W, H)
+        if use_fixed_template_layout
+        else None
+    )
+    template_subtitle_rect = (
+        _layout_rect_from_spec((fixed_template_layout or {}).get("subtitle_box"), W, H)
+        if use_fixed_template_layout
+        else None
+    )
 
     # 경로 → VideoFileClip 캐시 (같은 파일 중복 오픈 방지)
     _vid_cache: Dict[str, Any] = {}
@@ -5742,6 +5774,27 @@ def render_video(
         _use_template = bool(getattr(config, "use_korean_template", False))
         _is_last_segment = index == (len(texts) - 1)
         _ending_asset = ending_asset_path if _is_last_segment else ""
+        _subtitle_top_override: Optional[int] = None
+        if use_fixed_template_layout:
+            if template_subtitle_rect:
+                _subtitle_top_override = int(template_subtitle_rect[1])
+            else:
+                if template_content_rect:
+                    c_left, c_top, c_right, c_bottom = template_content_rect
+                    rect_w = max(40, c_right - c_left)
+                    rect_h = max(40, c_bottom - c_top)
+                    side = min(rect_w, rect_h)
+                    media_top = c_top + max(0, (rect_h - side) // 2)
+                else:
+                    scale = float(getattr(config, "fixed_template_content_scale", 0.70) or 0.70)
+                    scale = max(0.45, min(0.9, scale))
+                    side = int(min(W, H) * scale)
+                    side = max(220, min(side, min(W, H) - 24))
+                    center_y_ratio = float(getattr(config, "fixed_template_center_y_ratio", 0.68) or 0.68)
+                    center_y = int(H * max(0.45, min(0.85, center_y_ratio)))
+                    media_top = max(int(H * 0.42), min(H - side - 12, center_y - side // 2))
+                margin = max(8, int(H * 0.012))
+                _subtitle_top_override = int(media_top + side + margin)
 
         def _render_frame(
             get_frame,
@@ -5755,6 +5808,7 @@ def render_video(
             __motion_cfg=_motion_cfg,
             __ending_asset=_ending_asset,
             __is_last_segment=_is_last_segment,
+            __subtitle_top_override=_subtitle_top_override,
         ):
             frame = get_frame(t)
             img = Image.fromarray(frame).convert("RGB")
@@ -5784,6 +5838,7 @@ def render_video(
                     t=t,
                     duration=__dur,
                     hold_ratio=_hold_ratio,
+                    box_top_override=__subtitle_top_override,
                 )
             if __is_last_segment and __ending_asset and os.path.exists(__ending_asset):
                 like_size = max(120, int(min(W, H) * 0.20))
