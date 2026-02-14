@@ -4,6 +4,7 @@ import json
 import ast
 import base64
 import mimetypes
+import glob
 import os
 import random
 import re
@@ -2522,6 +2523,37 @@ def _apply_ffmpeg_audio_filter(input_path: str, output_path: str, filter_expr: s
         return False
 
 
+def _enforce_audio_duration(audio_path: str, target_sec: float) -> bool:
+    if not audio_path or not os.path.exists(audio_path):
+        return False
+    target = max(0.2, float(target_sec))
+    out_path = os.path.join(
+        os.path.dirname(audio_path) or ".",
+        f"durfix_{os.path.basename(audio_path)}",
+    )
+    cmd = [
+        _resolve_ffmpeg_bin(),
+        "-y",
+        "-i",
+        audio_path,
+        "-af",
+        f"apad=pad_dur={target:.3f},atrim=0:{target:.3f}",
+        "-ac",
+        "2",
+        "-ar",
+        "44100",
+        out_path,
+    ]
+    try:
+        proc = subprocess.run(cmd, capture_output=True, text=True, timeout=180)
+        if proc.returncode != 0 or not os.path.exists(out_path):
+            return False
+        os.replace(out_path, audio_path)
+        return True
+    except Exception:
+        return False
+
+
 def _pick_boy_voice_fallback(config: AppConfig, current_voice: str = "") -> str:
     preferred = ["echo", "nova", "alloy", "fable", "shimmer", "onyx"]
     pool: List[str] = []
@@ -2652,6 +2684,7 @@ def tts_generate(
     """
     os.makedirs(os.path.dirname(output_path), exist_ok=True)
     if not segments:
+        _clear_tts_segment_meta(output_path)
         result = _tts_generate_single(config, text, output_path, voice=voice or "shimmer")
         result, baby_ok = _apply_baby_voice_filter(config, result)
         if getattr(config, "tts_baby_voice", True) and not baby_ok:
@@ -2668,6 +2701,7 @@ def tts_generate(
                 if str(seg.get("text", "") or "").strip()
             ]
         )
+        _clear_tts_segment_meta(output_path)
         result = _tts_generate_single(config, joined, output_path, voice=voice or "shimmer")
         result, baby_ok = _apply_baby_voice_filter(config, result)
         if getattr(config, "tts_baby_voice", True) and not baby_ok:
@@ -2686,6 +2720,7 @@ def tts_generate(
                 if str(seg.get("text", "") or "").strip()
             ]
         )
+        _clear_tts_segment_meta(output_path)
         result = _tts_generate_single(config, joined, output_path, voice=voice or "shimmer")
         result, baby_ok = _apply_baby_voice_filter(config, result)
         if getattr(config, "tts_baby_voice", True) and not baby_ok:
@@ -2696,6 +2731,8 @@ def tts_generate(
 
     temp_files: List[str] = []
     clips: List[Any] = []
+    seg_durations: List[float] = []
+    seg_roles: List[str] = []
     try:
         for idx, seg in enumerate(segments):
             line = str(seg.get("text", "") or "").strip()
@@ -2714,12 +2751,19 @@ def tts_generate(
                 _apply_boy_voice_filter(tmp_path)
             if role in {"asmr_tag", "asmr"}:
                 _apply_asmr_voice_filter(tmp_path)
+                _enforce_audio_duration(tmp_path, 1.0)
             temp_files.append(tmp_path)
-            clips.append(AudioFileClip(tmp_path))
+            clip_obj = AudioFileClip(tmp_path)
+            clips.append(clip_obj)
+            seg_durations.append(float(clip_obj.duration or 0.0))
+            seg_roles.append(role)
         if not clips:
             raise RuntimeError("TTS 세그먼트가 비어 있습니다.")
         merged = concatenate_audioclips(clips)
         merged.write_audiofile(output_path, fps=44100, nbytes=2, codec="mp3", logger=None)
+        final_total = float(merged.duration or sum(seg_durations) or 0.0)
+        norm_durations = _normalize_durations_to_total(seg_durations, final_total, len(seg_durations))
+        _write_tts_segment_meta(output_path, norm_durations, roles=seg_roles)
         try:
             merged.close()
         except Exception:
@@ -4415,6 +4459,68 @@ def _estimate_durations(texts: List[str], total_duration: float) -> List[float]:
     return [duration * scale for duration in adjusted]
 
 
+def _segment_meta_path(tts_audio_path: str) -> str:
+    return f"{tts_audio_path}.segments.json"
+
+
+def _write_tts_segment_meta(tts_audio_path: str, durations: List[float], roles: Optional[List[str]] = None) -> None:
+    try:
+        if not tts_audio_path:
+            return
+        payload = {
+            "durations": [float(max(0.0, d)) for d in (durations or [])],
+            "roles": [str(r) for r in (roles or [])],
+            "ts": datetime.utcnow().strftime("%Y-%m-%d %H:%M:%S"),
+        }
+        with open(_segment_meta_path(tts_audio_path), "w", encoding="utf-8") as file:
+            json.dump(payload, file, ensure_ascii=False, indent=2)
+    except Exception:
+        pass
+
+
+def _clear_tts_segment_meta(tts_audio_path: str) -> None:
+    try:
+        path = _segment_meta_path(tts_audio_path)
+        if os.path.exists(path):
+            os.remove(path)
+    except Exception:
+        pass
+
+
+def _normalize_durations_to_total(durations: List[float], total_duration: float, count: int) -> List[float]:
+    if count <= 0:
+        return []
+    base = [max(0.08, float(d)) for d in (durations or [])[:count]]
+    if len(base) < count:
+        base.extend([0.25] * (count - len(base)))
+    total = float(sum(base))
+    if total <= 0:
+        return _estimate_durations(["x"] * count, total_duration)
+    scale = max(0.001, float(total_duration) / total)
+    return [d * scale for d in base]
+
+
+def _resolve_segment_durations(
+    texts: List[str],
+    total_duration: float,
+    tts_audio_path: str,
+) -> List[float]:
+    count = len(texts or [])
+    if count <= 0:
+        return []
+    meta_path = _segment_meta_path(tts_audio_path)
+    if os.path.exists(meta_path):
+        try:
+            with open(meta_path, "r", encoding="utf-8") as file:
+                payload = json.load(file)
+            durations = payload.get("durations", []) if isinstance(payload, dict) else []
+            if isinstance(durations, list) and len(durations) >= count:
+                return _normalize_durations_to_total(durations, total_duration, count)
+        except Exception:
+            pass
+    return _estimate_durations(texts, total_duration)
+
+
 _HIGHLIGHT_CACHE: Dict[Tuple[str, int], float] = {}
 _RUN_NOTIFIER: Optional["RunTimelineNotifier"] = None
 _LAST_GENERATED_BG_TOPIC_KEY: str = ""
@@ -4572,7 +4678,7 @@ def render_video(
     max_duration = max(5.0, float(getattr(config, "max_video_duration_sec", 59.0)))
     if audio_clip.duration > max_duration:
         audio_clip = audio_clip.subclip(0, max_duration)
-    durations = _estimate_durations(texts, audio_clip.duration)
+    durations = _resolve_segment_durations(texts, float(audio_clip.duration or 0.0), tts_audio_path)
     caption_texts = caption_texts or texts
     clips = []
 
@@ -5064,6 +5170,7 @@ def _apply_primary_photo_override(
     config: AppConfig,
     bg_video_paths: List[Optional[str]],
     bg_image_paths: List[Optional[str]],
+    roles: Optional[List[str]] = None,
 ) -> Tuple[List[Optional[str]], List[Optional[str]]]:
     photo_path = _resolve_primary_photo_asset(config)
     if not photo_path or (not os.path.exists(photo_path)):
@@ -5076,11 +5183,19 @@ def _apply_primary_photo_override(
     if len(bg_image_paths) < max_len:
         placeholder = _ensure_placeholder_image(config)
         bg_image_paths = (bg_image_paths + [placeholder] * max_len)[:max_len]
-    # 3초 훅(첫 세그먼트) 이후부터 사용자 사진 사용
-    start_idx = 1 if max_len > 1 else 0
-    for idx in range(start_idx, max_len):
-        bg_video_paths[idx] = None
-        bg_image_paths[idx] = photo_path
+    role_list = [str(r or "").strip().lower() for r in (roles or [])]
+    target_idx = 0
+    if role_list:
+        for idx, role in enumerate(role_list):
+            if idx >= max_len:
+                break
+            if role not in {"asmr_tag", "asmr"}:
+                target_idx = idx
+                break
+    # 훅 세그먼트 1장만 사용자 사진으로, 이후는 연관 이미지 유지
+    if 0 <= target_idx < max_len:
+        bg_video_paths[target_idx] = None
+        bg_image_paths[target_idx] = photo_path
     return bg_video_paths, bg_image_paths
 
 
@@ -6340,7 +6455,7 @@ def _build_ass_subtitle_file(
         audio_clip.close()
         if duration <= 0.0:
             return False
-        seg_durations = _estimate_durations(texts, duration)
+        seg_durations = _resolve_segment_durations(texts, duration, tts_audio_path)
         hold_ratio = float(getattr(config, "caption_hold_ratio", 1.0) or 1.0)
         if not getattr(config, "caption_trim", False):
             hold_ratio = 1.0
@@ -6715,6 +6830,41 @@ def _reset_runtime_caches(config: AppConfig, deep: bool = False) -> None:
         removed_total += _clear_background_download_pool(config)
     if removed_total:
         _telemetry_log(f"런타임 캐시 초기화: {removed_total}개 파일 정리", config)
+
+
+def _pre_generation_bootstrap(config: AppConfig) -> None:
+    removed = 0
+    _reset_runtime_caches(config, deep=True)
+    try:
+        patterns = [
+            os.path.join(config.output_dir, "tts_*.mp3"),
+            os.path.join(config.output_dir, "telegram_preview_*.mp4"),
+            os.path.join(config.output_dir, "*.segments.json"),
+            os.path.join(config.output_dir, "tmp_*"),
+            os.path.join(config.assets_dir, "**/*cookie*.txt"),
+            os.path.join(config.assets_dir, "**/*cookies*.json"),
+            "/tmp/*cookie*.txt",
+            "/tmp/*cookies*.json",
+            "/tmp/yt_dlp_cookie*.txt",
+            "/tmp/auto_shorts_llm_output.log",
+            "/tmp/auto_shorts_render_error.log",
+        ]
+        for pattern in patterns:
+            for path in glob.glob(pattern, recursive=True):
+                if not os.path.exists(path):
+                    continue
+                try:
+                    if os.path.isdir(path):
+                        shutil.rmtree(path, ignore_errors=True)
+                    else:
+                        os.remove(path)
+                    removed += 1
+                except Exception:
+                    continue
+    except Exception:
+        pass
+    if removed:
+        _telemetry_log(f"사전 초기화 완료: 쿠키/임시저장소 {removed}개 정리", config)
 
 
 def _load_recent_run_records(config: AppConfig, limit: int = 120) -> List[Dict[str, Any]]:
@@ -7305,8 +7455,8 @@ def _auto_jp_flow(
             use_streamlit,
         )
         return False
+    _pre_generation_bootstrap(config)
     _set_run_notifier(RunTimelineNotifier(config, enabled=True))
-    _reset_runtime_caches(config, deep=bool(getattr(config, "force_fresh_media_on_start", False)))
     _notify("🚀", "AI 쇼츠 파이프라인 시작!")
     approved_for_publish = not config.require_approval
 
@@ -7320,13 +7470,14 @@ def _auto_jp_flow(
     meta = {}
     content_list = []
     topic_key = ""
-    growth_hint = _build_growth_feedback_hint(config)
+    # 1순위: 기존 로그 주제 제외
     duplicate_guard_hint = _build_topic_exclusion_hint(config, limit=24)
+    growth_hint = _build_growth_feedback_hint(config)
     base_hint = (extra_hint or "").strip()
-    if growth_hint:
-        base_hint = (base_hint + "\n\n" + growth_hint).strip() if base_hint else growth_hint
     if duplicate_guard_hint:
         base_hint = (base_hint + "\n\n" + duplicate_guard_hint).strip() if base_hint else duplicate_guard_hint
+    if growth_hint:
+        base_hint = (base_hint + "\n\n" + growth_hint).strip() if base_hint else growth_hint
     llm_hint = base_hint
     for attempt in range(3):
         try:
@@ -7502,7 +7653,7 @@ def _auto_jp_flow(
         bg_video_paths,
         bg_image_paths,
     )
-    bg_video_paths, bg_image_paths = _apply_primary_photo_override(config, bg_video_paths, bg_image_paths)
+    bg_video_paths, bg_image_paths = _apply_primary_photo_override(config, bg_video_paths, bg_image_paths, roles=roles)
     video_count = len([p for p in bg_video_paths if p])
     image_count = len([p for p in bg_image_paths if p])
     _telemetry_log(f"배경 적용 요약: mode={background_mode}, video_segments={video_count}, image_segments={image_count}", config)
@@ -8041,12 +8192,22 @@ def run_streamlit_app() -> None:
         if generate_button and manual_hint:
             _status_update(progress, status_box, 0.05, "대본 생성 중")
             try:
+                _pre_generation_bootstrap(config)
+                duplicate_guard_hint = _build_topic_exclusion_hint(config, limit=24)
                 growth_hint = _build_growth_feedback_hint(config)
                 hint = manual_hint.strip()
+                if duplicate_guard_hint:
+                    hint = (hint + "\n\n" + duplicate_guard_hint).strip()
                 if growth_hint:
                     hint = (hint + "\n\n" + growth_hint).strip()
                 script = generate_script_jp(config, extra_hint=hint)
                 script = _inject_majisho_asmr_beat(script, enabled=getattr(config, "enable_majisho_tag", True))
+                _meta_tmp = script.get("meta", {})
+                _topic_tmp = _pick_topic_key(_meta_tmp)
+                _title_tmp = str(_meta_tmp.get("title_ja") or _meta_tmp.get("title") or script.get("video_title") or "").strip()
+                if _is_recent_topic_or_title_duplicate(config, topic_key=_topic_tmp, title=_title_tmp):
+                    st.warning(f"로그 중복 주제/제목 감지로 중단: {_topic_tmp or _title_tmp}")
+                    return
                 st.session_state["script_jp"] = script
                 _status_update(progress, status_box, 0.2, "대본 생성 완료")
             except Exception as exc:
@@ -8218,7 +8379,7 @@ def run_streamlit_app() -> None:
                         bg_vids_manual,
                         bg_imgs_manual,
                     )
-                    bg_vids_manual, bg_imgs_manual = _apply_primary_photo_override(config, bg_vids_manual, bg_imgs_manual)
+                    bg_vids_manual, bg_imgs_manual = _apply_primary_photo_override(config, bg_vids_manual, bg_imgs_manual, roles=roles)
                     _telemetry_log(
                         f"수동 배경 요약: mode={background_mode}, video_segments={len([p for p in bg_vids_manual if p])}, image_segments={len([p for p in bg_imgs_manual if p])}",
                         config,
@@ -9075,18 +9236,18 @@ def run_streamlit_app() -> None:
 
 def run_batch(count: int, seed: str = "", beats: int = 7) -> None:
     config = load_config()
-    growth_hint = _build_growth_feedback_hint(config)
     duplicate_guard_hint = _build_topic_exclusion_hint(config, limit=24)
+    growth_hint = _build_growth_feedback_hint(config)
     base_hint = (seed or "").strip()
     for index in range(count):
-        _reset_runtime_caches(config, deep=bool(getattr(config, "force_fresh_media_on_start", False)))
+        _pre_generation_bootstrap(config)
         script = None
         topic_key = ""
         llm_hint = base_hint
-        if growth_hint:
-            llm_hint = (llm_hint + "\n\n" + growth_hint).strip() if llm_hint else growth_hint
         if duplicate_guard_hint:
             llm_hint = (llm_hint + "\n\n" + duplicate_guard_hint).strip() if llm_hint else duplicate_guard_hint
+        if growth_hint:
+            llm_hint = (llm_hint + "\n\n" + growth_hint).strip() if llm_hint else growth_hint
         for attempt in range(3):
             script = generate_script_jp(config, extra_hint=llm_hint)
             script = _inject_majisho_asmr_beat(script, enabled=getattr(config, "enable_majisho_tag", True))
@@ -9218,7 +9379,7 @@ def run_batch(count: int, seed: str = "", beats: int = 7) -> None:
             bg_vids_b,
             bg_imgs_b,
         )
-        bg_vids_b, bg_imgs_b = _apply_primary_photo_override(config, bg_vids_b, bg_imgs_b)
+        bg_vids_b, bg_imgs_b = _apply_primary_photo_override(config, bg_vids_b, bg_imgs_b, roles=roles)
         _telemetry_log(
             f"배치 배경 요약: mode={background_mode}, video_segments={len([p for p in bg_vids_b if p])}, image_segments={len([p for p in bg_imgs_b if p])}",
             config,
