@@ -3293,7 +3293,7 @@ def _open_bg_video(path: str, W: int, H: int) -> Optional["VideoFileClip"]:
 
 def render_video(
     config: AppConfig,
-    asset_paths: List[str],
+    asset_paths: Optional[List[str]],
     texts: List[str],
     tts_audio_path: str,
     output_path: str,
@@ -3351,7 +3351,9 @@ def render_video(
 
     vid_offset = 0.0
     for index, text in enumerate(texts):
-        asset_path = asset_paths[min(index, len(asset_paths) - 1)]
+        asset_path = ""
+        if asset_paths:
+            asset_path = asset_paths[min(index, len(asset_paths) - 1)]
         dur = durations[index]
         style = (
             caption_styles[index]
@@ -3408,7 +3410,8 @@ def render_video(
                 duration=__dur,
                 hold_ratio=_hold_ratio,
             )
-            img = _maybe_overlay_sticker(img, __asset, W, H, mode=__overlay, size=260)
+            if __asset and os.path.exists(__asset):
+                img = _maybe_overlay_sticker(img, __asset, W, H, mode=__overlay, size=260)
             return np.array(img)
 
         if bg_vid is not None:
@@ -3427,6 +3430,8 @@ def render_video(
                 if bg_image_paths and index < len(bg_image_paths) and bg_image_paths[index]
                 else asset_path
             )
+            if not bg_img_path or not os.path.exists(bg_img_path):
+                bg_img_path = _ensure_placeholder_image(config)
             bg_img = Image.open(bg_img_path).convert("RGB")
             bg_img = _fit_image_to_canvas(bg_img, (W, H))
             base_clip = ImageClip(np.array(bg_img)).set_duration(dur)
@@ -4775,7 +4780,6 @@ def _auto_jp_flow(
             use_streamlit,
         )
         return False
-    manifest_items = load_manifest(config.manifest_path)
     _notify("🚀", "AI 쇼츠 파이프라인 시작!")
 
     # ── 대본 생성 ─────────────────────────────────────────
@@ -4902,28 +4906,9 @@ def _auto_jp_flow(
             placeholder = _ensure_placeholder_image(config)
             bg_image_paths = [placeholder] * len(texts)
 
-    # ── 에셋 선택 ─────────────────────────────────────────
-    mood_to_cat = {
-        "mystery_suspense": "shocking",
-        "fast_exciting": "exciting",
-        "mystery": "shocking",
-        "suspense": "shocking",
-        "exciting": "exciting",
-        "informative": "humor",
-        "emotional": "touching",
-    }
-    content_category = mood_to_cat.get(mood, "exciting")
-    assets: List[str] = []
-    if manifest_items:
-        for _ in texts:
-            asset = pick_asset_by_category(manifest_items, content_category)
-            if not asset:
-                asset = random.choice(manifest_items)
-            assets.append(asset.path)
-    else:
-        # 에셋이 없어도 배경 이미지/영상만으로 렌더링 가능하도록 플레이스홀더 사용
-        placeholder = _ensure_placeholder_image(config)
-        assets = [placeholder] * len(texts)
+    # 에셋 스티커는 사용하지 않음 (배경 이미지/영상 중심)
+    placeholder = _ensure_placeholder_image(config)
+    assets: List[str] = [placeholder] * len(texts)
 
     # ── YouTube 설명 텍스트 ───────────────────────────────
     description_lines = [pinned, "", " ".join(hashtags)]
@@ -4948,20 +4933,6 @@ def _auto_jp_flow(
         f"━━━━━━━━━━━━━━━━━━━━\n"
         f"아래 버튼으로 응답해주세요."
     )
-
-    # 대표 에셋 미리보기 전송
-    if assets and os.path.exists(assets[0]):
-        try:
-            photo_api = f"https://api.telegram.org/bot{config.telegram_bot_token}/sendPhoto"
-            with open(assets[0], "rb") as photo_file:
-                requests.post(
-                    photo_api,
-                    data={"chat_id": config.telegram_admin_chat_id, "caption": "대표 사진 미리보기"},
-                    files={"photo": photo_file},
-                    timeout=30,
-                )
-        except Exception:
-            pass
 
     if config.require_approval:
         _telemetry_log("텔레그램 승인 요청 전송", config)
@@ -5024,7 +4995,7 @@ def _auto_jp_flow(
             bg_video_paths=bg_video_paths,
             bg_image_paths=bg_image_paths,
             caption_styles=caption_styles,
-            overlay_mode=config.asset_overlay_mode,
+            overlay_mode="off",
             caption_texts=caption_texts,
         )
         _telemetry_log("영상 렌더링 완료", config)
@@ -5040,8 +5011,6 @@ def _auto_jp_flow(
     if config.thumbnail_enabled:
         try:
             thumb_src = next((p for p in bg_image_paths if p), None)
-            if not thumb_src and assets:
-                thumb_src = assets[0]
             if not thumb_src:
                 thumb_src = _ensure_placeholder_image(config)
             thumb_path = os.path.join(config.output_dir, f"thumb_{now}.jpg")
@@ -5447,9 +5416,6 @@ def run_streamlit_app() -> None:
                 if not MOVIEPY_AVAILABLE:
                     st.error(f"MoviePy가 설치되지 않았습니다: {MOVIEPY_ERROR}")
                     return
-                if not manifest_items:
-                    st.warning("에셋이 없어도 배경 이미지로 렌더링을 진행합니다.")
-
                 # UI에서 편집한 텍스트로 texts 재구성
                 texts = [l.strip() for l in body_val.split("\n") if l.strip()]
                 if not texts:
@@ -5476,26 +5442,8 @@ def run_streamlit_app() -> None:
                     texts_ko_norm = _normalize_ko_lines(_texts_ko, texts)
                     pinned_ko = _meta.get("pinned_comment_ko", pinned_val)
 
-                    mood_to_cat = {
-                        "mystery_suspense": "shocking",
-                        "fast_exciting": "exciting",
-                        "mystery": "shocking",
-                        "suspense": "shocking",
-                        "exciting": "exciting",
-                        "informative": "humor",
-                        "emotional": "touching",
-                    }
-                    cat = mood_to_cat.get(mood, "exciting")
-                    assets = []
-                    if manifest_items:
-                        for _ in texts:
-                            asset = pick_asset_by_category(manifest_items, cat)
-                            if not asset:
-                                asset = random.choice(manifest_items)
-                            assets.append(asset.path)
-                    else:
-                        placeholder = _ensure_placeholder_image(config)
-                        assets = [placeholder] * len(texts)
+                    placeholder = _ensure_placeholder_image(config)
+                    assets = [placeholder] * len(texts)
 
                     # 배경 선택: Minecraft vs 이미지
                     bg_vids_manual: List[Optional[str]] = [None] * len(texts)
@@ -5557,7 +5505,7 @@ def run_streamlit_app() -> None:
                             bg_video_paths=bg_vids_manual,
                             bg_image_paths=bg_imgs_manual,
                             caption_styles=caption_styles,
-                            overlay_mode=config.asset_overlay_mode,
+                            overlay_mode="off",
                             caption_texts=caption_texts,
                         )
                         _telemetry_log("수동 렌더링 완료", config)
@@ -5570,8 +5518,6 @@ def run_streamlit_app() -> None:
                     if config.thumbnail_enabled:
                         try:
                             thumb_src = next((p for p in bg_imgs_manual if p), None)
-                            if not thumb_src and assets:
-                                thumb_src = assets[0]
                             if not thumb_src:
                                 thumb_src = _ensure_placeholder_image(config)
                             thumb_path = os.path.join(config.output_dir, f"thumb_{now}.jpg")
@@ -6278,7 +6224,6 @@ def run_streamlit_app() -> None:
 
 def run_batch(count: int, seed: str = "", beats: int = 7) -> None:
     config = load_config()
-    manifest_items = load_manifest(config.manifest_path)
     for index in range(count):
         script = None
         topic_key = ""
@@ -6300,26 +6245,8 @@ def run_batch(count: int, seed: str = "", beats: int = 7) -> None:
         caption_variant = _select_caption_variant(config)
         caption_styles = _apply_caption_variant(caption_styles, caption_variant)
         caption_texts = _get_caption_texts(config, texts)
-        mood_to_cat = {
-            "mystery_suspense": "shocking",
-            "fast_exciting": "exciting",
-            "mystery": "shocking",
-            "suspense": "shocking",
-            "exciting": "exciting",
-            "informative": "humor",
-            "emotional": "touching",
-        }
-        cat = mood_to_cat.get(mood, "exciting")
-        assets: List[str] = []
-        if manifest_items:
-            for _ in texts:
-                asset = pick_asset_by_category(manifest_items, cat)
-                if not asset:
-                    asset = random.choice(manifest_items)
-                assets.append(asset.path)
-        else:
-            placeholder = _ensure_placeholder_image(config)
-            assets = [placeholder] * len(texts)
+        placeholder = _ensure_placeholder_image(config)
+        assets: List[str] = [placeholder] * len(texts)
         now = datetime.utcnow().strftime("%Y%m%d_%H%M%S")
         audio_path = os.path.join(config.output_dir, f"tts_{now}_{index}.mp3")
         voice_id = pick_voice_id(config.openai_tts_voices, config.openai_tts_voice_preference)
@@ -6370,15 +6297,13 @@ def run_batch(count: int, seed: str = "", beats: int = 7) -> None:
             bg_video_paths=bg_vids_b,
             bg_image_paths=bg_imgs_b,
             caption_styles=caption_styles,
-            overlay_mode=config.asset_overlay_mode,
+            overlay_mode="off",
             caption_texts=caption_texts,
         )
         thumb_path = ""
         if config.thumbnail_enabled:
             try:
                 thumb_src = next((p for p in bg_imgs_b if p), None)
-                if not thumb_src and assets:
-                    thumb_src = assets[0]
                 if not thumb_src:
                     thumb_src = _ensure_placeholder_image(config)
                 thumb_path = os.path.join(config.output_dir, f"thumb_{now}_{index}.jpg")
