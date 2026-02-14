@@ -4899,6 +4899,57 @@ def _build_upload_report_ko(
     return "\n".join(lines)
 
 
+def _build_upload_caption_text(
+    title: str,
+    hashtags: List[str],
+    hook_text: str = "",
+) -> str:
+    """
+    업로드 캡션(설명) 본문 생성.
+    고정댓글 문구와 분리해 캡션에는 훅+해시태그만 넣는다.
+    """
+    first_line = (hook_text or "").strip() or (title or "").strip()
+    lines: List[str] = []
+    if first_line:
+        lines.append(first_line)
+    lines.append("")
+    if hashtags:
+        lines.append(_format_hashtags(hashtags))
+    return "\n".join(lines).strip()
+
+
+def _post_youtube_comment_after_upload(
+    config: AppConfig,
+    video_id: str,
+    pinned_base: str,
+    meta: Optional[Dict[str, Any]] = None,
+) -> bool:
+    """
+    캡션과 별도로 댓글(고정댓글 용도) 작성.
+    - 기본: pinned_base 그대로 댓글 작성
+    - 선택: ENABLE_PINNED_COMMENT + LINKTREE 설정 시 제품번호 CTA를 앞에 덧붙임
+    """
+    if not video_id:
+        return False
+    base_text = (pinned_base or "").strip()
+    if not base_text:
+        return False
+    comment_text = base_text
+    if getattr(config, "enable_pinned_comment", False) and config.linktree_url:
+        product_number = ""
+        if isinstance(meta, dict):
+            product_number = str(meta.get("product_number", "") or "").strip()
+        if not product_number:
+            product_number = _pick_product_number_for_short(config)
+        if product_number:
+            comment_text = build_pinned_comment_with_voting(
+                product_number,
+                config.linktree_url,
+                pinned_base=base_text,
+            )
+    return insert_video_comment(config, video_id, comment_text)
+
+
 def _read_json_file(path: str, default: Any) -> Any:
     if not path:
         return default
@@ -5311,8 +5362,11 @@ def _auto_jp_flow(
     assets: List[str] = [placeholder] * len(texts)
 
     # ── YouTube 설명 텍스트 ───────────────────────────────
-    description_lines = [pinned_bilingual, "", " ".join(hashtags)]
-    description = "\n".join(description_lines)
+    description = _build_upload_caption_text(
+        title=video_title,
+        hashtags=hashtags,
+        hook_text=texts[0] if texts else "",
+    )
 
     # ── 텔레그램 미리보기 (한글+일본어 대본) ─────────────
     body_preview = ""
@@ -5550,17 +5604,17 @@ def _auto_jp_flow(
                     _telemetry_log("썸네일 업로드 완료", config)
                 else:
                     _telemetry_log("썸네일 업로드 실패", config)
-            # 고정댓글 + 투표 유도 (제품번호, 링크트리)
-            if getattr(config, "enable_pinned_comment", False) and config.linktree_url and video_id:
-                product_number = meta.get("product_number", "") or _pick_product_number_for_short(config)
-                if product_number:
-                    comment_text = build_pinned_comment_with_voting(
-                        product_number, config.linktree_url, pinned_base=pinned_bilingual
-                    )
-                    if insert_video_comment(config, video_id, comment_text):
-                        _telemetry_log(f"고정댓글 작성 완료 (제품 {product_number})", config)
-                    else:
-                        _telemetry_log("고정댓글 작성 실패 (youtube.force-ssl scope 필요)", config)
+            # 캡션과 별도로 고정댓글(댓글) 작성
+            if video_id:
+                if _post_youtube_comment_after_upload(
+                    config=config,
+                    video_id=video_id,
+                    pinned_base=pinned_bilingual,
+                    meta=meta,
+                ):
+                    _telemetry_log("고정댓글 작성 완료", config)
+                else:
+                    _telemetry_log("고정댓글 작성 실패 (youtube.force-ssl scope 필요)", config)
     else:
         _status_update(progress, status_box, 0.85, "유튜브 업로드(스킵)")
         _telemetry_log("유튜브 업로드 스킵", config)
@@ -6026,6 +6080,11 @@ def run_streamlit_app() -> None:
                                 config.telegram_admin_chat_id,
                                 f"⏸ 수동 업로드 보류 처리됨.\n로컬 파일: {output_path}",
                             )
+                    caption_yt = _build_upload_caption_text(
+                        title=video_title_val,
+                        hashtags=hashtags_val.split(),
+                        hook_text=texts[0] if texts else "",
+                    )
                     video_id = ""
                     video_url = ""
                     upload_error = ""
@@ -6068,7 +6127,7 @@ def run_streamlit_app() -> None:
                             config=config,
                             file_path=output_path,
                             title=video_title_val,
-                            description=pinned_bilingual + "\n\n" + hashtags_val,
+                            description=caption_yt,
                             tags=hashtags_val.split(),
                         )
                         upload_error = str(result.get("error", "") or "").strip()
@@ -6088,7 +6147,7 @@ def run_streamlit_app() -> None:
                                 config,
                                 file_path=output_path,
                                 title=video_title_val,
-                                description=pinned_bilingual + "\n\n" + hashtags_val,
+                                description=caption_yt,
                                 tags=hashtags_val.split(),
                                 thumb_path=thumb_path,
                                 error=upload_error,
@@ -6099,13 +6158,13 @@ def run_streamlit_app() -> None:
                                     _telemetry_log("수동 썸네일 업로드 완료", config)
                                 else:
                                     _telemetry_log("수동 썸네일 업로드 실패", config)
-                            if getattr(config, "enable_pinned_comment", False) and config.linktree_url and video_id:
-                                product_number = _meta.get("product_number", "") or _pick_product_number_for_short(config)
-                                if product_number:
-                                    comment_text = build_pinned_comment_with_voting(
-                                        product_number, config.linktree_url, pinned_base=pinned_bilingual
-                                    )
-                                    insert_video_comment(config, video_id, comment_text)
+                            if video_id:
+                                _post_youtube_comment_after_upload(
+                                    config=config,
+                                    video_id=video_id,
+                                    pinned_base=pinned_bilingual,
+                                    meta=_meta,
+                                )
                     else:
                         if not should_upload:
                             _status_update(progress, status_box, 0.85, "승인 보류(업로드 안 함)")
@@ -6878,6 +6937,11 @@ def run_batch(count: int, seed: str = "", beats: int = 7) -> None:
         _pinned_b = _meta_b.get("pinned_comment", script.get("pinned_comment", ""))
         _pinned_ko_b = _to_ko_literal_tone(_meta_b.get("pinned_comment_ko", _pinned_b))
         _pinned_bilingual_b = _compose_bilingual_text(_pinned_b, _pinned_ko_b)
+        _caption_b = _build_upload_caption_text(
+            title=_title_b,
+            hashtags=_hashtags_b,
+            hook_text=texts[0] if texts else "",
+        )
         upload_error = ""
         upload_reason = ""
         use_instagram = (
@@ -6913,7 +6977,7 @@ def run_batch(count: int, seed: str = "", beats: int = 7) -> None:
                 config=config,
                 file_path=output_path,
                 title=_title_b,
-                description=_pinned_bilingual_b + "\n\n" + " ".join(_hashtags_b),
+                description=_caption_b,
                 tags=_hashtags_b,
             )
             upload_error = str(result.get("error", "") or "").strip()
@@ -6933,7 +6997,7 @@ def run_batch(count: int, seed: str = "", beats: int = 7) -> None:
                     config,
                     file_path=output_path,
                     title=_title_b,
-                    description=_pinned_bilingual_b + "\n\n" + " ".join(_hashtags_b),
+                    description=_caption_b,
                     tags=_hashtags_b,
                     thumb_path=thumb_path,
                     error=upload_error,
@@ -6941,13 +7005,13 @@ def run_batch(count: int, seed: str = "", beats: int = 7) -> None:
             else:
                 if thumb_path and video_id:
                     set_video_thumbnail(config, video_id, thumb_path)
-                if getattr(config, "enable_pinned_comment", False) and config.linktree_url and video_id:
-                    product_number = _meta_b.get("product_number", "") or _pick_product_number_for_short(config)
-                    if product_number:
-                        comment_text = build_pinned_comment_with_voting(
-                            product_number, config.linktree_url, pinned_base=_pinned_bilingual_b
-                        )
-                        insert_video_comment(config, video_id, comment_text)
+                if video_id:
+                    _post_youtube_comment_after_upload(
+                        config=config,
+                        video_id=video_id,
+                        pinned_base=_pinned_bilingual_b,
+                        meta=_meta_b,
+                    )
         elif not should_upload:
             upload_error = "approval_hold"
             upload_reason = "approval_hold"
