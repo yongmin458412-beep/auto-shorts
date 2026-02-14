@@ -480,6 +480,7 @@ class AppConfig:
     used_topics_path: str
     generated_bg_dir: str
     use_generated_bg_priority: bool
+    primary_photo_path: str
     telegram_bot_token: str
     telegram_admin_chat_id: str
     telegram_timeout_sec: int
@@ -502,8 +503,11 @@ class AppConfig:
     thumbnail_max_chars: int
     use_minecraft_parkour_bg: bool
     tts_provider: str
+    tts_force_cute_voice: bool
     tts_baby_voice: bool
     tts_baby_pitch: float
+    force_fresh_media_on_start: bool
+    force_fresh_minecraft_download: bool
     enable_majisho_tag: bool
     majisho_asset_path: str
     use_japanese_caption_style: bool
@@ -586,7 +590,7 @@ def load_config() -> AppConfig:
         openai_model=_get_secret("OPENAI_MODEL", "gpt-4.1-mini") or "gpt-4.1-mini",
         openai_vision_model=_get_secret("OPENAI_VISION_MODEL", "") or "",
         openai_tts_voices=_get_list("OPENAI_TTS_VOICES")
-        or ([v for v in [_get_secret("OPENAI_TTS_VOICE", "alloy")] if v]),
+        or ([v for v in [_get_secret("OPENAI_TTS_VOICE", "shimmer")] if v]),
         openai_tts_voice_preference=_get_list("OPENAI_TTS_VOICE_PREFERENCE"),
         openai_tts_model=_get_secret("OPENAI_TTS_MODEL", "tts-1") or "tts-1",
         sheet_id=_get_secret("SHEET_ID", "") or "",
@@ -628,6 +632,7 @@ def load_config() -> AppConfig:
         used_topics_path=used_topics_path,
         generated_bg_dir=_get_secret("GENERATED_BG_DIR", "data/assets/generated_bg") or "data/assets/generated_bg",
         use_generated_bg_priority=_get_bool("USE_GENERATED_BG_PRIORITY", False),
+        primary_photo_path=(_get_secret("PRIMARY_PHOTO_PATH", "") or "").strip(),
         telegram_bot_token=_get_secret("TELEGRAM_BOT_TOKEN", "") or "",
         telegram_admin_chat_id=_get_secret("TELEGRAM_ADMIN_CHAT_ID", "") or "",
         telegram_timeout_sec=int(_get_secret("TELEGRAM_TIMEOUT_SEC", "600") or 600),
@@ -650,8 +655,11 @@ def load_config() -> AppConfig:
         thumbnail_max_chars=int(_get_secret("THUMBNAIL_MAX_CHARS", "22") or 22),
         use_minecraft_parkour_bg=_get_bool("USE_MINECRAFT_PARKOUR_BG", True),
         tts_provider=(_get_secret("TTS_PROVIDER", "") or "openai").strip().lower() or "openai",
+        tts_force_cute_voice=_get_bool("TTS_FORCE_CUTE_VOICE", True),
         tts_baby_voice=_get_bool("TTS_BABY_VOICE", True),
-        tts_baby_pitch=float(_get_secret("TTS_BABY_PITCH", "1.14") or 1.14),
+        tts_baby_pitch=float(_get_secret("TTS_BABY_PITCH", "1.20") or 1.20),
+        force_fresh_media_on_start=_get_bool("FORCE_FRESH_MEDIA_ON_START", True),
+        force_fresh_minecraft_download=_get_bool("FORCE_FRESH_MINECRAFT_DOWNLOAD", True),
         enable_majisho_tag=_get_bool("ENABLE_MAJISHO_TAG", True),
         majisho_asset_path=(
             _get_secret("MAJISHO_ASSET_PATH", "data/assets/branding/majisho.png")
@@ -2231,16 +2239,32 @@ def match_bgm_by_mood(config: AppConfig, mood: str) -> Optional[str]:
 
 # 일본 쇼츠용 기본 우선순위: 귀엽고 밝은 톤
 ENERGETIC_VOICE_ORDER = ["shimmer", "nova", "alloy", "echo", "fable", "onyx"]
+CUTE_VOICE_ORDER = ["shimmer", "nova", "alloy", "echo", "fable", "onyx"]
 
 
-def pick_voice_id(voice_ids: List[str], preference: Optional[List[str]] = None) -> str:
-    if not voice_ids:
-        return ""
-    pref_list = [v for v in (preference or []) if v in voice_ids]
+def pick_voice_id(
+    voice_ids: List[str],
+    preference: Optional[List[str]] = None,
+    force_cute: bool = False,
+) -> str:
+    clean_voice_ids = [str(v).strip() for v in (voice_ids or []) if str(v).strip()]
+    if not clean_voice_ids:
+        return "shimmer" if force_cute else ""
+    pref_list = [str(v).strip() for v in (preference or []) if str(v).strip() in clean_voice_ids]
+    if force_cute:
+        for v in CUTE_VOICE_ORDER:
+            if v in pref_list:
+                return v
+        for v in CUTE_VOICE_ORDER:
+            if v in clean_voice_ids:
+                return v
+        if pref_list:
+            return pref_list[0]
+        return clean_voice_ids[0]
     if pref_list:
         return random.choice(pref_list)
-    energetic = [v for v in ENERGETIC_VOICE_ORDER if v in voice_ids]
-    return random.choice(energetic or voice_ids)
+    energetic = [v for v in ENERGETIC_VOICE_ORDER if v in clean_voice_ids]
+    return random.choice(energetic or clean_voice_ids)
 
 
 ALLOWED_REACTION_TAGS = [
@@ -2500,7 +2524,7 @@ def _apply_ffmpeg_audio_filter(input_path: str, output_path: str, filter_expr: s
 def _apply_baby_voice_filter(config: AppConfig, audio_path: str) -> str:
     if not getattr(config, "tts_baby_voice", True):
         return audio_path
-    pitch = float(getattr(config, "tts_baby_pitch", 1.14) or 1.14)
+    pitch = float(getattr(config, "tts_baby_pitch", 1.20) or 1.20)
     pitch = max(1.02, min(pitch, 1.35))
     tempo = max(0.5, min(2.0, 1.0 / pitch))
     filtered = os.path.join(
@@ -2515,7 +2539,17 @@ def _apply_baby_voice_filter(config: AppConfig, audio_path: str) -> str:
         "treble=g=2,"
         "volume=1.08"
     )
-    if _apply_ffmpeg_audio_filter(audio_path, filtered, filt):
+    applied = _apply_ffmpeg_audio_filter(audio_path, filtered, filt)
+    if (not applied):
+        # 환경에 따라 atempo/treble 체인이 실패할 수 있어 단순 체인으로 재시도
+        fallback_filt = (
+            f"asetrate=44100*{pitch:.4f},"
+            "aresample=44100,"
+            "highpass=f=120,"
+            "volume=1.05"
+        )
+        applied = _apply_ffmpeg_audio_filter(audio_path, filtered, fallback_filt)
+    if applied:
         try:
             os.replace(filtered, audio_path)
         except Exception:
@@ -4008,6 +4042,7 @@ def fetch_youtube_minecraft_parkour_video(
     canvas_h: int = 1920,
     target_count: int = 3,  # 최대 확보할 파일 수 (세그먼트 다양화용)
     config: Optional["AppConfig"] = None,
+    force_fresh: bool = False,
 ) -> Optional[str]:
     """
     YouTube에서 Minecraft Parkour No Copyright 영상을 yt-dlp로 다운로드합니다.
@@ -4031,6 +4066,14 @@ def fetch_youtube_minecraft_parkour_video(
         if f.lower().endswith((".mp4", ".mkv", ".webm"))
         and os.path.getsize(os.path.join(output_dir, f)) > 500000  # 500KB 이상만 유효
     ]
+    if force_fresh and existing_files:
+        for path in list(existing_files):
+            try:
+                os.remove(path)
+            except Exception:
+                continue
+        _mc_log(f"Minecraft 배경 강제 초기화: {len(existing_files)}개 삭제")
+        existing_files = []
     if len(existing_files) >= target_count:
         # 이미 충분한 파일이 있으면 랜덤 반환
         _mc_log(f"Minecraft 배경 재사용: 기존 {len(existing_files)}개 파일")
@@ -4818,6 +4861,27 @@ def _get_generated_bg_paths(
     if topic_norm:
         _LAST_GENERATED_BG_TOPIC_KEY = topic_norm
     return repeated
+
+
+def _apply_primary_photo_override(
+    config: AppConfig,
+    bg_video_paths: List[Optional[str]],
+    bg_image_paths: List[Optional[str]],
+) -> Tuple[List[Optional[str]], List[Optional[str]]]:
+    photo_path = str(getattr(config, "primary_photo_path", "") or "").strip()
+    if not photo_path or (not os.path.exists(photo_path)):
+        return bg_video_paths, bg_image_paths
+    if not bg_video_paths and not bg_image_paths:
+        return bg_video_paths, bg_image_paths
+    max_len = max(len(bg_video_paths), len(bg_image_paths), 1)
+    if len(bg_video_paths) < max_len:
+        bg_video_paths = (bg_video_paths + [None] * max_len)[:max_len]
+    if len(bg_image_paths) < max_len:
+        placeholder = _ensure_placeholder_image(config)
+        bg_image_paths = (bg_image_paths + [placeholder] * max_len)[:max_len]
+    bg_video_paths[0] = None
+    bg_image_paths[0] = photo_path
+    return bg_video_paths, bg_image_paths
 
 
 def pick_bgm_path(config: AppConfig) -> Optional[str]:
@@ -6403,7 +6467,30 @@ def _clear_dir_cache(path: str, allowed_ext: Optional[Tuple[str, ...]] = None) -
     return removed
 
 
-def _reset_runtime_caches(config: AppConfig) -> None:
+def _clear_background_download_pool(config: AppConfig) -> int:
+    backgrounds_dir = os.path.join(config.assets_dir, "backgrounds")
+    if not backgrounds_dir or not os.path.exists(backgrounds_dir):
+        return 0
+    removed = 0
+    prefixes = ("minecraft_parkour_", "pixabay_bg_", "pexels_bg_", "context_bg_", "yt_bg_")
+    allowed_ext = (".mp4", ".mkv", ".webm", ".jpg", ".jpeg", ".png", ".webp")
+    try:
+        for name in os.listdir(backgrounds_dir):
+            lower = name.lower()
+            if (not lower.endswith(allowed_ext)) or (not name.startswith(prefixes)):
+                continue
+            full = os.path.join(backgrounds_dir, name)
+            try:
+                os.remove(full)
+                removed += 1
+            except Exception:
+                continue
+    except Exception:
+        return removed
+    return removed
+
+
+def _reset_runtime_caches(config: AppConfig, deep: bool = False) -> None:
     global _HIGHLIGHT_CACHE, _LAST_GENERATED_BG_TOPIC_KEY
     _HIGHLIGHT_CACHE.clear()
     _LAST_GENERATED_BG_TOPIC_KEY = ""
@@ -6424,6 +6511,8 @@ def _reset_runtime_caches(config: AppConfig) -> None:
             d,
             allowed_ext=(".jpg", ".jpeg", ".png", ".webp", ".mp4", ".mkv", ".webm", ".ass"),
         )
+    if deep:
+        removed_total += _clear_background_download_pool(config)
     if removed_total:
         _telemetry_log(f"런타임 캐시 초기화: {removed_total}개 파일 정리", config)
 
@@ -6912,7 +7001,7 @@ def _auto_jp_flow(
         )
         return False
     _set_run_notifier(RunTimelineNotifier(config, enabled=True))
-    _reset_runtime_caches(config)
+    _reset_runtime_caches(config, deep=bool(getattr(config, "force_fresh_media_on_start", False)))
     _notify("🚀", "AI 쇼츠 파이프라인 시작!")
     approved_for_publish = not config.require_approval
 
@@ -7035,6 +7124,7 @@ def _auto_jp_flow(
             config.width,
             config.height,
             config=config,
+            force_fresh=bool(getattr(config, "force_fresh_minecraft_download", False)),
         )
         if mc_path and _is_video_readable(mc_path):
             bg_video_paths = [mc_path] * len(texts)
@@ -7070,6 +7160,7 @@ def _auto_jp_flow(
         else:
             placeholder = _ensure_placeholder_image(config)
             bg_image_paths = [placeholder] * len(texts)
+    bg_video_paths, bg_image_paths = _apply_primary_photo_override(config, bg_video_paths, bg_image_paths)
     video_count = len([p for p in bg_video_paths if p])
     image_count = len([p for p in bg_image_paths if p])
     _telemetry_log(f"배경 적용 요약: mode={background_mode}, video_segments={video_count}, image_segments={image_count}", config)
@@ -7096,7 +7187,11 @@ def _auto_jp_flow(
     # ── TTS 생성 ─────────────────────────────────────────
     now = datetime.utcnow().strftime("%Y%m%d_%H%M%S")
     audio_path = os.path.join(config.output_dir, f"tts_{now}.mp3")
-    voice_id = pick_voice_id(config.openai_tts_voices, config.openai_tts_voice_preference)
+    voice_id = pick_voice_id(
+        config.openai_tts_voices,
+        config.openai_tts_voice_preference,
+        force_cute=bool(getattr(config, "tts_force_cute_voice", False) or getattr(config, "tts_baby_voice", False)),
+    )
     _telemetry_log("TTS 생성 시작", config)
     _status_update(progress, status_box, 0.50, "TTS 생성 중")
     _notify("🎤", "제작팀 작업 시작", "OpenAI TTS야, 이걸 활기찬 목소리로 녹음해줘")
@@ -7684,7 +7779,7 @@ def run_streamlit_app() -> None:
                 if not MOVIEPY_AVAILABLE:
                     st.error(f"MoviePy가 설치되지 않았습니다: {MOVIEPY_ERROR}")
                     return
-                _reset_runtime_caches(config)
+                _reset_runtime_caches(config, deep=bool(getattr(config, "force_fresh_media_on_start", False)))
                 # UI에서 편집한 텍스트로 texts 재구성
                 texts = [l.strip() for l in body_val.split("\n") if l.strip()]
                 if not texts:
@@ -7747,6 +7842,7 @@ def run_streamlit_app() -> None:
                             config.width,
                             config.height,
                             config=config,
+                            force_fresh=bool(getattr(config, "force_fresh_minecraft_download", False)),
                         )
                         if _mc_m and _is_video_readable(_mc_m):
                             bg_vids_manual = [_mc_m] * len(texts)
@@ -7778,6 +7874,7 @@ def run_streamlit_app() -> None:
                         else:
                             placeholder = _ensure_placeholder_image(config)
                             bg_imgs_manual = [placeholder] * len(texts)
+                    bg_vids_manual, bg_imgs_manual = _apply_primary_photo_override(config, bg_vids_manual, bg_imgs_manual)
                     _telemetry_log(
                         f"수동 배경 요약: mode={background_mode}, video_segments={len([p for p in bg_vids_manual if p])}, image_segments={len([p for p in bg_imgs_manual if p])}",
                         config,
@@ -7791,7 +7888,11 @@ def run_streamlit_app() -> None:
                     _status_update(progress, status_box, 0.3, "TTS 생성")
                     now = datetime.utcnow().strftime("%Y%m%d_%H%M%S")
                     audio_path = os.path.join(config.output_dir, f"tts_{now}.mp3")
-                    voice_id = pick_voice_id(config.openai_tts_voices, config.openai_tts_voice_preference)
+                    voice_id = pick_voice_id(
+                        config.openai_tts_voices,
+                        config.openai_tts_voice_preference,
+                        force_cute=bool(getattr(config, "tts_force_cute_voice", False) or getattr(config, "tts_baby_voice", False)),
+                    )
                     tts_generate(
                         config,
                         "。".join(texts),
@@ -8639,7 +8740,7 @@ def run_batch(count: int, seed: str = "", beats: int = 7) -> None:
     growth_hint = _build_growth_feedback_hint(config)
     base_hint = (seed or "").strip()
     for index in range(count):
-        _reset_runtime_caches(config)
+        _reset_runtime_caches(config, deep=bool(getattr(config, "force_fresh_media_on_start", False)))
         script = None
         topic_key = ""
         llm_hint = base_hint
@@ -8679,7 +8780,11 @@ def run_batch(count: int, seed: str = "", beats: int = 7) -> None:
         assets: List[str] = [placeholder] * len(texts)
         now = datetime.utcnow().strftime("%Y%m%d_%H%M%S")
         audio_path = os.path.join(config.output_dir, f"tts_{now}_{index}.mp3")
-        voice_id = pick_voice_id(config.openai_tts_voices, config.openai_tts_voice_preference)
+        voice_id = pick_voice_id(
+            config.openai_tts_voices,
+            config.openai_tts_voice_preference,
+            force_cute=bool(getattr(config, "tts_force_cute_voice", False) or getattr(config, "tts_baby_voice", False)),
+        )
         tts_generate(
             config,
             "。".join(texts),
@@ -8713,6 +8818,7 @@ def run_batch(count: int, seed: str = "", beats: int = 7) -> None:
                 config.width,
                 config.height,
                 config=config,
+                force_fresh=bool(getattr(config, "force_fresh_minecraft_download", False)),
             )
             if _mc_b and _is_video_readable(_mc_b):
                 bg_vids_b = [_mc_b] * len(texts)
@@ -8740,6 +8846,7 @@ def run_batch(count: int, seed: str = "", beats: int = 7) -> None:
             else:
                 placeholder = _ensure_placeholder_image(config)
                 bg_imgs_b = [placeholder] * len(texts)
+        bg_vids_b, bg_imgs_b = _apply_primary_photo_override(config, bg_vids_b, bg_imgs_b)
         _telemetry_log(
             f"배치 배경 요약: mode={background_mode}, video_segments={len([p for p in bg_vids_b if p])}, image_segments={len([p for p in bg_imgs_b if p])}",
             config,
