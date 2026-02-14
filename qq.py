@@ -1534,6 +1534,11 @@ def generate_script_jp(
         # story_timeline 정렬 및 검증
         normalized: List[Dict[str, Any]] = []
         allowed_roles = {"hook", "problem", "failure", "success", "point", "reaction"}
+        forced_brand_hint = _detect_brand_query_hint(
+            str(meta.get("topic_en", "") or meta.get("title_ja", "") or ""),
+            str(meta.get("title_ja", "") or ""),
+            "",
+        )
         order_map = {
             "hook": 1,
             "problem": 2,
@@ -1571,7 +1576,13 @@ def generate_script_jp(
             script_ko = _to_ko_literal_tone(script_ko)
             visual_kw = raw.get("visual_search_keyword") or raw.get("visual_keyword_en") or ""
             visual_kw = str(visual_kw).strip()
-            visual_kw = _refine_visual_keyword(visual_kw, meta.get("topic_en", ""), role, script_ja)
+            visual_kw = _refine_visual_keyword(
+                visual_kw,
+                meta.get("topic_en", ""),
+                role,
+                script_ja,
+                forced_brand_hint=forced_brand_hint,
+            )
             normalized.append(
                 {
                     "order": order_val,
@@ -1667,6 +1678,8 @@ def _script_to_visual_keywords(script: Dict[str, Any]) -> List[str]:
     timeline = _get_story_timeline(script)
     if timeline:
         topic = str((script.get("meta", {}) or {}).get("topic_en", "") or "")
+        title = str((script.get("meta", {}) or {}).get("title_ja", "") or "")
+        forced_brand_hint = _detect_brand_query_hint(topic, title, "")
         keywords: List[str] = []
         for item in timeline:
             role = str(item.get("role", "") or "")
@@ -1676,7 +1689,15 @@ def _script_to_visual_keywords(script: Dict[str, Any]) -> List[str]:
                 or item.get("visual_keyword_en")
                 or "archival newspaper headline close up"
             )
-            keywords.append(_refine_visual_keyword(str(raw_kw), topic, role, script_ja))
+            keywords.append(
+                _refine_visual_keyword(
+                    str(raw_kw),
+                    topic,
+                    role,
+                    script_ja,
+                    forced_brand_hint=forced_brand_hint,
+                )
+            )
         return keywords
     # 구 스키마 fallback — 전체 공통 키워드 반복
     default_kw = script.get("bg_search_query", "archival newspaper headline close up")
@@ -1875,6 +1896,7 @@ _BRAND_QUERY_HINTS: List[Tuple[re.Pattern[str], str]] = [
     (re.compile(r"(nike|ナイキ)", re.IGNORECASE), "Nike logo sneaker store display"),
     (re.compile(r"(instagram|インスタ|인스타)", re.IGNORECASE), "Instagram logo smartphone app screen"),
     (re.compile(r"(tiktok|틱톡|ティックトック|douyin)", re.IGNORECASE), "TikTok logo app icon smartphone screen"),
+    (re.compile(r"(netflix|넷플릭스|ネトフリ|ネットフリックス)", re.IGNORECASE), "Netflix logo red N app icon streaming interface"),
     (re.compile(r"(ramen|ラーメン|라면)", re.IGNORECASE), "ramen noodles bowl close up"),
 ]
 
@@ -1895,11 +1917,17 @@ def _detect_brand_query_hint(topic_en: str, script_ja: str, keyword: str) -> str
     return ""
 
 
-def _refine_visual_keyword(keyword: str, topic_en: str, role: str, script_ja: str) -> str:
+def _refine_visual_keyword(
+    keyword: str,
+    topic_en: str,
+    role: str,
+    script_ja: str,
+    forced_brand_hint: str = "",
+) -> str:
     kw = (keyword or "").strip()
     topic = (topic_en or "").strip()
     role_hint = _ROLE_QUERY_HINTS.get(role, "dramatic close up")
-    brand_hint = _detect_brand_query_hint(topic, script_ja, kw)
+    brand_hint = forced_brand_hint.strip() or _detect_brand_query_hint(topic, script_ja, kw)
     if brand_hint:
         return f"{brand_hint} {role_hint}".strip()
 
@@ -2907,8 +2935,10 @@ def _draw_subtitle(
         secondary_lines = _wrap_cjk_text(ko_text, max_text_w, secondary_base_size)[:3]
         primary_line_h = font_size + 12
         secondary_line_h = secondary_base_size + 10
+        section_gap = 18 if secondary_lines else 0
         total_h = (
             primary_line_h * len(primary_lines)
+            + section_gap
             + secondary_line_h * len(secondary_lines)
             + 24
         )
@@ -2918,6 +2948,7 @@ def _draw_subtitle(
         secondary_base_size = max(30, int(font_size * 0.64))
         primary_line_h = font_size + 14
         secondary_line_h = secondary_base_size + 10
+        section_gap = 0
         total_h = primary_line_h * len(primary_lines) + 20
     # ── Shorts 안전 영역: 화면 55% 지점을 자막 중앙으로 ──
     # 하단 UI 안전선: canvas_height * 0.68 이하
@@ -3052,13 +3083,19 @@ def _draw_subtitle(
         y += primary_line_h
 
     if secondary_lines:
+        # JP/KR 구분선
+        div_y = y + max(2, int(canvas_height * 0.002))
+        div_x1 = pad_x + 24
+        div_x2 = canvas_width - pad_x - 24
+        draw.line([(div_x1, div_y), (div_x2, div_y)], fill=(180, 220, 255, int(180 * alpha_mul)), width=2)
+        y += section_gap
         secondary_fill = (230, 230, 230)
         secondary_stroke = (0, 0, 0)
         secondary_stroke_width = max(2, stroke_width - 2)
         if is_reaction:
             secondary_fill = (45, 35, 0)
         elif is_japanese_variety:
-            secondary_fill = (255, 255, 255)
+            secondary_fill = (210, 245, 255)
             secondary_stroke_width = max(2, stroke_width - 3)
         for line in secondary_lines:
             scaled_size = max(16, int(secondary_base_size * scale))
@@ -3213,6 +3250,18 @@ def _build_search_query_candidates(query: str) -> List[str]:
         if item and item not in uniq:
             uniq.append(item)
     return uniq
+
+
+def _brand_fallback_queries_from_keyword(keyword: str) -> List[str]:
+    hint = _detect_brand_query_hint(keyword, keyword, keyword)
+    if not hint:
+        return []
+    # 브랜드 소재는 로고/앱 아이콘 중심으로 재시도해서 엉뚱한 이미지 방지
+    return [
+        hint,
+        f"{hint} close up",
+        f"{hint} official logo",
+    ]
 
 
 def _score_pixabay_hit(hit: Dict[str, Any], query_tokens: List[str]) -> int:
@@ -3397,7 +3446,9 @@ def fetch_segment_images(
             if path:
                 break
         if not path:
-            for fbq in _GLOBAL_BG_FALLBACK_QUERIES:
+            brand_fallbacks = _brand_fallback_queries_from_keyword(kw)
+            fallback_pool = brand_fallbacks if brand_fallbacks else _GLOBAL_BG_FALLBACK_QUERIES
+            for fbq in fallback_pool:
                 if config.pixabay_api_key:
                     path = fetch_pixabay_image(fbq, config.pixabay_api_key, "/tmp/pixabay_images")
                 if not path and config.pexels_api_key:
@@ -5430,7 +5481,7 @@ def _build_bilingual_caption_texts(
         ja_line = _split_caption_chunks(
             re.sub(r"\s+", " ", str(ja_src or "").strip()),
             max_chars=max_chars,
-            max_lines=3,
+            max_lines=2,
         )
         ko_line = _split_caption_chunks(
             re.sub(r"\s+", " ", str(ko_src or "").strip()),
@@ -5459,7 +5510,7 @@ def _guess_ass_font_name(font_path: str) -> str:
 
 def _ass_escape_text(text: str) -> str:
     value = str(text or "")
-    value = value.replace(_CAPTION_LANG_SEP, "\n")
+    value = value.replace(_CAPTION_LANG_SEP, "\n\n")
     value = value.replace("\\", "\\\\")
     value = value.replace("{", r"\{").replace("}", r"\}")
     return value.replace("\n", r"\N")
@@ -5548,7 +5599,7 @@ def _build_ass_subtitle_file(
             text_raw = caption_texts[idx] if idx < len(caption_texts) else texts[idx]
             if _CAPTION_LANG_SEP in str(text_raw):
                 ja_raw, ko_raw = str(text_raw).split(_CAPTION_LANG_SEP, 1)
-                text_raw = f"{ja_raw}\n{ko_raw}"
+                text_raw = f"{ja_raw}\n\n{ko_raw}"
             text_out = _ass_escape_text(text_raw)
             seg_show = max(0.45, seg_dur * hold_ratio)
             end_sec = min(duration, start_sec + seg_show)
@@ -7063,6 +7114,7 @@ def run_streamlit_app() -> None:
                 if not MOVIEPY_AVAILABLE:
                     st.error(f"MoviePy가 설치되지 않았습니다: {MOVIEPY_ERROR}")
                     return
+                _reset_runtime_caches(config)
                 # UI에서 편집한 텍스트로 texts 재구성
                 texts = [l.strip() for l in body_val.split("\n") if l.strip()]
                 if not texts:
