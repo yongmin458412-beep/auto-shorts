@@ -450,6 +450,7 @@ class AppConfig:
     require_approval: bool
     auto_run_daily: bool
     auto_run_hour: int
+    auto_run_times: List[str]
     auto_run_tz: str
     auto_run_state_path: str
     auto_run_lock_path: str
@@ -544,6 +545,8 @@ def load_config() -> AppConfig:
     )
     pixabay_api_key = (_get_secret("PIXABAY_API_KEY", "") or "").strip()
     pexels_api_key = (_get_secret("PEXELS_API_KEY", "") or "").strip()
+    auto_run_hour = int(_get_secret("AUTO_RUN_HOUR", "18") or 18)
+    auto_run_times = _get_list("AUTO_RUN_TIMES") or ["12:30", "20:30"]
     return AppConfig(
         openai_api_key=_get_secret("OPENAI_API_KEY", "") or "",
         openai_model=_get_secret("OPENAI_MODEL", "gpt-4.1-mini") or "gpt-4.1-mini",
@@ -583,8 +586,9 @@ def load_config() -> AppConfig:
         max_video_duration_sec=float(_get_secret("MAX_VIDEO_DURATION_SEC", "59") or 59),
         require_approval=_get_bool("REQUIRE_APPROVAL", True),
         auto_run_daily=_get_bool("AUTO_RUN_DAILY", True),
-        auto_run_hour=int(_get_secret("AUTO_RUN_HOUR", "18") or 18),
-        auto_run_tz=_get_secret("AUTO_RUN_TZ", "Asia/Seoul") or "Asia/Seoul",
+        auto_run_hour=auto_run_hour,
+        auto_run_times=auto_run_times,
+        auto_run_tz=_get_secret("AUTO_RUN_TZ", "Asia/Tokyo") or "Asia/Tokyo",
         auto_run_state_path=auto_run_state_path,
         auto_run_lock_path=auto_run_lock_path,
         used_topics_path=used_topics_path,
@@ -5074,19 +5078,59 @@ def _write_json_file(path: str, data: Any) -> None:
 
 
 def _get_local_now(config: AppConfig) -> datetime:
-    tz_name = (config.auto_run_tz or "Asia/Seoul").strip()
+    tz_name = (config.auto_run_tz or "Asia/Tokyo").strip()
     try:
         return datetime.now(ZoneInfo(tz_name))
     except Exception:
         return datetime.utcnow()
 
 
+def _normalize_auto_run_time(value: str) -> Optional[str]:
+    raw = str(value or "").strip()
+    if not raw:
+        return None
+    match = re.match(r"^(\d{1,2})(?::(\d{1,2}))?$", raw)
+    if not match:
+        return None
+    hour = int(match.group(1))
+    minute = int(match.group(2) or 0)
+    if hour < 0 or hour > 23 or minute < 0 or minute > 59:
+        return None
+    return f"{hour:02d}:{minute:02d}"
+
+
+def _get_auto_run_time_labels(config: AppConfig) -> List[str]:
+    labels: List[str] = []
+    for item in getattr(config, "auto_run_times", []) or []:
+        norm = _normalize_auto_run_time(item)
+        if norm and norm not in labels:
+            labels.append(norm)
+    if not labels:
+        fallback = f"{int(getattr(config, 'auto_run_hour', 18)):02d}:00"
+        labels.append(fallback)
+    return sorted(labels)
+
+
+def _get_auto_run_slots_for_date(config: AppConfig, base_dt: datetime) -> List[Tuple[str, datetime]]:
+    slots: List[Tuple[str, datetime]] = []
+    for label in _get_auto_run_time_labels(config):
+        hour, minute = [int(part) for part in label.split(":")]
+        slot_dt = base_dt.replace(hour=hour, minute=minute, second=0, microsecond=0)
+        slots.append((label, slot_dt))
+    return slots
+
+
 def _get_next_run_time(config: AppConfig) -> datetime:
     now = _get_local_now(config)
-    target = now.replace(hour=int(config.auto_run_hour), minute=0, second=0, microsecond=0)
-    if target <= now:
-        target = target + timedelta(days=1)
-    return target
+    today_slots = _get_auto_run_slots_for_date(config, now)
+    for _, slot_dt in today_slots:
+        if slot_dt > now:
+            return slot_dt
+    tomorrow = now + timedelta(days=1)
+    tomorrow_slots = _get_auto_run_slots_for_date(config, tomorrow)
+    if tomorrow_slots:
+        return tomorrow_slots[0][1]
+    return now + timedelta(hours=24)
 
 
 def _acquire_run_lock(path: str, ttl_sec: int = 7200) -> bool:
@@ -5115,16 +5159,49 @@ def _should_auto_run(config: AppConfig) -> bool:
     if not config.auto_run_daily:
         return False
     now = _get_local_now(config)
-    if now.hour < int(config.auto_run_hour):
-        return False
-    state = _read_json_file(config.auto_run_state_path, {"last_run_date": ""})
-    last_date = state.get("last_run_date", "")
-    return last_date != now.date().isoformat()
+    state = _read_json_file(config.auto_run_state_path, {})
+    if not isinstance(state, dict):
+        state = {}
+    runs = state.get("runs", {})
+    if not isinstance(runs, dict):
+        runs = {}
+    today_key = now.date().isoformat()
+    done_today_raw = runs.get(today_key, [])
+    done_today = {
+        _normalize_auto_run_time(item) or str(item)
+        for item in (done_today_raw if isinstance(done_today_raw, list) else [])
+        if str(item).strip()
+    }
+    for label, slot_dt in _get_auto_run_slots_for_date(config, now):
+        if now >= slot_dt and label not in done_today:
+            return True
+    return False
 
 
 def _mark_auto_run_done(config: AppConfig) -> None:
     now = _get_local_now(config)
-    _write_json_file(config.auto_run_state_path, {"last_run_date": now.date().isoformat()})
+    state = _read_json_file(config.auto_run_state_path, {})
+    if not isinstance(state, dict):
+        state = {}
+    runs = state.get("runs", {})
+    if not isinstance(runs, dict):
+        runs = {}
+    today_key = now.date().isoformat()
+    done_today = runs.get(today_key, [])
+    if not isinstance(done_today, list):
+        done_today = []
+    done_set = {str(item) for item in done_today if str(item).strip()}
+    # 현재 시각 이전 슬롯은 모두 처리 완료로 마킹 (지연 실행 시 연속 중복 실행 방지)
+    for label, slot_dt in _get_auto_run_slots_for_date(config, now):
+        if now >= slot_dt:
+            done_set.add(label)
+    runs[today_key] = sorted(done_set)
+    # 상태 파일 과대 방지: 최근 14일만 유지
+    keep_days = {(now.date() - timedelta(days=idx)).isoformat() for idx in range(14)}
+    runs = {day: value for day, value in runs.items() if day in keep_days}
+    state["runs"] = runs
+    state["last_run_date"] = today_key
+    _write_json_file(config.auto_run_state_path, state)
 
 
 def _load_used_links(path: str) -> Dict[str, Any]:
@@ -5804,6 +5881,8 @@ def run_streamlit_app() -> None:
     use_instagram_ui = getattr(config, "enable_instagram_upload", False) and not getattr(config, "jp_youtube_only", False)
     st.sidebar.write(f"인스타그램 업로드: {'켜짐' if use_instagram_ui else '꺼짐'}")
     st.sidebar.write(f"유튜브 업로드: {'켜짐' if config.enable_youtube_upload else '꺼짐'}")
+    schedule_labels = ", ".join(_get_auto_run_time_labels(config))
+    st.sidebar.write(f"자동 업로드 시간({config.auto_run_tz}): {schedule_labels}")
     st.sidebar.write(f"MoviePy 사용 가능: {'예' if MOVIEPY_AVAILABLE else '아니오'}")
     st.sidebar.write(f"BGM 모드: {config.bgm_mode or 'off'}")
     if config.pixabay_api_key:
