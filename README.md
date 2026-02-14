@@ -34,9 +34,9 @@ Streamlit Cloud에서 파이썬 버전 문제로 `moviepy`가 설치 실패하�
 
 선택:
 - `YOUTUBE_*` (업로드 활성화)
-- `GOOGLE_CSE_API_KEY`, `GOOGLE_CSE_CX` (Google 이미지 검색)
-- `FREEPIK_API_KEY` (Freepik 이미지 검색)
-- `IMAGE_SEARCH_SOURCE_PRIORITY` (예: `google,freepik,serpapi,pixabay,pexels,wikimedia`)
+- `PINTEREST_ACCESS_TOKEN`, `PINTEREST_AD_ACCOUNT_ID` (Pinterest 이미지 검색)
+- `IMAGE_SEARCH_SOURCE_PRIORITY` (예: `pinterest,serpapi,pixabay,pexels,wikimedia`)
+- `FREEPIK_API_KEY` (레거시 호환)
 - `SERPAPI_API_KEY` (트렌드 수집)
 - `PEXELS_API_KEY` (트렌드 이미지 자동 수집)
 - `BBOOM_LIST_URL` (네이버 뿜 인기글 목록 URL)

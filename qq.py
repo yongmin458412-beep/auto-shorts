@@ -467,6 +467,8 @@ class AppConfig:
     youtube_privacy_status: str
     serpapi_api_key: str
     pexels_api_key: str
+    pinterest_access_token: str
+    pinterest_ad_account_id: str
     freepik_api_key: str
     picsart_api_key: str
     image_search_source_priority: List[str]
@@ -616,11 +618,13 @@ def load_config() -> AppConfig:
         youtube_privacy_status=_get_secret("YOUTUBE_PRIVACY_STATUS", "public") or "public",
         serpapi_api_key=_get_secret("SERPAPI_API_KEY", "") or "",
         pexels_api_key=pexels_api_key,
+        pinterest_access_token=(_get_secret("PINTEREST_ACCESS_TOKEN", "") or "").strip(),
+        pinterest_ad_account_id=(_get_secret("PINTEREST_AD_ACCOUNT_ID", "") or "").strip(),
         freepik_api_key=(_get_secret("FREEPIK_API_KEY", "") or "").strip(),
         picsart_api_key=(_get_secret("PICSART_API_KEY", "") or "").strip(),
         image_search_source_priority=(
             _get_list("IMAGE_SEARCH_SOURCE_PRIORITY")
-            or ["freepik", "serpapi", "pixabay", "pexels", "wikimedia"]
+            or ["pinterest", "serpapi", "pixabay", "pexels", "wikimedia"]
         ),
         ja_dialect_style=(
             _get_secret(
@@ -2036,6 +2040,10 @@ _BRAND_QUERY_HINTS: List[Tuple[re.Pattern[str], str]] = [
     (re.compile(r"(nike|ナイキ)", re.IGNORECASE), "Nike logo sneaker store display"),
     (re.compile(r"(instagram|インスタ|인스타)", re.IGNORECASE), "Instagram logo smartphone app screen"),
     (re.compile(r"(tiktok|틱톡|ティックトック|douyin)", re.IGNORECASE), "TikTok logo app icon smartphone screen"),
+    (
+        re.compile(r"(amazon|アマゾン|아마존|prime video|プライム)", re.IGNORECASE),
+        "Amazon logo smile arrow delivery box ecommerce warehouse",
+    ),
     (re.compile(r"(netflix|넷플릭스|ネトフリ|ネットフリックス)", re.IGNORECASE), "Netflix logo red N app icon streaming interface"),
     (re.compile(r"(ramen|ラーメン|라면)", re.IGNORECASE), "ramen noodles bowl close up"),
 ]
@@ -3053,6 +3061,22 @@ def _make_background(image: Image.Image, size: Tuple[int, int]) -> Image.Image:
     return background.filter(ImageFilter.GaussianBlur(radius=18))
 
 
+def _open_image_rgb_safe(path: str, alpha_bg: Tuple[int, int, int] = (255, 255, 255)) -> Image.Image:
+    """
+    PNG 투명영역이 RGB 변환 시 검정으로 깨지는 문제를 방지.
+    - 알파 채널이 있으면 지정 배경색에 먼저 합성 후 RGB 변환.
+    """
+    if not MOVIEPY_AVAILABLE:
+        raise RuntimeError(f"MoviePy/PIL not available: {MOVIEPY_ERROR}")
+    img = Image.open(path)
+    if img.mode in {"RGBA", "LA"} or ("transparency" in getattr(img, "info", {})):
+        rgba = img.convert("RGBA")
+        bg = Image.new("RGBA", rgba.size, (alpha_bg[0], alpha_bg[1], alpha_bg[2], 255))
+        merged = Image.alpha_composite(bg, rgba)
+        return merged.convert("RGB")
+    return img.convert("RGB")
+
+
 def _enhance_bg_image_quality(image: Image.Image) -> Image.Image:
     if not MOVIEPY_AVAILABLE:
         return image
@@ -3305,7 +3329,7 @@ def generate_thumbnail_image(
     if not MOVIEPY_AVAILABLE:
         raise RuntimeError(f"MoviePy/PIL not available: {MOVIEPY_ERROR}")
     W, H = 1280, 720
-    base = Image.open(bg_image_path).convert("RGB")
+    base = _open_image_rgb_safe(bg_image_path)
     base = _fit_image_to_canvas(base, (W, H))
     if config.use_korean_template:
         base = _apply_korean_template(base, W, H)
@@ -3699,7 +3723,7 @@ def _compose_frame(
     """정적 이미지 배경 프레임 생성 (배경영상 없을 때 fallback)."""
     if not MOVIEPY_AVAILABLE:
         raise RuntimeError(f"MoviePy/PIL not available: {MOVIEPY_ERROR}")
-    base = Image.open(asset_path).convert("RGB")
+    base = _open_image_rgb_safe(asset_path)
     background = _fit_image_to_canvas(base, size)
     if use_template:
         background = _apply_korean_template(background, size[0], size[1])
@@ -3736,16 +3760,17 @@ def _normalize_search_query(query: str) -> str:
 def _build_search_query_candidates(query: str) -> List[str]:
     raw = (query or "").strip()
     reduced = _normalize_search_query(raw)
-    candidates = [raw, reduced]
-    # 제품/브랜드 키워드만 남긴 짧은 쿼리도 추가
-    parts = [t for t in reduced.split() if len(t) >= 4]
-    if parts:
-        candidates.append(" ".join(parts[:4]))
-    # 브랜드 로고 검색어 강제 보강
+    candidates: List[str] = []
+    # 브랜드 소재는 로고/앱아이콘 쿼리를 최우선으로 탐색
     brand_hints = _brand_fallback_queries_from_keyword(raw)
     for hint in brand_hints:
         if hint:
             candidates.append(hint)
+    candidates.extend([raw, reduced])
+    # 제품/브랜드 키워드만 남긴 짧은 쿼리도 추가
+    parts = [t for t in reduced.split() if len(t) >= 4]
+    if parts:
+        candidates.append(" ".join(parts[:4]))
     # 3초/5초 같은 숫자 문맥이 있으면 카운트다운 이미지 검색어 추가
     countdown_hint = _extract_countdown_hint(raw, raw, raw)
     if countdown_hint:
@@ -4036,10 +4061,91 @@ def _score_image_candidate_text(
             score += 3
         if "official" in src:
             score += 2
-        if any(host in src for host in ("wikipedia", "wikimedia", "brand", "tiktok", "mcdonald", "netflix")):
+        if any(host in src for host in ("wikipedia", "wikimedia", "brand", "tiktok", "mcdonald", "netflix", "amazon")):
             score += 1
     return score
 
+
+
+def _extract_pinterest_pin_image_url(pin: Dict[str, Any]) -> str:
+    if not isinstance(pin, dict):
+        return ""
+    media = pin.get("media", {})
+    if isinstance(media, dict):
+        images = media.get("images", {})
+        if isinstance(images, dict):
+            for key in ("1200x", "600x", "400x300", "150x150"):
+                node = images.get(key, {})
+                if isinstance(node, dict):
+                    url = str(node.get("url", "") or "").strip()
+                    if url:
+                        return url
+            for node in images.values():
+                if isinstance(node, dict):
+                    url = str(node.get("url", "") or "").strip()
+                    if url:
+                        return url
+    for key in ("image", "image_url", "url"):
+        node = pin.get(key, {})
+        if isinstance(node, dict):
+            u = str(node.get("url", "") or "").strip()
+            if u:
+                return u
+        elif isinstance(node, str) and node.strip().startswith("http"):
+            return node.strip()
+    return ""
+
+
+def fetch_pinterest_image(
+    query: str,
+    access_token: str,
+    output_dir: str = "/tmp/pinterest_images",
+    ad_account_id: str = "",
+) -> Optional[str]:
+    if not access_token:
+        return None
+    save_dir = _ensure_writable_dir(output_dir, "/tmp/pinterest_images")
+    try:
+        headers = {
+            "Authorization": f"Bearer {access_token}",
+            "Accept": "application/json",
+        }
+        params: Dict[str, Any] = {"query": query}
+        if str(ad_account_id or "").strip():
+            params["ad_account_id"] = str(ad_account_id).strip()
+        resp = requests.get("https://api.pinterest.com/v5/search/pins", headers=headers, params=params, timeout=45)
+        if resp.status_code != 200:
+            return None
+        items = resp.json().get("items", []) or []
+        if not items:
+            return None
+        tokens = _extract_query_tokens(query)
+        prefer_logo = bool(_brand_fallback_queries_from_keyword(query)) or ("logo" in query.lower())
+        ranked: List[Tuple[int, Dict[str, Any]]] = []
+        for item in items[:30]:
+            if not isinstance(item, dict):
+                continue
+            text = " ".join(
+                [
+                    str(item.get("title", "") or ""),
+                    str(item.get("description", "") or ""),
+                    str(item.get("link", "") or ""),
+                    str(item.get("id", "") or ""),
+                ]
+            )
+            score = _score_image_candidate_text(text, tokens, prefer_logo=prefer_logo)
+            ranked.append((score, item))
+        ranked.sort(key=lambda x: x[0], reverse=True)
+        for _, item in ranked[:12]:
+            image_url = _extract_pinterest_pin_image_url(item)
+            if not image_url:
+                continue
+            path = _download_image_file(image_url, save_dir, prefix="pin")
+            if path:
+                return path
+    except Exception:
+        return None
+    return None
 
 
 def fetch_freepik_image(
@@ -4108,6 +4214,8 @@ def fetch_freepik_image(
 
 def _normalize_image_source_priority(raw_list: List[str]) -> List[str]:
     alias = {
+        "pinterest": "pinterest",
+        "pin": "pinterest",
         "freepik": "freepik",
         "pixabay": "pixabay",
         "pexels": "pexels",
@@ -4121,7 +4229,7 @@ def _normalize_image_source_priority(raw_list: List[str]) -> List[str]:
         if key and key not in out:
             out.append(key)
     if not out:
-        out = ["freepik", "serpapi", "pixabay", "pexels", "wikimedia"]
+        out = ["pinterest", "serpapi", "pixabay", "pexels", "wikimedia"]
     return out
 
 
@@ -4132,6 +4240,13 @@ def _fetch_image_from_source(
     dirs: Dict[str, str],
 ) -> Optional[str]:
     src = str(source or "").strip().lower()
+    if src == "pinterest":
+        return fetch_pinterest_image(
+            query=query,
+            access_token=str(getattr(config, "pinterest_access_token", "") or ""),
+            output_dir=dirs.get("pinterest", "/tmp/pinterest_images"),
+            ad_account_id=str(getattr(config, "pinterest_ad_account_id", "") or ""),
+        )
     if src == "freepik":
         return fetch_freepik_image(
             query=query,
@@ -4219,6 +4334,7 @@ def fetch_segment_images(
     run_stamp = datetime.utcnow().strftime("%Y%m%d_%H%M%S_%f")
     px_dir = f"/tmp/pixabay_images/{run_stamp}"
     pex_dir = f"/tmp/pexels_bg_images/{run_stamp}"
+    pin_dir = f"/tmp/pinterest_images/{run_stamp}"
     fpk_dir = f"/tmp/freepik_images/{run_stamp}"
     sp_dir = f"/tmp/serpapi_images/{run_stamp}"
     wm_dir = f"/tmp/wikimedia_images/{run_stamp}"
@@ -4228,6 +4344,7 @@ def fetch_segment_images(
     source_dirs = {
         "pixabay": px_dir,
         "pexels": pex_dir,
+        "pinterest": pin_dir,
         "freepik": fpk_dir,
         "serpapi": sp_dir,
         "wikimedia": wm_dir,
@@ -4966,7 +5083,7 @@ def render_video(
             )
             if not bg_img_path or not os.path.exists(bg_img_path):
                 bg_img_path = _ensure_placeholder_image(config)
-            bg_img = Image.open(bg_img_path).convert("RGB")
+            bg_img = _open_image_rgb_safe(bg_img_path)
             bg_img = _enhance_bg_image_quality(bg_img)
             bg_img = _fit_image_to_canvas(bg_img, (W, H))
             _base_bg_arr = np.array(bg_img)
@@ -5009,7 +5126,7 @@ def render_video(
                 cx = int(max_x * px)
                 cy = int(max_y * py)
                 img = enlarged.crop((cx, cy, cx + W, cy + H))
-            if _use_template:
+            if _use_template and (__style not in {"asmr_tag", "asmr"}):
                 img = _apply_korean_template(img, W, H)
             if draw_subtitles and (__style not in {"asmr_tag", "asmr"}):
                 img = _draw_subtitle(
@@ -8243,7 +8360,8 @@ def run_streamlit_app() -> None:
     st.sidebar.write(f"MoviePy 사용 가능: {'예' if MOVIEPY_AVAILABLE else '아니오'}")
     st.sidebar.write(f"BGM 모드: {config.bgm_mode or 'off'}")
     st.sidebar.write("이미지 소스 우선순위: " + ", ".join(_normalize_image_source_priority(config.image_search_source_priority)))
-    st.sidebar.write(f"Freepik: {'설정됨' if config.freepik_api_key else '미설정'}")
+    st.sidebar.write(f"Pinterest: {'설정됨' if config.pinterest_access_token else '미설정'}")
+    st.sidebar.write(f"Freepik(레거시): {'설정됨' if config.freepik_api_key else '미설정'}")
     if config.pixabay_api_key:
         key_tail = config.pixabay_api_key[-4:] if len(config.pixabay_api_key) >= 4 else config.pixabay_api_key
         st.sidebar.write(f"Pixabay BGM: 설정됨 (****{key_tail})")
@@ -8280,8 +8398,9 @@ def run_streamlit_app() -> None:
     st.sidebar.subheader("선택")
     st.sidebar.markdown(
         "- `YOUTUBE_*` (자동 업로드)\n"
-        "- `FREEPIK_API_KEY` (Freepik 이미지 검색)\n"
-        "- `IMAGE_SEARCH_SOURCE_PRIORITY` (예: `freepik,serpapi,pixabay,pexels,wikimedia`)\n"
+        "- `PINTEREST_ACCESS_TOKEN`, `PINTEREST_AD_ACCOUNT_ID` (Pinterest 이미지 검색)\n"
+        "- `IMAGE_SEARCH_SOURCE_PRIORITY` (예: `pinterest,serpapi,pixabay,pexels,wikimedia`)\n"
+        "- `FREEPIK_API_KEY` (레거시 호환)\n"
         "- `PIXABAY_API_KEY` (배경 이미지/영상, 폴백)\n"
         "- `PIXABAY_BGM_ENABLED` (Pixabay BGM 자동 다운로드 on/off)\n"
         "- `PEXELS_API_KEY` (이미지 자동 수집, 폴백)\n"
