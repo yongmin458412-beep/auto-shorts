@@ -7,6 +7,7 @@ import mimetypes
 import os
 import random
 import re
+import shutil
 import subprocess
 import textwrap
 import time
@@ -43,6 +44,14 @@ MOVIEPY_AVAILABLE = True
 MOVIEPY_ERROR = ""
 try:
     import numpy as np
+    CV2_AVAILABLE = True
+    CV2_ERROR = ""
+    try:
+        import cv2
+    except Exception as exc:
+        CV2_AVAILABLE = False
+        CV2_ERROR = str(exc)
+        cv2 = None
     from PIL import Image, ImageDraw, ImageFilter, ImageFont
     # Pillow 10.0+에서 ANTIALIAS 제거됨 → MoviePy 내부 호환성 패치
     if not hasattr(Image, "ANTIALIAS"):
@@ -59,6 +68,9 @@ except Exception as exc:
     MOVIEPY_AVAILABLE = False
     MOVIEPY_ERROR = str(exc)
     np = None
+    CV2_AVAILABLE = False
+    CV2_ERROR = "MoviePy unavailable"
+    cv2 = None
     AudioFileClip = CompositeAudioClip = ImageClip = VideoFileClip = concatenate_videoclips = vfx = None
     Image = ImageDraw = ImageFilter = ImageFont = None
 
@@ -490,6 +502,10 @@ class AppConfig:
     thumbnail_max_chars: int
     use_minecraft_parkour_bg: bool
     tts_provider: str
+    tts_baby_voice: bool
+    tts_baby_pitch: float
+    enable_majisho_tag: bool
+    majisho_asset_path: str
     use_japanese_caption_style: bool
     linktree_url: str
     enable_pinned_comment: bool
@@ -634,6 +650,13 @@ def load_config() -> AppConfig:
         thumbnail_max_chars=int(_get_secret("THUMBNAIL_MAX_CHARS", "22") or 22),
         use_minecraft_parkour_bg=_get_bool("USE_MINECRAFT_PARKOUR_BG", True),
         tts_provider=(_get_secret("TTS_PROVIDER", "") or "openai").strip().lower() or "openai",
+        tts_baby_voice=_get_bool("TTS_BABY_VOICE", True),
+        tts_baby_pitch=float(_get_secret("TTS_BABY_PITCH", "1.14") or 1.14),
+        enable_majisho_tag=_get_bool("ENABLE_MAJISHO_TAG", True),
+        majisho_asset_path=(
+            _get_secret("MAJISHO_ASSET_PATH", "data/assets/branding/majisho.png")
+            or "data/assets/branding/majisho.png"
+        ),
         use_japanese_caption_style=_get_bool("USE_JAPANESE_CAPTION_STYLE", True),
         linktree_url=(_get_secret("LINKTREE_URL", "") or "").strip(),
         enable_pinned_comment=_get_bool("ENABLE_PINNED_COMMENT", False),
@@ -981,6 +1004,78 @@ def _enforce_story_arc(meta: Dict[str, Any], items: List[Dict[str, Any]]) -> Lis
             cur["script_ko"] = _to_ko_literal_tone(cur["script_ja"])
         fixed.append(cur)
     return fixed
+
+
+def _inject_majisho_asmr_beat(script: Dict[str, Any], enabled: bool = True) -> Dict[str, Any]:
+    if not enabled:
+        return script
+    timeline = _get_story_timeline(script)
+    if not timeline:
+        return script
+    # 중복 삽입 방지
+    for row in timeline:
+        role = str(row.get("role", "") or "").strip().lower()
+        txt = str(row.get("script_ja", "") or "")
+        if role == "asmr_tag" or "マジショ" in txt:
+            return script
+
+    hook_idx = 0
+    for idx, row in enumerate(timeline):
+        if str(row.get("role", "") or "").strip().lower() == "hook":
+            hook_idx = idx
+            break
+
+    insert_item = {
+        "order": hook_idx + 2,
+        "role": "asmr_tag",
+        "script_ja": "マジショ",
+        "script_ko": "마지쇼",
+        "visual_search_keyword": "cute anime mascot マジショ sign",
+        "duration": "1s",
+    }
+    new_timeline = timeline[: hook_idx + 1] + [insert_item] + timeline[hook_idx + 1 :]
+    for idx, row in enumerate(new_timeline, start=1):
+        if isinstance(row, dict):
+            row["order"] = idx
+    script["story_timeline"] = new_timeline
+    script["content"] = new_timeline
+    return script
+
+
+def _apply_majisho_interlude_assets(
+    config: AppConfig,
+    roles: List[str],
+    bg_video_paths: List[Optional[str]],
+    bg_image_paths: List[Optional[str]],
+) -> Tuple[List[Optional[str]], List[Optional[str]]]:
+    if not getattr(config, "enable_majisho_tag", True):
+        return bg_video_paths, bg_image_paths
+    if not roles:
+        return bg_video_paths, bg_image_paths
+    target_idx = -1
+    for idx, role in enumerate(roles):
+        if role == "asmr_tag":
+            target_idx = idx
+            break
+    if target_idx < 0:
+        return bg_video_paths, bg_image_paths
+    asset_path = str(getattr(config, "majisho_asset_path", "") or "").strip()
+    if not asset_path or not os.path.exists(asset_path):
+        return bg_video_paths, bg_image_paths
+
+    if len(bg_video_paths) < len(roles):
+        bg_video_paths = (bg_video_paths + [None] * len(roles))[: len(roles)]
+    if len(bg_image_paths) < len(roles):
+        bg_image_paths = (bg_image_paths + [_ensure_placeholder_image(config)] * len(roles))[: len(roles)]
+
+    ext = os.path.splitext(asset_path)[1].lower()
+    if ext in {".mp4", ".mov", ".webm", ".mkv"}:
+        bg_video_paths[target_idx] = asset_path
+        bg_image_paths[target_idx] = _ensure_placeholder_image(config)
+    else:
+        bg_video_paths[target_idx] = None
+        bg_image_paths[target_idx] = asset_path
+    return bg_video_paths, bg_image_paths
 
 
 # ─────────────────────────────────────────────
@@ -1712,6 +1807,8 @@ def _script_to_roles(script: Dict[str, Any]) -> List[str]:
         roles: List[str] = []
         for item in timeline:
             role = str(item.get("role", "")).strip().lower()
+            if role in {"asmr_tag", "asmr", "tag"}:
+                role = "asmr_tag"
             if "reaction" in role or "outro" in role:
                 role = "reaction"
             elif role.startswith("twist") or "success" in role or "반전" in role:
@@ -1729,6 +1826,17 @@ def _script_to_roles(script: Dict[str, Any]) -> List[str]:
     return ["hook"] + ["body"] * (len(texts) - 2) + ["outro"]
 
 
+def _build_tts_segments(texts: List[str], roles: List[str]) -> List[Dict[str, str]]:
+    segments: List[Dict[str, str]] = []
+    for idx, text in enumerate(texts):
+        line = str(text or "").strip()
+        if not line:
+            continue
+        role = str(roles[idx] if idx < len(roles) else "body")
+        segments.append({"text": line, "role": role})
+    return segments
+
+
 def _build_caption_styles(roles: List[str], count: int) -> List[str]:
     if count <= 0:
         return []
@@ -1737,7 +1845,12 @@ def _build_caption_styles(roles: List[str], count: int) -> List[str]:
     styles: List[str] = []
     for i in range(count):
         role = roles[i] if i < len(roles) else ""
-        styles.append("reaction" if role == "reaction" else "default")
+        if role == "reaction":
+            styles.append("reaction")
+        elif role == "asmr_tag":
+            styles.append("asmr_tag")
+        else:
+            styles.append("default")
     return styles
 
 
@@ -1751,9 +1864,15 @@ def _apply_caption_variant(styles: List[str], variant: str) -> List[str]:
     if not styles:
         return styles
     if variant == "japanese_variety":
-        return ["reaction" if s == "reaction" else "japanese_variety" for s in styles]
+        return [
+            "reaction" if s == "reaction" else ("asmr_tag" if s == "asmr_tag" else "japanese_variety")
+            for s in styles
+        ]
     if variant == "default":
-        return ["reaction" if s == "reaction" else "default_plain" for s in styles]
+        return [
+            "reaction" if s == "reaction" else ("asmr_tag" if s == "asmr_tag" else "default_plain")
+            for s in styles
+        ]
     return styles
 
 
@@ -1880,6 +1999,7 @@ _VISUAL_SEARCH_STOPWORDS = {
 }
 _ROLE_QUERY_HINTS: Dict[str, str] = {
     "hook": "brand logo app icon close up countdown timer",
+    "asmr_tag": "cute mascot logo whisper text bubble",
     "problem": "old advertisement archive newspaper",
     "failure": "closed store empty street",
     "success": "crowded store launch success",
@@ -2109,7 +2229,8 @@ def match_bgm_by_mood(config: AppConfig, mood: str) -> Optional[str]:
     return None
 
 
-ENERGETIC_VOICE_ORDER = ["nova", "alloy", "shimmer", "echo", "fable", "onyx"]
+# 일본 쇼츠용 기본 우선순위: 귀엽고 밝은 톤
+ENERGETIC_VOICE_ORDER = ["shimmer", "nova", "alloy", "echo", "fable", "onyx"]
 
 
 def pick_voice_id(voice_ids: List[str], preference: Optional[List[str]] = None) -> str:
@@ -2342,20 +2463,179 @@ def tts_gtts(
     return output_path
 
 
-def tts_generate(
+def _resolve_ffmpeg_bin() -> str:
+    ffmpeg_bin = "ffmpeg"
+    try:
+        import imageio_ffmpeg
+
+        ffmpeg_bin = imageio_ffmpeg.get_ffmpeg_exe()
+    except Exception:
+        pass
+    return ffmpeg_bin
+
+
+def _apply_ffmpeg_audio_filter(input_path: str, output_path: str, filter_expr: str) -> bool:
+    if not input_path or not os.path.exists(input_path):
+        return False
+    cmd = [
+        _resolve_ffmpeg_bin(),
+        "-y",
+        "-i",
+        input_path,
+        "-af",
+        filter_expr,
+        "-ac",
+        "2",
+        "-ar",
+        "44100",
+        output_path,
+    ]
+    try:
+        proc = subprocess.run(cmd, capture_output=True, text=True, timeout=180)
+        return proc.returncode == 0 and os.path.exists(output_path)
+    except Exception:
+        return False
+
+
+def _apply_baby_voice_filter(config: AppConfig, audio_path: str) -> str:
+    if not getattr(config, "tts_baby_voice", True):
+        return audio_path
+    pitch = float(getattr(config, "tts_baby_pitch", 1.14) or 1.14)
+    pitch = max(1.02, min(pitch, 1.35))
+    tempo = max(0.5, min(2.0, 1.0 / pitch))
+    filtered = os.path.join(
+        os.path.dirname(audio_path) or ".",
+        f"baby_{os.path.basename(audio_path)}",
+    )
+    filt = (
+        f"asetrate=44100*{pitch:.4f},"
+        f"atempo={tempo:.4f},"
+        "aresample=44100,"
+        "highpass=f=120,"
+        "treble=g=2,"
+        "volume=1.08"
+    )
+    if _apply_ffmpeg_audio_filter(audio_path, filtered, filt):
+        try:
+            os.replace(filtered, audio_path)
+        except Exception:
+            shutil.copyfile(filtered, audio_path)
+            os.remove(filtered)
+    return audio_path
+
+
+def _apply_asmr_voice_filter(audio_path: str) -> str:
+    filtered = os.path.join(
+        os.path.dirname(audio_path) or ".",
+        f"asmr_{os.path.basename(audio_path)}",
+    )
+    filt = (
+        "highpass=f=130,"
+        "lowpass=f=3800,"
+        "acompressor=threshold=-24dB:ratio=2.2:attack=20:release=220,"
+        "volume=0.86"
+    )
+    if _apply_ffmpeg_audio_filter(audio_path, filtered, filt):
+        try:
+            os.replace(filtered, audio_path)
+        except Exception:
+            shutil.copyfile(filtered, audio_path)
+            os.remove(filtered)
+    return audio_path
+
+
+def _tts_generate_single(
     config: AppConfig,
     text: str,
     output_path: str,
     voice: str = "",
 ) -> str:
-    """
-    TTS 생성. tts_provider에 따라 OpenAI TTS 또는 gTTS 선택.
-    일본어 텍스트 처리 가능.
-    """
     provider = (getattr(config, "tts_provider", "") or "openai").strip().lower()
     if provider == "gtts":
         return tts_gtts(text, output_path, lang="ja")
-    return tts_openai(config, text, output_path, voice=voice or "alloy")
+    return tts_openai(config, text, output_path, voice=voice or "shimmer")
+
+
+def tts_generate(
+    config: AppConfig,
+    text: str,
+    output_path: str,
+    voice: str = "",
+    segments: Optional[List[Dict[str, str]]] = None,
+) -> str:
+    """
+    TTS 생성.
+    - 기본: 단일 텍스트
+    - segments 제공 시: 세그먼트 단위 합성 (asmr_tag는 ASMR 필터)
+    """
+    os.makedirs(os.path.dirname(output_path), exist_ok=True)
+    if not segments:
+        result = _tts_generate_single(config, text, output_path, voice=voice or "shimmer")
+        return _apply_baby_voice_filter(config, result)
+
+    if not MOVIEPY_AVAILABLE or AudioFileClip is None:
+        joined = "。".join(
+            [
+                str(seg.get("text", "") or "").strip()
+                for seg in segments
+                if str(seg.get("text", "") or "").strip()
+            ]
+        )
+        result = _tts_generate_single(config, joined, output_path, voice=voice or "shimmer")
+        return _apply_baby_voice_filter(config, result)
+
+    try:
+        from moviepy.editor import concatenate_audioclips
+    except Exception:
+        joined = "。".join(
+            [
+                str(seg.get("text", "") or "").strip()
+                for seg in segments
+                if str(seg.get("text", "") or "").strip()
+            ]
+        )
+        result = _tts_generate_single(config, joined, output_path, voice=voice or "shimmer")
+        return _apply_baby_voice_filter(config, result)
+
+    temp_files: List[str] = []
+    clips: List[Any] = []
+    try:
+        for idx, seg in enumerate(segments):
+            line = str(seg.get("text", "") or "").strip()
+            if not line:
+                continue
+            role = str(seg.get("role", "") or "").strip().lower()
+            tmp_path = os.path.join(
+                os.path.dirname(output_path) or ".",
+                f"tts_seg_{idx}_{random.randint(1000, 9999)}.mp3",
+            )
+            _tts_generate_single(config, line, tmp_path, voice=voice or "shimmer")
+            _apply_baby_voice_filter(config, tmp_path)
+            if role in {"asmr_tag", "asmr"}:
+                _apply_asmr_voice_filter(tmp_path)
+            temp_files.append(tmp_path)
+            clips.append(AudioFileClip(tmp_path))
+        if not clips:
+            raise RuntimeError("TTS 세그먼트가 비어 있습니다.")
+        merged = concatenate_audioclips(clips)
+        merged.write_audiofile(output_path, fps=44100, nbytes=2, codec="mp3", logger=None)
+        try:
+            merged.close()
+        except Exception:
+            pass
+        return output_path
+    finally:
+        for c in clips:
+            try:
+                c.close()
+            except Exception:
+                pass
+        for path in temp_files:
+            try:
+                if os.path.exists(path):
+                    os.remove(path)
+            except Exception:
+                pass
 
 
 @dataclass
@@ -2616,6 +2896,35 @@ def _make_background(image: Image.Image, size: Tuple[int, int]) -> Image.Image:
         raise RuntimeError(f"MoviePy/PIL not available: {MOVIEPY_ERROR}")
     background = image.resize(size, Image.LANCZOS)
     return background.filter(ImageFilter.GaussianBlur(radius=18))
+
+
+def _enhance_bg_image_quality(image: Image.Image) -> Image.Image:
+    if not MOVIEPY_AVAILABLE:
+        return image
+    try:
+        if CV2_AVAILABLE and cv2 is not None and np is not None:
+            arr = np.array(image.convert("RGB"))
+            lab = cv2.cvtColor(arr, cv2.COLOR_RGB2LAB)
+            l, a, b = cv2.split(lab)
+            clahe = cv2.createCLAHE(clipLimit=2.2, tileGridSize=(8, 8))
+            l2 = clahe.apply(l)
+            merged = cv2.merge((l2, a, b))
+            rgb = cv2.cvtColor(merged, cv2.COLOR_LAB2RGB)
+            kernel = np.array([[0, -1, 0], [-1, 5.3, -1], [0, -1, 0]], dtype=np.float32)
+            sharp = cv2.filter2D(rgb, -1, kernel)
+            sharp = np.clip(sharp, 0, 255).astype(np.uint8)
+            return Image.fromarray(sharp)
+    except Exception:
+        pass
+    try:
+        return image.filter(ImageFilter.UnsharpMask(radius=1.8, percent=120, threshold=2))
+    except Exception:
+        return image
+
+
+def _ease_in_out(x: float) -> float:
+    v = max(0.0, min(1.0, float(x)))
+    return v * v * (3.0 - 2.0 * v)
 
 
 def _wrap_cjk_text(text: str, max_width_px: int, font_size: int) -> List[str]:
@@ -2985,6 +3294,7 @@ def _draw_subtitle(
     style_key = (style or "").strip().lower()
     is_reaction = style_key in {"reaction", "outro", "outro_loop"}
     is_japanese_variety = style_key == "japanese_variety"
+    is_asmr_tag = style_key in {"asmr_tag", "asmr"}
     box_outline = (255, 255, 255, 0)
     accent_fill = (255, 255, 255, 0)
     if is_reaction:
@@ -3000,6 +3310,13 @@ def _draw_subtitle(
         text_fill = (255, 240, 0)  # 선명한 노란색
         stroke_fill = (0, 0, 0)
         stroke_width = 10          # 기존 6 → 10으로 강화 (일본 예능 TV 스타일)
+    elif is_asmr_tag:
+        box_fill = (255, 238, 246, 215)
+        box_outline = (255, 255, 255, 130)
+        accent_fill = (255, 255, 255, 130)
+        text_fill = (249, 98, 188)
+        stroke_fill = (40, 20, 40)
+        stroke_width = 4
     else:
         # old-PPT 느낌을 줄이기 위해 글래스 카드 톤으로 변경
         box_fill = (12, 16, 24, 165)
@@ -3034,7 +3351,7 @@ def _draw_subtitle(
     ]
     if not is_japanese_variety:
         if hasattr(box_draw, "rounded_rectangle"):
-            radius = 26 if is_reaction else 20
+            radius = 30 if is_asmr_tag else (26 if is_reaction else 20)
             box_draw.rounded_rectangle(
                 box_rect,
                 radius=radius,
@@ -3086,16 +3403,16 @@ def _draw_subtitle(
         lx = max(pad_x, (canvas_width - lw) // 2)
 
         # japanese_variety 스타일: glow(발광) 레이어 먼저 그려서 텍스트 존재감 강화
-        if is_japanese_variety and glow_alpha > 0:
+        if (is_japanese_variety or is_asmr_tag) and glow_alpha > 0:
             glow_size = max(20, scaled_size + 4)
             glow_font = _load_font(font_path, glow_size)
             draw.text(
                 (lx - 1, y + y_bounce - 1),
                 line,
                 font=glow_font,
-                fill=(255, 255, 150, glow_alpha),
-                stroke_width=stroke_width + 4,
-                stroke_fill=(255, 220, 0, glow_alpha),
+                fill=((255, 255, 150, glow_alpha) if not is_asmr_tag else (255, 220, 240, glow_alpha)),
+                stroke_width=stroke_width + (3 if is_asmr_tag else 4),
+                stroke_fill=((255, 220, 0, glow_alpha) if not is_asmr_tag else (255, 160, 220, glow_alpha)),
             )
 
         draw.text(
@@ -3123,6 +3440,10 @@ def _draw_subtitle(
         elif is_japanese_variety:
             secondary_fill = (210, 245, 255)
             secondary_stroke_width = max(2, stroke_width - 3)
+        elif is_asmr_tag:
+            secondary_fill = (180, 60, 140)
+            secondary_stroke = (255, 255, 255)
+            secondary_stroke_width = 2
         for line in secondary_lines:
             scaled_size = max(16, int(secondary_base_size * scale))
             scaled_font = _load_font(font_path, scaled_size)
@@ -4207,6 +4528,26 @@ def render_video(
                     )
                 highlight_start = _highlight_cache.get(src_path, 0.0)
 
+        _motion_cfg: Optional[Dict[str, Any]] = None
+        _base_bg_arr = None
+        if bg_vid is None:
+            bg_img_path = (
+                bg_image_paths[index]
+                if bg_image_paths and index < len(bg_image_paths) and bg_image_paths[index]
+                else asset_path
+            )
+            if not bg_img_path or not os.path.exists(bg_img_path):
+                bg_img_path = _ensure_placeholder_image(config)
+            bg_img = Image.open(bg_img_path).convert("RGB")
+            bg_img = _enhance_bg_image_quality(bg_img)
+            bg_img = _fit_image_to_canvas(bg_img, (W, H))
+            _base_bg_arr = np.array(bg_img)
+            _motion_cfg = {
+                "zoom": random.uniform(0.06, 0.11),
+                "dir_x": random.choice([-1, 1]),
+                "dir_y": random.choice([-1, 1]),
+            }
+
         # 클로저 캡처 (Python for-loop 캡처 이슈 방지)
         _cap = cap_text
         _asset = asset_path
@@ -4218,9 +4559,32 @@ def render_video(
             _hold_ratio = 1.0
         _use_template = bool(getattr(config, "use_korean_template", False))
 
-        def _render_frame(get_frame, t, __cap=_cap, __asset=_asset, __font=_font, __style=_style, __overlay=_overlay_mode, __dur=dur):
+        def _render_frame(
+            get_frame,
+            t,
+            __cap=_cap,
+            __asset=_asset,
+            __font=_font,
+            __style=_style,
+            __overlay=_overlay_mode,
+            __dur=dur,
+            __motion_cfg=_motion_cfg,
+        ):
             frame = get_frame(t)
             img = Image.fromarray(frame).convert("RGB")
+            if __motion_cfg:
+                p = _ease_in_out(t / max(__dur, 0.1))
+                z = 1.0 + float(__motion_cfg.get("zoom", 0.08)) * p
+                sw = max(W + 4, int(W * z))
+                sh = max(H + 4, int(H * z))
+                enlarged = img.resize((sw, sh), Image.LANCZOS)
+                max_x = max(0, sw - W)
+                max_y = max(0, sh - H)
+                px = p if int(__motion_cfg.get("dir_x", 1)) >= 0 else (1.0 - p)
+                py = p if int(__motion_cfg.get("dir_y", 1)) >= 0 else (1.0 - p)
+                cx = int(max_x * px)
+                cy = int(max_y * py)
+                img = enlarged.crop((cx, cy, cx + W, cy + H))
             if _use_template:
                 img = _apply_korean_template(img, W, H)
             if draw_subtitles:
@@ -4250,22 +4614,11 @@ def render_video(
             clip = seg.fl(_render_frame).set_duration(dur)
         else:
             # fallback: 정적 이미지 배경 (대본 키워드 이미지)
-            bg_img_path = (
-                bg_image_paths[index]
-                if bg_image_paths and index < len(bg_image_paths) and bg_image_paths[index]
-                else asset_path
-            )
-            if not bg_img_path or not os.path.exists(bg_img_path):
-                bg_img_path = _ensure_placeholder_image(config)
-            bg_img = Image.open(bg_img_path).convert("RGB")
-            bg_img = _fit_image_to_canvas(bg_img, (W, H))
-            base_clip = ImageClip(np.array(bg_img)).set_duration(dur)
+            if _base_bg_arr is None:
+                fallback_img = Image.new("RGB", (W, H), color=(18, 18, 18))
+                _base_bg_arr = np.array(fallback_img)
+            base_clip = ImageClip(_base_bg_arr).set_duration(dur)
             clip = base_clip.fl(_render_frame)
-            zoom_strength = random.uniform(0.035, 0.065)
-            clip = clip.fx(
-                vfx.resize,
-                lambda t, d=dur, z=zoom_strength: 1 + z * (t / max(d, 0.1)),
-            )
 
         # 세그먼트 연결을 부드럽게 (구식 컷 전환 느낌 완화)
         try:
@@ -5771,9 +6124,20 @@ def _build_ass_subtitle_file(
         reaction_style.shadow = 1.2
         reaction_style.bold = True
 
+        asmr_style = default_style.copy()
+        asmr_style.primarycolor = pysubs2.Color(188, 98, 249, 0)
+        asmr_style.secondarycolor = pysubs2.Color(188, 98, 249, 0)
+        asmr_style.outlinecolor = pysubs2.Color(40, 20, 40, 0)
+        asmr_style.backcolor = pysubs2.Color(246, 238, 255, 60)
+        asmr_style.borderstyle = 1
+        asmr_style.outline = 4.0
+        asmr_style.shadow = 0.6
+        asmr_style.bold = True
+
         subs.styles["Default"] = default_style
         subs.styles["Variety"] = variety_style
         subs.styles["Reaction"] = reaction_style
+        subs.styles["Asmr"] = asmr_style
 
         start_sec = 0.0
         for idx, seg_dur in enumerate(seg_durations):
@@ -5791,6 +6155,8 @@ def _build_ass_subtitle_file(
                 style_name = str(caption_styles[idx] or "").strip().lower()
                 if style_name in {"reaction", "outro", "outro_loop"}:
                     role_style = "Reaction"
+                elif style_name in {"asmr_tag", "asmr"}:
+                    role_style = "Asmr"
                 elif style_name == "japanese_variety":
                     role_style = "Variety"
             subs.events.append(
@@ -6568,6 +6934,7 @@ def _auto_jp_flow(
     for attempt in range(3):
         try:
             script = generate_script_jp(config, extra_hint=llm_hint)
+            script = _inject_majisho_asmr_beat(script, enabled=getattr(config, "enable_majisho_tag", True))
             _telemetry_log("대본 생성 완료", config)
         except Exception as exc:
             _telemetry_log(f"대본 생성 실패: {exc}", config)
@@ -6706,6 +7073,12 @@ def _auto_jp_flow(
     video_count = len([p for p in bg_video_paths if p])
     image_count = len([p for p in bg_image_paths if p])
     _telemetry_log(f"배경 적용 요약: mode={background_mode}, video_segments={video_count}, image_segments={image_count}", config)
+    bg_video_paths, bg_image_paths = _apply_majisho_interlude_assets(
+        config,
+        roles,
+        bg_video_paths,
+        bg_image_paths,
+    )
 
     # 에셋 스티커는 사용하지 않음 (배경 이미지/영상 중심)
     placeholder = _ensure_placeholder_image(config)
@@ -6728,7 +7101,13 @@ def _auto_jp_flow(
     _status_update(progress, status_box, 0.50, "TTS 생성 중")
     _notify("🎤", "제작팀 작업 시작", "OpenAI TTS야, 이걸 활기찬 목소리로 녹음해줘")
     try:
-        tts_generate(config, "。".join(texts), audio_path, voice=voice_id)
+        tts_generate(
+            config,
+            "。".join(texts),
+            audio_path,
+            voice=voice_id,
+            segments=_build_tts_segments(texts, roles),
+        )
         _telemetry_log("TTS 생성 완료", config)
         if AudioFileClip:
             try:
@@ -7100,6 +7479,7 @@ def run_streamlit_app() -> None:
             os.path.join(config.assets_dir, "fonts"),
             os.path.join(config.assets_dir, "sfx"),
             os.path.join(config.assets_dir, "bg_videos"),
+            os.path.join(config.assets_dir, "branding"),
             config.generated_bg_dir,
             os.path.dirname(config.manifest_path),
             config.output_dir,
@@ -7235,6 +7615,7 @@ def run_streamlit_app() -> None:
                 if growth_hint:
                     hint = (hint + "\n\n" + growth_hint).strip()
                 script = generate_script_jp(config, extra_hint=hint)
+                script = _inject_majisho_asmr_beat(script, enabled=getattr(config, "enable_majisho_tag", True))
                 st.session_state["script_jp"] = script
                 _status_update(progress, status_box, 0.2, "대본 생성 완료")
             except Exception as exc:
@@ -7401,11 +7782,23 @@ def run_streamlit_app() -> None:
                         f"수동 배경 요약: mode={background_mode}, video_segments={len([p for p in bg_vids_manual if p])}, image_segments={len([p for p in bg_imgs_manual if p])}",
                         config,
                     )
+                    bg_vids_manual, bg_imgs_manual = _apply_majisho_interlude_assets(
+                        config,
+                        roles,
+                        bg_vids_manual,
+                        bg_imgs_manual,
+                    )
                     _status_update(progress, status_box, 0.3, "TTS 생성")
                     now = datetime.utcnow().strftime("%Y%m%d_%H%M%S")
                     audio_path = os.path.join(config.output_dir, f"tts_{now}.mp3")
                     voice_id = pick_voice_id(config.openai_tts_voices, config.openai_tts_voice_preference)
-                    tts_generate(config, "。".join(texts), audio_path, voice=voice_id)
+                    tts_generate(
+                        config,
+                        "。".join(texts),
+                        audio_path,
+                        voice=voice_id,
+                        segments=_build_tts_segments(texts, roles),
+                    )
                     _status_update(progress, status_box, 0.6, "영상 렌더링")
                     output_path = os.path.join(config.output_dir, f"shorts_{now}.mp4")
                     ass_enabled = bool(getattr(config, "use_ass_subtitles", True) and PYSUBS2_AVAILABLE)
@@ -8254,6 +8647,7 @@ def run_batch(count: int, seed: str = "", beats: int = 7) -> None:
             llm_hint = (llm_hint + "\n\n" + growth_hint).strip() if llm_hint else growth_hint
         for attempt in range(3):
             script = generate_script_jp(config, extra_hint=llm_hint)
+            script = _inject_majisho_asmr_beat(script, enabled=getattr(config, "enable_majisho_tag", True))
             _meta_tmp = script.get("meta", {})
             topic_key = _pick_topic_key(_meta_tmp)
             if topic_key and _is_used_topic(_load_used_topics(config.used_topics_path), topic_key):
@@ -8286,7 +8680,13 @@ def run_batch(count: int, seed: str = "", beats: int = 7) -> None:
         now = datetime.utcnow().strftime("%Y%m%d_%H%M%S")
         audio_path = os.path.join(config.output_dir, f"tts_{now}_{index}.mp3")
         voice_id = pick_voice_id(config.openai_tts_voices, config.openai_tts_voice_preference)
-        tts_generate(config, "。".join(texts), audio_path, voice=voice_id)
+        tts_generate(
+            config,
+            "。".join(texts),
+            audio_path,
+            voice=voice_id,
+            segments=_build_tts_segments(texts, roles),
+        )
         output_path = os.path.join(config.output_dir, f"shorts_{now}_{index}.mp4")
         bgm_path = match_bgm_by_mood(config, mood)
         # 배경 선택: Minecraft vs 이미지
@@ -8343,6 +8743,12 @@ def run_batch(count: int, seed: str = "", beats: int = 7) -> None:
         _telemetry_log(
             f"배치 배경 요약: mode={background_mode}, video_segments={len([p for p in bg_vids_b if p])}, image_segments={len([p for p in bg_imgs_b if p])}",
             config,
+        )
+        bg_vids_b, bg_imgs_b = _apply_majisho_interlude_assets(
+            config,
+            roles,
+            bg_vids_b,
+            bg_imgs_b,
         )
         ass_enabled = bool(getattr(config, "use_ass_subtitles", True) and PYSUBS2_AVAILABLE)
         render_video(
