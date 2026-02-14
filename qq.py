@@ -3925,11 +3925,25 @@ def _summarize_ab_tests(config: AppConfig) -> str:
     now = _get_local_now(config)
     cutoff = now - timedelta(days=int(config.ab_report_days))
     filtered = []
+    local_tz = now.tzinfo
     for rec in records:
+        raw_ts = str(rec.get("date_jst", "") or "").strip()
         try:
-            ts = datetime.strptime(rec.get("date_jst", ""), "%Y-%m-%d %H:%M:%S")
+            # 기존 로그는 naive 문자열(YYYY-mm-dd HH:MM:SS)이라 로컬 타임존으로 간주.
+            if "T" in raw_ts:
+                ts = datetime.fromisoformat(raw_ts)
+            else:
+                ts = datetime.strptime(raw_ts, "%Y-%m-%d %H:%M:%S")
         except Exception:
             ts = now
+        if local_tz:
+            if ts.tzinfo is None:
+                ts = ts.replace(tzinfo=local_tz)
+            else:
+                ts = ts.astimezone(local_tz)
+        else:
+            if ts.tzinfo is not None:
+                ts = ts.replace(tzinfo=None)
         if ts >= cutoff:
             filtered.append(rec)
     if not filtered:
@@ -5262,7 +5276,7 @@ def _auto_jp_flow(
 
     # ── 로그 기록 ─────────────────────────────────────────
     log_row = {
-        "date_jst": datetime.utcnow().strftime("%Y-%m-%d %H:%M:%S"),
+        "date_jst": _get_local_now(config).strftime("%Y-%m-%d %H:%M:%S"),
         "title_ja": video_title,
         "topic_theme": video_title,
         "hashtags_ja": " ".join(hashtags),
@@ -5756,7 +5770,7 @@ def run_streamlit_app() -> None:
                         )
                         send_telegram_message(config.telegram_bot_token, config.telegram_admin_chat_id, report)
                     log_row = {
-                        "date_jst": datetime.utcnow().strftime("%Y-%m-%d %H:%M:%S"),
+                        "date_jst": _get_local_now(config).strftime("%Y-%m-%d %H:%M:%S"),
                         "title_ja": video_title_val,
                         "topic_theme": video_title_val,
                         "hashtags_ja": hashtags_val,
@@ -6532,7 +6546,7 @@ def run_batch(count: int, seed: str = "", beats: int = 7) -> None:
                         )
                         insert_video_comment(config, video_id, comment_text)
         log_row = {
-            "date_jst": datetime.utcnow().strftime("%Y-%m-%d %H:%M:%S"),
+            "date_jst": _get_local_now(config).strftime("%Y-%m-%d %H:%M:%S"),
             "title_ja": _title_b,
             "topic_theme": _title_b,
             "hashtags_ja": " ".join(_hashtags_b),
