@@ -16,7 +16,7 @@ import time
 import uuid
 from difflib import SequenceMatcher
 from html import unescape
-from urllib.parse import urljoin, urlencode, urlparse
+from urllib.parse import urljoin, urlencode, urlparse, quote
 from collections import Counter
 from dataclasses import dataclass
 from datetime import datetime, timedelta
@@ -456,6 +456,11 @@ class AppConfig:
     google_service_account_json: Optional[Dict[str, Any]]
     assets_dir: str
     manifest_path: str
+    library_sync_enabled: bool
+    library_sync_token: str
+    library_sync_repo: str
+    library_sync_branch: str
+    library_sync_auto_pull: bool
     output_dir: str
     font_path: str
     width: int
@@ -598,6 +603,10 @@ def load_config() -> AppConfig:
     )
     pixabay_api_key = (_get_secret("PIXABAY_API_KEY", "") or "").strip()
     pexels_api_key = (_get_secret("PEXELS_API_KEY", "") or "").strip()
+    library_sync_token = (
+        (_get_secret("LIBRARY_SYNC_GITHUB_TOKEN", "") or "").strip()
+        or (_get_secret("GITHUB_TOKEN", "") or "").strip()
+    )
     auto_run_hour = int(_get_secret("AUTO_RUN_HOUR", "18") or 18)
     auto_run_times = _get_list("AUTO_RUN_TIMES") or ["12:30", "20:30"]
     return AppConfig(
@@ -612,6 +621,14 @@ def load_config() -> AppConfig:
         google_service_account_json=_get_json("GOOGLE_SERVICE_ACCOUNT_JSON"),
         assets_dir=assets_dir,
         manifest_path=manifest_path,
+        library_sync_enabled=_get_bool("LIBRARY_SYNC_ENABLED", True),
+        library_sync_token=library_sync_token,
+        library_sync_repo=(
+            _get_secret("LIBRARY_SYNC_GITHUB_REPO", "yongmin458412-beep/auto-shorts")
+            or "yongmin458412-beep/auto-shorts"
+        ),
+        library_sync_branch=(_get_secret("LIBRARY_SYNC_GITHUB_BRANCH", "main") or "main"),
+        library_sync_auto_pull=_get_bool("LIBRARY_SYNC_AUTO_PULL", True),
         output_dir=output_dir,
         font_path=(_get_secret("FONT_PATH", "") or "").strip()
         or _ensure_japanese_font(_get_secret("ASSETS_DIR", "data/assets") or "data/assets"),
@@ -3024,6 +3041,200 @@ def _pick_template_asset_path(config: AppConfig) -> str:
         if path and os.path.exists(path):
             return path
     return ""
+
+
+def _library_sync_ready(config: AppConfig) -> bool:
+    return bool(
+        getattr(config, "library_sync_enabled", False)
+        and str(getattr(config, "library_sync_token", "") or "").strip()
+        and str(getattr(config, "library_sync_repo", "") or "").strip()
+    )
+
+
+def _repo_rel_path(path: str) -> str:
+    p = str(path or "").strip()
+    if not p:
+        return ""
+    if os.path.isabs(p):
+        try:
+            rel = os.path.relpath(p, os.getcwd())
+        except Exception:
+            return ""
+    else:
+        rel = p
+    rel = rel.replace("\\", "/").lstrip("./")
+    if rel.startswith(".."):
+        return ""
+    return rel
+
+
+def _github_headers(token: str) -> Dict[str, str]:
+    return {
+        "Authorization": f"Bearer {token}",
+        "Accept": "application/vnd.github+json",
+        "X-GitHub-Api-Version": "2022-11-28",
+    }
+
+
+def _github_get_file_content(
+    repo: str,
+    path: str,
+    branch: str,
+    token: str,
+) -> Tuple[Optional[bytes], str]:
+    rel = _repo_rel_path(path)
+    if not rel:
+        return None, ""
+    url = f"https://api.github.com/repos/{repo}/contents/{quote(rel, safe='/')}"
+    try:
+        resp = requests.get(url, headers=_github_headers(token), params={"ref": branch}, timeout=45)
+    except Exception:
+        return None, ""
+    if resp.status_code == 404:
+        return None, ""
+    if resp.status_code != 200:
+        raise RuntimeError(f"GitHub GET 실패: {resp.status_code} {resp.text[:240]}")
+    data = resp.json() if resp.content else {}
+    raw = str(data.get("content", "") or "").replace("\n", "")
+    sha = str(data.get("sha", "") or "")
+    if not raw:
+        return None, sha
+    try:
+        return base64.b64decode(raw), sha
+    except Exception:
+        return None, sha
+
+
+def _github_put_file_content(
+    repo: str,
+    path: str,
+    branch: str,
+    token: str,
+    content: bytes,
+    message: str,
+) -> None:
+    rel = _repo_rel_path(path)
+    if not rel:
+        raise RuntimeError(f"저장 경로가 레포 외부입니다: {path}")
+    _, sha = _github_get_file_content(repo, rel, branch, token)
+    url = f"https://api.github.com/repos/{repo}/contents/{quote(rel, safe='/')}"
+    payload: Dict[str, Any] = {
+        "message": message,
+        "branch": branch,
+        "content": base64.b64encode(content).decode("utf-8"),
+    }
+    if sha:
+        payload["sha"] = sha
+    resp = requests.put(url, headers=_github_headers(token), json=payload, timeout=60)
+    if resp.status_code not in {200, 201}:
+        raise RuntimeError(f"GitHub PUT 실패: {resp.status_code} {resp.text[:240]}")
+
+
+def _safe_write_bytes(path: str, data: bytes) -> None:
+    os.makedirs(os.path.dirname(path) or ".", exist_ok=True)
+    with open(path, "wb") as file:
+        file.write(data)
+
+
+def _prepare_manifest_for_sync(config: AppConfig) -> List[AssetItem]:
+    try:
+        items = load_manifest(config.manifest_path)
+    except Exception:
+        items = []
+    prepared: List[AssetItem] = []
+    for item in items:
+        resolved = _resolve_asset_image_path(config, str(getattr(item, "path", "") or ""))
+        if not resolved or (not os.path.exists(resolved)):
+            continue
+        repo_rel = _repo_rel_path(resolved)
+        if not repo_rel:
+            # 레포 외부 파일(/tmp 등)은 branding으로 복사 후 관리
+            ext = os.path.splitext(resolved)[1].lower() or ".png"
+            target_rel = os.path.join("data", "assets", "branding", f"sync_{uuid.uuid4().hex[:8]}{ext}")
+            target_abs = os.path.join(os.getcwd(), target_rel)
+            os.makedirs(os.path.dirname(target_abs), exist_ok=True)
+            shutil.copy2(resolved, target_abs)
+            repo_rel = target_rel.replace("\\", "/")
+        prepared.append(
+            AssetItem(
+                asset_id=str(getattr(item, "asset_id", "") or f"asset_{uuid.uuid4().hex[:8]}"),
+                path=repo_rel,
+                tags=[str(t).strip() for t in (getattr(item, "tags", []) or []) if str(t).strip()],
+                kind=str(getattr(item, "kind", "image") or "image"),
+            )
+        )
+    save_manifest(config.manifest_path, prepared)
+    return prepared
+
+
+def sync_library_to_github(config: AppConfig, reason: str = "manual") -> Tuple[bool, str]:
+    if not _library_sync_ready(config):
+        return False, "동기화 설정 없음 (LIBRARY_SYNC_GITHUB_TOKEN / LIBRARY_SYNC_GITHUB_REPO 확인)"
+    repo = str(getattr(config, "library_sync_repo", "") or "").strip()
+    branch = str(getattr(config, "library_sync_branch", "main") or "main").strip()
+    token = str(getattr(config, "library_sync_token", "") or "").strip()
+    items = _prepare_manifest_for_sync(config)
+    manifest_rel = _repo_rel_path(config.manifest_path)
+    if not manifest_rel:
+        return False, f"manifest 경로가 레포 밖입니다: {config.manifest_path}"
+    files: List[str] = [manifest_rel]
+    for item in items:
+        rel = _repo_rel_path(item.path)
+        if rel:
+            files.append(rel)
+            sidecar = f"{rel}.layout.json"
+            sidecar_abs = os.path.join(os.getcwd(), sidecar)
+            if os.path.exists(sidecar_abs):
+                files.append(sidecar)
+    unique_files: List[str] = []
+    for f in files:
+        if f and (f not in unique_files):
+            unique_files.append(f)
+    uploaded = 0
+    for rel in unique_files:
+        abs_path = os.path.join(os.getcwd(), rel)
+        if not os.path.exists(abs_path):
+            continue
+        with open(abs_path, "rb") as file:
+            data = file.read()
+        msg = f"chore(library-sync): {reason} - {os.path.basename(rel)}"
+        _github_put_file_content(repo, rel, branch, token, data, msg)
+        uploaded += 1
+    return True, f"GitHub 영구 저장 완료 ({uploaded}개 파일, {branch})"
+
+
+def sync_library_from_github(config: AppConfig) -> Tuple[bool, str]:
+    if not _library_sync_ready(config):
+        return False, "동기화 설정 없음 (LIBRARY_SYNC_GITHUB_TOKEN / LIBRARY_SYNC_GITHUB_REPO 확인)"
+    repo = str(getattr(config, "library_sync_repo", "") or "").strip()
+    branch = str(getattr(config, "library_sync_branch", "main") or "main").strip()
+    token = str(getattr(config, "library_sync_token", "") or "").strip()
+    manifest_rel = _repo_rel_path(config.manifest_path)
+    if not manifest_rel:
+        return False, f"manifest 경로가 레포 밖입니다: {config.manifest_path}"
+    manifest_data, _ = _github_get_file_content(repo, manifest_rel, branch, token)
+    if not manifest_data:
+        return False, "원격 manifest가 없습니다."
+    manifest_abs = os.path.join(os.getcwd(), manifest_rel)
+    _safe_write_bytes(manifest_abs, manifest_data)
+    try:
+        raw = json.loads(manifest_data.decode("utf-8"))
+    except Exception:
+        return False, "원격 manifest JSON 파싱 실패"
+    restored = 0
+    for item in (raw if isinstance(raw, list) else []):
+        rel = _repo_rel_path(str((item or {}).get("path", "") or ""))
+        if not rel:
+            continue
+        data, _ = _github_get_file_content(repo, rel, branch, token)
+        if data:
+            _safe_write_bytes(os.path.join(os.getcwd(), rel), data)
+            restored += 1
+        sidecar_rel = f"{rel}.layout.json"
+        sidecar_data, _ = _github_get_file_content(repo, sidecar_rel, branch, token)
+        if sidecar_data:
+            _safe_write_bytes(os.path.join(os.getcwd(), sidecar_rel), sidecar_data)
+    return True, f"GitHub에서 라이브러리 복원 완료 ({restored}개 에셋)"
 
 
 def _load_template_layout(template_path: str) -> Dict[str, Any]:
@@ -9088,6 +9299,22 @@ def run_streamlit_app() -> None:
             config.output_dir,
         ]
     )
+    if (
+        getattr(config, "library_sync_auto_pull", True)
+        and _library_sync_ready(config)
+        and (not st.session_state.get("_library_sync_boot_done", False))
+    ):
+        try:
+            ok, msg = sync_library_from_github(config)
+            _telemetry_log(f"라이브러리 부팅 동기화: {msg}", config)
+            st.session_state["_library_sync_boot_done"] = True
+            st.session_state["_library_sync_boot_msg"] = msg
+            st.session_state["_library_sync_boot_ok"] = bool(ok)
+        except Exception as exc:
+            _telemetry_log(f"라이브러리 부팅 동기화 실패: {exc}", config)
+            st.session_state["_library_sync_boot_done"] = True
+            st.session_state["_library_sync_boot_msg"] = str(exc)
+            st.session_state["_library_sync_boot_ok"] = False
 
     st.sidebar.title("숏츠 자동화 스튜디오")
     st.sidebar.subheader("상태")
@@ -9115,6 +9342,14 @@ def run_streamlit_app() -> None:
         f"{'사용가능' if PYSUBS2_AVAILABLE else '미설치'}"
     )
     st.sidebar.write(f"썸네일: {'켜짐' if config.thumbnail_enabled else '꺼짐'}")
+    if _library_sync_ready(config):
+        boot_msg = str(st.session_state.get("_library_sync_boot_msg", "") or "")
+        if boot_msg:
+            st.sidebar.write(f"라이브러리 동기화: {boot_msg}")
+        else:
+            st.sidebar.write("라이브러리 동기화: 설정됨")
+    else:
+        st.sidebar.write("라이브러리 동기화: 미설정")
     if not MOVIEPY_AVAILABLE:
         st.sidebar.error(f"MoviePy 오류: {MOVIEPY_ERROR}")
 
@@ -9168,6 +9403,11 @@ def run_streamlit_app() -> None:
         "- `AUTO_RUN_LOCK_PATH` (중복 실행 방지)\n"
         "- `YOUTUBE_API_KEY` (A/B 리포트 통계용)\n"
         "- `AB_REPORT_ENABLED`, `AB_REPORT_HOUR`, `AB_REPORT_DAYS`\n\n"
+        "- `LIBRARY_SYNC_ENABLED` (라이브러리 GitHub 영구저장 on/off)\n"
+        "- `LIBRARY_SYNC_GITHUB_TOKEN` (repo write 권한 PAT)\n"
+        "- `LIBRARY_SYNC_GITHUB_REPO` (예: `yongmin458412-beep/auto-shorts`)\n"
+        "- `LIBRARY_SYNC_GITHUB_BRANCH` (기본 `main`)\n"
+        "- `LIBRARY_SYNC_AUTO_PULL` (앱 시작 시 원격 복원)\n\n"
         "- `JP_YOUTUBE_ONLY` (일본 쇼츠 유튜브 전용)\n\n"
         "- `USED_TOPICS_PATH` (중복 주제 저장 경로)\n\n"
         "**BGM 무드 폴더:** `assets/bgm/mystery_suspense/`, `assets/bgm/fast_exciting/`"
@@ -9730,6 +9970,24 @@ def run_streamlit_app() -> None:
 
     if page == "에셋":
         st.header("에셋")
+        st.caption("라이브러리를 리부트 후에도 유지하려면 GitHub 영구 저장 버튼을 사용하세요.")
+        col_sync1, col_sync2 = st.columns(2)
+        with col_sync1:
+            if st.button("라이브러리 영구 저장 (GitHub)"):
+                ok, msg = sync_library_to_github(config, reason="ui-save")
+                if ok:
+                    st.success(msg)
+                else:
+                    st.error(msg)
+        with col_sync2:
+            if st.button("라이브러리 복원 (GitHub)"):
+                ok, msg = sync_library_from_github(config)
+                if ok:
+                    st.success(msg)
+                    st.rerun()
+                else:
+                    st.error(msg)
+
         # 업로드 이미지는 git에 포함된 branding/ 폴더에 저장 → 재시작 후에도 영속적으로 유지
         branding_dir = os.path.join(config.assets_dir, "branding")
         os.makedirs(branding_dir, exist_ok=True)
@@ -9747,6 +10005,12 @@ def run_streamlit_app() -> None:
                     add_asset(config.manifest_path, save_path, tags_from_text(tag_input))
                     saved_count += 1
             if saved_count:
+                if _library_sync_ready(config):
+                    ok, msg = sync_library_to_github(config, reason="asset-upload")
+                    if ok:
+                        st.info(msg)
+                    else:
+                        st.warning(msg)
                 st.success(f"에셋 {saved_count}개가 저장되었습니다.")
                 st.rerun()
             else:
@@ -10025,6 +10289,12 @@ def run_streamlit_app() -> None:
                 saved_set = set(selected_files)
                 current = st.session_state.get("inbox_current_files", [])
                 st.session_state["inbox_current_files"] = [f for f in current if f not in saved_set]
+                if _library_sync_ready(config):
+                    ok, msg = sync_library_to_github(config, reason="inbox-save")
+                    if ok:
+                        st.info(msg)
+                    else:
+                        st.warning(msg)
                 st.success(f"선택한 짤 {len(selected_files)}개가 라이브러리에 추가되었습니다.")
                 st.rerun()
 
@@ -10085,6 +10355,12 @@ def run_streamlit_app() -> None:
                             combined.append(cat_map[asset_id])
                         apply_map[asset_id] = combined
                     updated = update_asset_tags(config.manifest_path, apply_map, keep_existing=keep_tags)
+                    if _library_sync_ready(config):
+                        ok, msg = sync_library_to_github(config, reason="tag-update")
+                        if ok:
+                            st.info(msg)
+                        else:
+                            st.warning(msg)
                     st.success(f"{updated}개 에셋 태그+카테고리가 업데이트되었습니다.")
                     st.rerun()
 
@@ -10094,6 +10370,12 @@ def run_streamlit_app() -> None:
                     st.error("선택된 에셋이 없습니다.")
                 else:
                     removed = remove_assets(config.manifest_path, ids, delete_files=delete_files)
+                    if _library_sync_ready(config):
+                        ok, msg = sync_library_to_github(config, reason="asset-delete")
+                        if ok:
+                            st.info(msg)
+                        else:
+                            st.warning(msg)
                     st.success(f"{removed}개 에셋이 삭제되었습니다.")
                     st.rerun()
         else:
