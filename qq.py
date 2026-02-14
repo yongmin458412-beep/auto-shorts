@@ -591,7 +591,7 @@ def load_config() -> AppConfig:
         openai_model=_get_secret("OPENAI_MODEL", "gpt-4.1-mini") or "gpt-4.1-mini",
         openai_vision_model=_get_secret("OPENAI_VISION_MODEL", "") or "",
         openai_tts_voices=_get_list("OPENAI_TTS_VOICES")
-        or ([v for v in [_get_secret("OPENAI_TTS_VOICE", "shimmer")] if v]),
+        or ([v for v in [_get_secret("OPENAI_TTS_VOICE", "nova")] if v]),
         openai_tts_voice_preference=_get_list("OPENAI_TTS_VOICE_PREFERENCE"),
         openai_tts_model=_get_secret("OPENAI_TTS_MODEL", "tts-1") or "tts-1",
         sheet_id=_get_secret("SHEET_ID", "") or "",
@@ -2239,8 +2239,8 @@ def match_bgm_by_mood(config: AppConfig, mood: str) -> Optional[str]:
 
 
 # 일본 쇼츠용 기본 우선순위: 귀엽고 밝은 톤
-ENERGETIC_VOICE_ORDER = ["shimmer", "nova", "alloy", "echo", "fable", "onyx"]
-CUTE_VOICE_ORDER = ["shimmer", "nova", "alloy", "echo", "fable", "onyx"]
+ENERGETIC_VOICE_ORDER = ["nova", "echo", "shimmer", "alloy", "fable", "onyx"]
+CUTE_VOICE_ORDER = ["nova", "echo", "shimmer", "alloy", "fable", "onyx"]
 
 
 def pick_voice_id(
@@ -2250,7 +2250,7 @@ def pick_voice_id(
 ) -> str:
     clean_voice_ids = [str(v).strip() for v in (voice_ids or []) if str(v).strip()]
     if not clean_voice_ids:
-        return "shimmer" if force_cute else ""
+        return "nova" if force_cute else ""
     pref_list = [str(v).strip() for v in (preference or []) if str(v).strip() in clean_voice_ids]
     if force_cute:
         for v in CUTE_VOICE_ORDER:
@@ -2523,7 +2523,7 @@ def _apply_ffmpeg_audio_filter(input_path: str, output_path: str, filter_expr: s
 
 
 def _pick_boy_voice_fallback(config: AppConfig, current_voice: str = "") -> str:
-    preferred = ["echo", "alloy", "fable", "nova", "shimmer", "onyx"]
+    preferred = ["echo", "nova", "alloy", "fable", "shimmer", "onyx"]
     pool: List[str] = []
     if current_voice:
         pool.append(str(current_voice).strip())
@@ -2573,28 +2573,23 @@ def _apply_boy_voice_filter(audio_path: str) -> str:
 def _apply_baby_voice_filter(config: AppConfig, audio_path: str) -> Tuple[str, bool]:
     if not getattr(config, "tts_baby_voice", True):
         return audio_path, False
-    pitch = float(getattr(config, "tts_baby_pitch", 1.20) or 1.20)
-    pitch = max(1.02, min(pitch, 1.35))
-    tempo = max(0.5, min(2.0, 1.0 / pitch))
+    tone = float(getattr(config, "tts_baby_pitch", 1.20) or 1.20)
+    tone = max(1.0, min(tone, 1.3))
     filtered = os.path.join(
         os.path.dirname(audio_path) or ".",
         f"baby_{os.path.basename(audio_path)}",
     )
     filt = (
-        f"asetrate=44100*{pitch:.4f},"
-        f"atempo={tempo:.4f},"
-        "aresample=44100,"
-        "highpass=f=120,"
-        "treble=g=2,"
-        "volume=1.08"
+        "highpass=f=110,"
+        f"treble=g={1.4 + ((tone - 1.0) * 1.2):.3f},"
+        f"volume={1.03 + ((tone - 1.0) * 0.15):.3f}"
     )
     applied = _apply_ffmpeg_audio_filter(audio_path, filtered, filt)
     if (not applied):
-        # 환경에 따라 atempo/treble 체인이 실패할 수 있어 단순 체인으로 재시도
+        # 피치 변경 없이 밝은 톤만 보정
         fallback_filt = (
-            f"asetrate=44100*{pitch:.4f},"
-            "aresample=44100,"
-            "highpass=f=120,"
+            "highpass=f=105,"
+            "treble=g=1.2,"
             "volume=1.05"
         )
         applied = _apply_ffmpeg_audio_filter(audio_path, filtered, fallback_filt)
@@ -4948,10 +4943,79 @@ def _pick_latest_image(path: str) -> Optional[str]:
     return candidates[0]
 
 
+def _resolve_asset_image_path(config: AppConfig, raw_path: str) -> str:
+    path = str(raw_path or "").strip()
+    if not path:
+        return ""
+    if os.path.isabs(path) and os.path.exists(path):
+        return path
+    candidates = [
+        path,
+        os.path.join(config.assets_dir, path),
+        os.path.join(os.getcwd(), path),
+    ]
+    for cand in candidates:
+        if cand and os.path.exists(cand):
+            return cand
+    return ""
+
+
+def _pick_library_primary_photo(config: AppConfig) -> Optional[str]:
+    try:
+        items = load_manifest(config.manifest_path)
+    except Exception:
+        items = []
+    if not items:
+        return None
+    preferred: List[Tuple[float, str]] = []
+    fallback: List[Tuple[float, str]] = []
+    for item in items:
+        if str(getattr(item, "kind", "") or "").lower() != "image":
+            continue
+        resolved = _resolve_asset_image_path(config, str(getattr(item, "path", "") or ""))
+        if not resolved or not resolved.lower().endswith((".jpg", ".jpeg", ".png", ".webp")):
+            continue
+        try:
+            mtime = os.path.getmtime(resolved)
+        except Exception:
+            mtime = 0.0
+        tags = [str(t).strip().lower() for t in (getattr(item, "tags", []) or [])]
+        if any(tag in {"me", "my", "owner", "self", "profile", "portrait", "user"} for tag in tags):
+            preferred.append((mtime, resolved))
+        else:
+            fallback.append((mtime, resolved))
+    if preferred:
+        preferred.sort(key=lambda x: x[0], reverse=True)
+        return preferred[0][1]
+    if fallback:
+        fallback.sort(key=lambda x: x[0], reverse=True)
+        return fallback[0][1]
+    return None
+
+
 def _resolve_primary_photo_asset(config: AppConfig) -> Optional[str]:
     assets_photo_dir = os.path.join(config.assets_dir, "user_photos")
     os.makedirs(assets_photo_dir, exist_ok=True)
 
+    # 1) 에셋 라이브러리(manifest) 우선
+    library_photo = _pick_library_primary_photo(config)
+    if library_photo:
+        ext = os.path.splitext(library_photo)[1].lower() or ".jpg"
+        target = os.path.join(assets_photo_dir, f"primary_from_library{ext}")
+        try:
+            need_copy = True
+            if os.path.exists(target):
+                need_copy = (
+                    os.path.getsize(library_photo) != os.path.getsize(target)
+                    or int(os.path.getmtime(library_photo)) != int(os.path.getmtime(target))
+                )
+            if need_copy:
+                shutil.copy2(library_photo, target)
+            return target if os.path.exists(target) else library_photo
+        except Exception:
+            return library_photo
+
+    # 2) PRIMARY_PHOTO_PATH 지정값
     configured = str(getattr(config, "primary_photo_path", "") or "").strip()
     if configured and os.path.exists(configured) and configured.lower().endswith((".jpg", ".jpeg", ".png", ".webp")):
         ext = os.path.splitext(configured)[1].lower() or ".jpg"
@@ -4972,10 +5036,12 @@ def _resolve_primary_photo_asset(config: AppConfig) -> Optional[str]:
         except Exception:
             return configured
 
+    # 3) 이미 저장된 primary 캐시
     existing_primary = _pick_latest_image(assets_photo_dir)
     if existing_primary:
         return existing_primary
 
+    # 4) 마지막 fallback
     fallback_sources = [
         os.path.join(config.assets_dir, "inbox"),
         os.path.join(config.assets_dir, "images"),
@@ -5010,8 +5076,11 @@ def _apply_primary_photo_override(
     if len(bg_image_paths) < max_len:
         placeholder = _ensure_placeholder_image(config)
         bg_image_paths = (bg_image_paths + [placeholder] * max_len)[:max_len]
-    bg_video_paths[0] = None
-    bg_image_paths[0] = photo_path
+    # 3초 훅(첫 세그먼트) 이후부터 사용자 사진 사용
+    start_idx = 1 if max_len > 1 else 0
+    for idx in range(start_idx, max_len):
+        bg_video_paths[idx] = None
+        bg_image_paths[idx] = photo_path
     return bg_video_paths, bg_image_paths
 
 
@@ -7427,16 +7496,16 @@ def _auto_jp_flow(
                 bg_video_paths = [fallback_video] * len(texts)
                 bg_image_paths = [placeholder] * len(texts)
                 _telemetry_log("이미지 결과 부족 → 컨텍스트 영상 대체", config)
-    bg_video_paths, bg_image_paths = _apply_primary_photo_override(config, bg_video_paths, bg_image_paths)
-    video_count = len([p for p in bg_video_paths if p])
-    image_count = len([p for p in bg_image_paths if p])
-    _telemetry_log(f"배경 적용 요약: mode={background_mode}, video_segments={video_count}, image_segments={image_count}", config)
     bg_video_paths, bg_image_paths = _apply_majisho_interlude_assets(
         config,
         roles,
         bg_video_paths,
         bg_image_paths,
     )
+    bg_video_paths, bg_image_paths = _apply_primary_photo_override(config, bg_video_paths, bg_image_paths)
+    video_count = len([p for p in bg_video_paths if p])
+    image_count = len([p for p in bg_image_paths if p])
+    _telemetry_log(f"배경 적용 요약: mode={background_mode}, video_segments={video_count}, image_segments={image_count}", config)
 
     # 에셋 스티커는 사용하지 않음 (배경 이미지/영상 중심)
     placeholder = _ensure_placeholder_image(config)
@@ -8143,16 +8212,16 @@ def run_streamlit_app() -> None:
                                 bg_vids_manual = [fallback_video] * len(texts)
                                 bg_imgs_manual = [placeholder] * len(texts)
                                 _telemetry_log("수동 렌더링: 이미지 부족 → 컨텍스트 영상 대체", config)
-                    bg_vids_manual, bg_imgs_manual = _apply_primary_photo_override(config, bg_vids_manual, bg_imgs_manual)
-                    _telemetry_log(
-                        f"수동 배경 요약: mode={background_mode}, video_segments={len([p for p in bg_vids_manual if p])}, image_segments={len([p for p in bg_imgs_manual if p])}",
-                        config,
-                    )
                     bg_vids_manual, bg_imgs_manual = _apply_majisho_interlude_assets(
                         config,
                         roles,
                         bg_vids_manual,
                         bg_imgs_manual,
+                    )
+                    bg_vids_manual, bg_imgs_manual = _apply_primary_photo_override(config, bg_vids_manual, bg_imgs_manual)
+                    _telemetry_log(
+                        f"수동 배경 요약: mode={background_mode}, video_segments={len([p for p in bg_vids_manual if p])}, image_segments={len([p for p in bg_imgs_manual if p])}",
+                        config,
                     )
                     _status_update(progress, status_box, 0.3, "TTS 생성")
                     now = datetime.utcnow().strftime("%Y%m%d_%H%M%S")
@@ -9143,16 +9212,16 @@ def run_batch(count: int, seed: str = "", beats: int = 7) -> None:
                     background_mode = "context_video"
                     bg_vids_b = [fallback_video] * len(texts)
                     bg_imgs_b = [placeholder] * len(texts)
-        bg_vids_b, bg_imgs_b = _apply_primary_photo_override(config, bg_vids_b, bg_imgs_b)
-        _telemetry_log(
-            f"배치 배경 요약: mode={background_mode}, video_segments={len([p for p in bg_vids_b if p])}, image_segments={len([p for p in bg_imgs_b if p])}",
-            config,
-        )
         bg_vids_b, bg_imgs_b = _apply_majisho_interlude_assets(
             config,
             roles,
             bg_vids_b,
             bg_imgs_b,
+        )
+        bg_vids_b, bg_imgs_b = _apply_primary_photo_override(config, bg_vids_b, bg_imgs_b)
+        _telemetry_log(
+            f"배치 배경 요약: mode={background_mode}, video_segments={len([p for p in bg_vids_b if p])}, image_segments={len([p for p in bg_imgs_b if p])}",
+            config,
         )
         ass_enabled = bool(getattr(config, "use_ass_subtitles", True) and PYSUBS2_AVAILABLE)
         render_video(
