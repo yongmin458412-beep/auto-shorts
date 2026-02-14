@@ -3813,6 +3813,7 @@ def _score_pixabay_hit(hit: Dict[str, Any], query_tokens: List[str]) -> int:
     height = int(hit.get("imageHeight") or 0)
     if height > width > 0:
         score += 2
+    score += _ratio_score_9x16(width, height)
     area = width * height
     if area >= 2_000_000:
         score += 4
@@ -4008,6 +4009,7 @@ def fetch_serpapi_image(
                 score += 2
             ow = _to_int(item.get("original_width") or item.get("width"))
             oh = _to_int(item.get("original_height") or item.get("height"))
+            score += _ratio_score_9x16(ow, oh)
             area = ow * oh
             if area >= 2_000_000:
                 score += 4
@@ -4094,6 +4096,25 @@ def _image_size(path: str) -> Tuple[int, int]:
     except Exception:
         return (0, 0)
     return (0, 0)
+
+
+def _ratio_distance(width: int, height: int, target_ratio: float = 9.0 / 16.0) -> float:
+    if width <= 0 or height <= 0:
+        return 99.0
+    return abs((float(width) / float(height)) - float(target_ratio))
+
+
+def _ratio_score_9x16(width: int, height: int) -> int:
+    d = _ratio_distance(width, height, target_ratio=(9.0 / 16.0))
+    if d <= 0.02:
+        return 6
+    if d <= 0.05:
+        return 4
+    if d <= 0.09:
+        return 2
+    if height > width > 0:
+        return 1
+    return 0
 
 
 def _required_cover_scale(
@@ -4184,6 +4205,76 @@ def _upscale_bg_image_to_canvas(
     return None
 
 
+def _normalize_bg_image_to_canvas_ratio(
+    path: str,
+    canvas_w: int,
+    canvas_h: int,
+    output_dir: str = "/tmp/ratio_bg_images",
+) -> Optional[str]:
+    """
+    이미지를 캔버스 비율(기본 9:16)에 맞춰 중심 크롭해서 저장한다.
+    """
+    if (not MOVIEPY_AVAILABLE) or Image is None:
+        return path
+    if not path or (not os.path.exists(path)):
+        return None
+    w, h = _image_size(path)
+    if w <= 0 or h <= 0:
+        return None
+    target_ratio = float(canvas_w) / float(canvas_h) if canvas_w > 0 and canvas_h > 0 else (9.0 / 16.0)
+    current_ratio = float(w) / float(h)
+    # 이미 거의 9:16이면 그대로 사용
+    if abs(current_ratio - target_ratio) <= 0.015:
+        return path
+    try:
+        img = _open_image_rgb_safe(path)
+        if current_ratio > target_ratio:
+            # 너무 넓음 -> 좌우 크롭
+            new_w = int(round(float(h) * target_ratio))
+            new_w = max(1, min(w, new_w))
+            left = max(0, (w - new_w) // 2)
+            cropped = img.crop((left, 0, left + new_w, h))
+        else:
+            # 너무 길쭉함 -> 상하 크롭
+            new_h = int(round(float(w) / target_ratio))
+            new_h = max(1, min(h, new_h))
+            top = max(0, (h - new_h) // 2)
+            cropped = img.crop((0, top, w, top + new_h))
+        os.makedirs(output_dir, exist_ok=True)
+        ext = os.path.splitext(path)[1].lower()
+        if ext not in {".jpg", ".jpeg", ".png", ".webp"}:
+            ext = ".jpg"
+        out_path = os.path.join(output_dir, f"ratio_{random.randint(100000, 999999)}{ext}")
+        save_kwargs: Dict[str, Any] = {}
+        fmt = "JPEG"
+        if ext == ".png":
+            fmt = "PNG"
+            save_kwargs = {"optimize": True}
+        elif ext == ".webp":
+            fmt = "WEBP"
+            save_kwargs = {"quality": 95, "method": 6}
+        else:
+            cropped = cropped.convert("RGB")
+            save_kwargs = {"quality": 95, "optimize": True, "progressive": True, "subsampling": 0}
+        cropped.save(out_path, format=fmt, **save_kwargs)
+        return out_path if os.path.exists(out_path) else path
+    except Exception:
+        return path
+
+
+def _is_canvas_ratio_match(
+    path: str,
+    canvas_w: int,
+    canvas_h: int,
+    tolerance: float = 0.04,
+) -> bool:
+    w, h = _image_size(path)
+    if w <= 0 or h <= 0:
+        return False
+    target_ratio = float(canvas_w) / float(canvas_h) if canvas_w > 0 and canvas_h > 0 else (9.0 / 16.0)
+    return _ratio_distance(w, h, target_ratio=target_ratio) <= max(0.01, float(tolerance))
+
+
 def _score_image_candidate_text(
     text: str,
     query_tokens: List[str],
@@ -4211,7 +4302,7 @@ def _extract_pinterest_pin_image_url(pin: Dict[str, Any]) -> str:
     if not isinstance(pin, dict):
         return ""
 
-    def _node_area(node_key: str, node_val: Dict[str, Any]) -> int:
+    def _node_score(node_key: str, node_val: Dict[str, Any]) -> int:
         width = int(node_val.get("width") or 0)
         height = int(node_val.get("height") or 0)
         if width <= 0 or height <= 0:
@@ -4219,10 +4310,12 @@ def _extract_pinterest_pin_image_url(pin: Dict[str, Any]) -> str:
             if match:
                 width = int(match.group(1))
                 height = int(match.group(2))
-        return max(0, width * height)
+        area = max(0, width * height)
+        bonus = _ratio_score_9x16(width, height) * 500_000
+        return area + bonus
 
     best_url = ""
-    best_area = -1
+    best_score = -1
     media = pin.get("media", {})
     if isinstance(media, dict):
         images = media.get("images", {})
@@ -4233,9 +4326,9 @@ def _extract_pinterest_pin_image_url(pin: Dict[str, Any]) -> str:
                 url = str(node.get("url", "") or "").strip()
                 if not url:
                     continue
-                area = _node_area(str(key), node)
-                if area > best_area:
-                    best_area = area
+                score = _node_score(str(key), node)
+                if score > best_score:
+                    best_score = score
                     best_url = url
             if best_url:
                 return best_url
@@ -4534,6 +4627,12 @@ def fetch_segment_images(
                 max_upscale_ratio=1.85,
             ):
                 return None
+        normalized = _normalize_bg_image_to_canvas_ratio(path, canvas_w=canvas_w, canvas_h=canvas_h)
+        if not normalized:
+            return None
+        path = normalized
+        if not _is_canvas_ratio_match(path, canvas_w=canvas_w, canvas_h=canvas_h, tolerance=0.04):
+            return None
         sig = _quick_image_hash(path)
         if sig and (not allow_duplicate) and sig in used_hashes:
             return None
@@ -6341,6 +6440,7 @@ def collect_images_pexels(
         score = width * height
         if height >= width > 0:
             score += 500_000
+        score += _ratio_score_9x16(width, height) * 250_000
         candidates.append((score, str(image_url)))
     candidates.sort(key=lambda row: row[0], reverse=True)
     for _, image_url in candidates:
