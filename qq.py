@@ -503,6 +503,12 @@ class AppConfig:
     use_bg_videos: bool
     render_threads: int
     use_korean_template: bool
+    fixed_template_enabled: bool
+    fixed_template_path: str
+    fixed_template_content_scale: float
+    fixed_template_center_y_ratio: float
+    fixed_template_title_top_ratio: float
+    fixed_template_title_bottom_ratio: float
     caption_max_chars: int
     caption_hold_ratio: float
     caption_trim: bool
@@ -663,6 +669,15 @@ def load_config() -> AppConfig:
         use_bg_videos=_get_bool("USE_BG_VIDEOS", True),  # 기본값 True: 배경영상 항상 활성화
         render_threads=int(_get_secret("RENDER_THREADS", "1") or 1),
         use_korean_template=_get_bool("USE_KOREAN_TEMPLATE", True),
+        fixed_template_enabled=_get_bool("FIXED_TEMPLATE_ENABLED", True),
+        fixed_template_path=(
+            _get_secret("FIXED_TEMPLATE_PATH", "data/assets/branding/fixed_template.png")
+            or "data/assets/branding/fixed_template.png"
+        ),
+        fixed_template_content_scale=float(_get_secret("FIXED_TEMPLATE_CONTENT_SCALE", "0.70") or 0.70),
+        fixed_template_center_y_ratio=float(_get_secret("FIXED_TEMPLATE_CENTER_Y_RATIO", "0.68") or 0.68),
+        fixed_template_title_top_ratio=float(_get_secret("FIXED_TEMPLATE_TITLE_TOP_RATIO", "0.27") or 0.27),
+        fixed_template_title_bottom_ratio=float(_get_secret("FIXED_TEMPLATE_TITLE_BOTTOM_RATIO", "0.39") or 0.39),
         caption_max_chars=int(_get_secret("CAPTION_MAX_CHARS", "14") or 14),
         caption_hold_ratio=float(_get_secret("CAPTION_HOLD_RATIO", "0.9") or 0.9),
         caption_trim=_get_bool("CAPTION_TRIM", True),
@@ -1067,6 +1082,33 @@ def _inject_majisho_asmr_beat(script: Dict[str, Any], enabled: bool = True) -> D
     return script
 
 
+def _inject_like_subscribe_outro(script: Dict[str, Any], enabled: bool = True) -> Dict[str, Any]:
+    if not enabled:
+        return script
+    timeline = _get_story_timeline(script)
+    if not timeline:
+        return script
+    for row in timeline:
+        text = str(row.get("script_ja", "") or "")
+        if re.search(r"(いいね|チャンネル登録|登録して|フォローして)", text):
+            return script
+    insert_item = {
+        "order": len(timeline) + 1,
+        "role": "reaction_outro",
+        "script_ja": "続き気になるなら、いいねとチャンネル登録しといて。",
+        "script_ko": "다음 내용 궁금하면 좋아요랑 구독 눌러둬.",
+        "visual_search_keyword": "like and subscribe button social media",
+        "duration": "3s",
+    }
+    new_timeline = list(timeline) + [insert_item]
+    for idx, row in enumerate(new_timeline, start=1):
+        if isinstance(row, dict):
+            row["order"] = idx
+    script["story_timeline"] = new_timeline
+    script["content"] = new_timeline
+    return script
+
+
 def _apply_majisho_interlude_assets(
     config: AppConfig,
     roles: List[str],
@@ -1084,7 +1126,10 @@ def _apply_majisho_interlude_assets(
             break
     if target_idx < 0:
         return bg_video_paths, bg_image_paths
-    asset_path = _resolve_primary_photo_asset(config) or str(getattr(config, "majisho_asset_path", "") or "").strip()
+    asset_path = (
+        str(getattr(config, "majisho_asset_path", "") or "").strip()
+        or _resolve_primary_photo_asset(config)
+    )
     if not asset_path or not os.path.exists(asset_path):
         return bg_video_paths, bg_image_paths
 
@@ -2663,10 +2708,11 @@ def _apply_asmr_voice_filter(audio_path: str) -> str:
         f"asmr_{os.path.basename(audio_path)}",
     )
     filt = (
-        "highpass=f=130,"
-        "lowpass=f=3800,"
-        "acompressor=threshold=-24dB:ratio=2.2:attack=20:release=220,"
-        "volume=0.86"
+        "highpass=f=170,"
+        "lowpass=f=3600,"
+        "acompressor=threshold=-26dB:ratio=2.8:attack=18:release=240,"
+        "aecho=0.6:0.25:18:0.12,"
+        "volume=0.75"
     )
     if _apply_ffmpeg_audio_filter(audio_path, filtered, filt):
         try:
@@ -2758,19 +2804,21 @@ def tts_generate(
             if not line:
                 continue
             role = str(seg.get("role", "") or "").strip().lower()
+            is_asmr = role in {"asmr_tag", "asmr"}
             tmp_path = os.path.join(
                 os.path.dirname(output_path) or ".",
                 f"tts_seg_{idx}_{random.randint(1000, 9999)}.mp3",
             )
             _tts_generate_single(config, line, tmp_path, voice=voice or "shimmer")
-            _, baby_ok = _apply_baby_voice_filter(config, tmp_path)
-            if getattr(config, "tts_baby_voice", True) and not baby_ok:
-                fallback_voice = _pick_boy_voice_fallback(config, voice)
-                _tts_generate_single(config, line, tmp_path, voice=fallback_voice)
-                _apply_boy_voice_filter(tmp_path)
-            if role in {"asmr_tag", "asmr"}:
+            if is_asmr:
                 _apply_asmr_voice_filter(tmp_path)
                 _enforce_audio_duration(tmp_path, 1.0)
+            else:
+                _, baby_ok = _apply_baby_voice_filter(config, tmp_path)
+                if getattr(config, "tts_baby_voice", True) and not baby_ok:
+                    fallback_voice = _pick_boy_voice_fallback(config, voice)
+                    _tts_generate_single(config, line, tmp_path, voice=fallback_voice)
+                    _apply_boy_voice_filter(tmp_path)
             temp_files.append(tmp_path)
             clip_obj = AudioFileClip(tmp_path)
             clips.append(clip_obj)
@@ -2934,6 +2982,33 @@ def pick_asset_by_category(items: List[AssetItem], category: str) -> Optional[As
     if mapped_tags:
         return pick_asset(items, mapped_tags)
     return random.choice(items) if items else None
+
+
+def _pick_asset_path_by_tags(config: AppConfig, tags: List[str]) -> str:
+    if not tags:
+        return ""
+    try:
+        items = load_manifest(config.manifest_path)
+    except Exception:
+        items = []
+    normalized_targets = {str(t).strip().lower() for t in tags if str(t).strip()}
+    candidates: List[str] = []
+    for item in items:
+        if str(getattr(item, "kind", "") or "").lower() != "image":
+            continue
+        item_tags = {str(t).strip().lower() for t in (getattr(item, "tags", []) or []) if str(t).strip()}
+        if not normalized_targets.intersection(item_tags):
+            continue
+        path = _resolve_asset_image_path(config, str(getattr(item, "path", "") or ""))
+        if path and os.path.exists(path):
+            candidates.append(path)
+    if not candidates:
+        return ""
+    try:
+        candidates.sort(key=lambda p: os.path.getmtime(p), reverse=True)
+    except Exception:
+        pass
+    return candidates[0]
 
 
 def tags_from_text(text: str) -> List[str]:
@@ -3273,6 +3348,117 @@ def _apply_korean_template(image: Image.Image, canvas_width: int, canvas_height:
         draw.rectangle([box_x1, box_y1, box_x2, box_y2], fill=(8, 10, 16, 74))
 
     return Image.alpha_composite(image.convert("RGBA"), overlay).convert("RGB")
+
+
+def _crop_center_square(image: Image.Image) -> Image.Image:
+    w, h = image.size
+    if w <= 0 or h <= 0:
+        return image
+    side = min(w, h)
+    left = max(0, (w - side) // 2)
+    top = max(0, (h - side) // 2)
+    return image.crop((left, top, left + side, top + side))
+
+
+def _draw_fixed_template_title(
+    image: Image.Image,
+    title_text: str,
+    font_path: str,
+    canvas_width: int,
+    canvas_height: int,
+    top_ratio: float = 0.27,
+    bottom_ratio: float = 0.39,
+) -> Image.Image:
+    text = str(title_text or "").strip()
+    if not text:
+        return image
+    top = int(canvas_height * max(0.08, min(0.8, top_ratio)))
+    bottom = int(canvas_height * max(0.12, min(0.95, bottom_ratio)))
+    if bottom <= top:
+        return image
+    max_w = int(canvas_width * 0.90)
+    font_size = max(26, int(canvas_width * 0.068))
+    lines: List[str] = []
+    for _ in range(8):
+        wrapped = _wrap_cjk_text(text, max_w, font_size)[:2]
+        if len(wrapped) <= 2:
+            lines = wrapped
+            break
+        font_size -= 2
+    if not lines:
+        lines = _wrap_cjk_text(text, max_w, font_size)[:2]
+    draw_layer = Image.new("RGBA", image.size, (0, 0, 0, 0))
+    draw = ImageDraw.Draw(draw_layer)
+    font = _load_font(font_path, font_size)
+    line_h = max(font_size + 4, int(font_size * 1.15))
+    total_h = line_h * len(lines)
+    y = top + max(0, (bottom - top - total_h) // 2)
+    for line in lines:
+        try:
+            lw = font.getbbox(line)[2]
+        except Exception:
+            lw = len(line) * font_size
+        x = max(10, (canvas_width - lw) // 2)
+        draw.text(
+            (x, y),
+            line,
+            font=font,
+            fill=(20, 20, 20, 245),
+            stroke_width=3,
+            stroke_fill=(255, 255, 255, 210),
+        )
+        y += line_h
+    return Image.alpha_composite(image.convert("RGBA"), draw_layer).convert("RGB")
+
+
+def _compose_fixed_template_background(
+    config: AppConfig,
+    content_image_path: str,
+    title_text: str,
+    canvas_width: int,
+    canvas_height: int,
+) -> Image.Image:
+    template_path = str(getattr(config, "fixed_template_path", "") or "").strip()
+    if template_path and os.path.exists(template_path):
+        base = _fit_image_to_canvas(_open_image_rgb_safe(template_path), (canvas_width, canvas_height))
+    else:
+        base = Image.new("RGB", (canvas_width, canvas_height), color=(238, 236, 226))
+    base = _draw_fixed_template_title(
+        base,
+        title_text=title_text,
+        font_path=config.font_path,
+        canvas_width=canvas_width,
+        canvas_height=canvas_height,
+        top_ratio=float(getattr(config, "fixed_template_title_top_ratio", 0.27) or 0.27),
+        bottom_ratio=float(getattr(config, "fixed_template_title_bottom_ratio", 0.39) or 0.39),
+    )
+    if not content_image_path or (not os.path.exists(content_image_path)):
+        return base
+    content = _crop_center_square(_open_image_rgb_safe(content_image_path))
+    content = _enhance_bg_image_quality(content)
+    scale = float(getattr(config, "fixed_template_content_scale", 0.70) or 0.70)
+    scale = max(0.45, min(0.9, scale))
+    side = int(min(canvas_width, canvas_height) * scale)
+    side = max(220, min(side, min(canvas_width, canvas_height) - 24))
+    content = content.resize((side, side), Image.LANCZOS)
+    center_x = canvas_width // 2
+    center_y_ratio = float(getattr(config, "fixed_template_center_y_ratio", 0.68) or 0.68)
+    center_y = int(canvas_height * max(0.45, min(0.85, center_y_ratio)))
+    x = max(8, min(canvas_width - side - 8, center_x - side // 2))
+    y = max(int(canvas_height * 0.42), min(canvas_height - side - 12, center_y - side // 2))
+    out = base.convert("RGBA")
+    shadow = Image.new("RGBA", out.size, (0, 0, 0, 0))
+    sdraw = ImageDraw.Draw(shadow)
+    if hasattr(sdraw, "rounded_rectangle"):
+        sdraw.rounded_rectangle(
+            [x - 8, y - 8, x + side + 8, y + side + 8],
+            radius=max(16, int(side * 0.06)),
+            fill=(0, 0, 0, 85),
+        )
+    out = Image.alpha_composite(out, shadow)
+    content_rgba = content.convert("RGBA")
+    out.paste(content_rgba, (x, y), content_rgba)
+    return out.convert("RGB")
 
 
 def _apply_korean_thumbnail_style(
@@ -3808,11 +3994,9 @@ def _score_pixabay_hit(hit: Dict[str, Any], query_tokens: List[str]) -> int:
     for token in query_tokens:
         if token in text:
             score += 5
-    # vertical + 해상도 가중치
+    # 1:1 + 해상도 가중치
     width = int(hit.get("imageWidth") or 0)
     height = int(hit.get("imageHeight") or 0)
-    if height > width > 0:
-        score += 2
     score += _ratio_score_9x16(width, height)
     area = width * height
     if area >= 2_000_000:
@@ -4098,22 +4282,21 @@ def _image_size(path: str) -> Tuple[int, int]:
     return (0, 0)
 
 
-def _ratio_distance(width: int, height: int, target_ratio: float = 9.0 / 16.0) -> float:
+def _ratio_distance(width: int, height: int, target_ratio: float = 1.0) -> float:
     if width <= 0 or height <= 0:
         return 99.0
     return abs((float(width) / float(height)) - float(target_ratio))
 
 
 def _ratio_score_9x16(width: int, height: int) -> int:
-    d = _ratio_distance(width, height, target_ratio=(9.0 / 16.0))
-    if d <= 0.02:
+    # 레거시 함수명 유지: 현재는 1:1(정사각) 비율 선호 점수로 사용.
+    d = _ratio_distance(width, height, target_ratio=1.0)
+    if d <= 0.03:
         return 6
-    if d <= 0.05:
+    if d <= 0.07:
         return 4
-    if d <= 0.09:
+    if d <= 0.12:
         return 2
-    if height > width > 0:
-        return 1
     return 0
 
 
@@ -4599,8 +4782,11 @@ def fetch_segment_images(
     placeholder = _ensure_placeholder_image(config)
     used_hashes: set[str] = set()
     results: List[Optional[str]] = []
-    canvas_w = max(320, int(getattr(config, "width", 1080) or 1080))
-    canvas_h = max(320, int(getattr(config, "height", 1920) or 1920))
+    media_scale = float(getattr(config, "fixed_template_content_scale", 0.70) or 0.70)
+    media_scale = min(0.9, max(0.45, media_scale))
+    square_side = int(max(320, min(getattr(config, "width", 1080), getattr(config, "height", 1920)) * media_scale))
+    canvas_w = square_side
+    canvas_h = square_side
 
     def _accept_path(path: Optional[str], allow_duplicate: bool = False) -> Optional[str]:
         if not path or (not os.path.exists(path)):
@@ -4711,7 +4897,7 @@ def _prepare_related_image_backgrounds(
         return [], [], "image"
     keywords = [str(k).strip() for k in (visual_keywords or []) if str(k).strip()]
     if not keywords:
-        keywords = ["japan daily life vertical photo"] * size
+        keywords = ["japan daily life square photo"] * size
     if len(keywords) < size:
         keywords = (keywords + [keywords[-1]] * size)[:size]
     else:
@@ -5312,6 +5498,8 @@ def render_video(
     bg_image_paths: Optional[List[Optional[str]]] = None,
     caption_texts: Optional[List[str]] = None,
     draw_subtitles: bool = True,
+    title_text: str = "",
+    ending_asset_path: str = "",
 ) -> str:
     """
     TTS + 자막 + 에셋 스티커 + 배경영상(or 정적 이미지)으로 숏츠 영상 생성.
@@ -5327,6 +5515,23 @@ def render_video(
     durations = _resolve_segment_durations(texts, float(audio_clip.duration or 0.0), tts_audio_path)
     caption_texts = caption_texts or texts
     clips = []
+    fixed_template_enabled = bool(getattr(config, "fixed_template_enabled", False))
+    fixed_template_path = str(getattr(config, "fixed_template_path", "") or "").strip()
+    if fixed_template_enabled and (not (fixed_template_path and os.path.exists(fixed_template_path))):
+        auto_candidates = [
+            os.path.join(config.assets_dir, "branding", "fixed_template.png"),
+            os.path.join(config.assets_dir, "branding", "template.png"),
+            os.path.join(config.assets_dir, "templates", "fixed_template.png"),
+            os.path.join(config.assets_dir, "templates", "template.png"),
+            os.path.join(config.assets_dir, "branding", "majisho_template.png"),
+        ]
+        for candidate in auto_candidates:
+            if os.path.exists(candidate):
+                fixed_template_path = candidate
+                break
+        if fixed_template_path:
+            config.fixed_template_path = fixed_template_path
+    use_fixed_template_layout = fixed_template_enabled
 
     # 경로 → VideoFileClip 캐시 (같은 파일 중복 오픈 방지)
     _vid_cache: Dict[str, Any] = {}
@@ -5340,12 +5545,12 @@ def render_video(
         return _vid_cache[path]
 
     # 전역 fallback 영상
-    global_bg_vid = _get_vid(bg_video_path)
+    global_bg_vid = None if use_fixed_template_layout else _get_vid(bg_video_path)
 
     # 세그먼트별 다른 배경영상 자동 선택:
     # bg_video_path가 폴더 내 여러 파일 중 하나라면, 같은 폴더의 모든 파일을 풀로 사용
     _bg_video_pool: List[str] = []
-    if bg_video_path and os.path.exists(bg_video_path):
+    if (not use_fixed_template_layout) and bg_video_path and os.path.exists(bg_video_path):
         _bg_dir = os.path.dirname(bg_video_path)
         _bg_video_pool = [
             os.path.join(_bg_dir, f)
@@ -5353,7 +5558,7 @@ def render_video(
             if f.lower().endswith((".mp4", ".mkv", ".webm"))
             and os.path.getsize(os.path.join(_bg_dir, f)) > 500000
         ]
-    if not _bg_video_pool and bg_video_path:
+    if (not use_fixed_template_layout) and (not _bg_video_pool) and bg_video_path:
         _bg_video_pool = [bg_video_path]
 
     vid_offset = 0.0
@@ -5374,7 +5579,9 @@ def render_video(
 
         # 세그먼트별 영상 우선, 없으면 풀에서 랜덤 선택 (매 세그먼트마다 다른 영상으로 다양화)
         seg_path = (bg_video_paths[index] if bg_video_paths and index < len(bg_video_paths) else None)
-        if not seg_path and _bg_video_pool:
+        if use_fixed_template_layout:
+            seg_path = None
+        if (not seg_path) and _bg_video_pool:
             seg_path = random.choice(_bg_video_pool)
         bg_vid = _get_vid(seg_path) or global_bg_vid
         highlight_start = None
@@ -5400,9 +5607,18 @@ def render_video(
             )
             if not bg_img_path or not os.path.exists(bg_img_path):
                 bg_img_path = _ensure_placeholder_image(config)
-            bg_img = _open_image_rgb_safe(bg_img_path)
-            bg_img = _enhance_bg_image_quality(bg_img)
-            bg_img = _fit_image_to_canvas(bg_img, (W, H))
+            if use_fixed_template_layout:
+                bg_img = _compose_fixed_template_background(
+                    config=config,
+                    content_image_path=bg_img_path,
+                    title_text=title_text,
+                    canvas_width=W,
+                    canvas_height=H,
+                )
+            else:
+                bg_img = _open_image_rgb_safe(bg_img_path)
+                bg_img = _enhance_bg_image_quality(bg_img)
+                bg_img = _fit_image_to_canvas(bg_img, (W, H))
             _base_bg_arr = np.array(bg_img)
             _motion_cfg = None
 
@@ -5416,6 +5632,8 @@ def render_video(
         if not getattr(config, "caption_trim", False):
             _hold_ratio = 1.0
         _use_template = bool(getattr(config, "use_korean_template", False))
+        _is_last_segment = index == (len(texts) - 1)
+        _ending_asset = ending_asset_path if _is_last_segment else ""
 
         def _render_frame(
             get_frame,
@@ -5427,6 +5645,8 @@ def render_video(
             __overlay=_overlay_mode,
             __dur=dur,
             __motion_cfg=_motion_cfg,
+            __ending_asset=_ending_asset,
+            __is_last_segment=_is_last_segment,
         ):
             frame = get_frame(t)
             img = Image.fromarray(frame).convert("RGB")
@@ -5443,7 +5663,7 @@ def render_video(
                 cx = int(max_x * px)
                 cy = int(max_y * py)
                 img = enlarged.crop((cx, cy, cx + W, cy + H))
-            if _use_template and (__style not in {"asmr_tag", "asmr"}):
+            if (not use_fixed_template_layout) and _use_template and (__style not in {"asmr_tag", "asmr"}):
                 img = _apply_korean_template(img, W, H)
             if draw_subtitles and (__style not in {"asmr_tag", "asmr"}):
                 img = _draw_subtitle(
@@ -5456,6 +5676,19 @@ def render_video(
                     t=t,
                     duration=__dur,
                     hold_ratio=_hold_ratio,
+                )
+            if __is_last_segment and __ending_asset and os.path.exists(__ending_asset):
+                like_size = max(120, int(min(W, H) * 0.20))
+                like_x = max(12, W - like_size - int(W * 0.04))
+                like_y = max(12, int(H * 0.08))
+                img = _overlay_sticker(
+                    img,
+                    __ending_asset,
+                    W,
+                    H,
+                    size=like_size,
+                    position=(like_x, like_y),
+                    opacity=0.96,
                 )
             if __asset and os.path.exists(__asset):
                 img = _maybe_overlay_sticker(img, __asset, W, H, mode=__overlay, size=260)
@@ -5815,6 +6048,8 @@ def _apply_primary_photo_override(
     bg_image_paths: List[Optional[str]],
     roles: Optional[List[str]] = None,
 ) -> Tuple[List[Optional[str]], List[Optional[str]]]:
+    if bool(getattr(config, "fixed_template_enabled", False)):
+        return bg_video_paths, bg_image_paths
     photo_path = _resolve_primary_photo_asset(config)
     if not photo_path or (not os.path.exists(photo_path)):
         return bg_video_paths, bg_image_paths
@@ -6438,9 +6673,7 @@ def collect_images_pexels(
         width = int(photo.get("width") or 0)
         height = int(photo.get("height") or 0)
         score = width * height
-        if height >= width > 0:
-            score += 500_000
-        score += _ratio_score_9x16(width, height) * 250_000
+        score += _ratio_score_9x16(width, height) * 450_000
         candidates.append((score, str(image_url)))
     candidates.sort(key=lambda row: row[0], reverse=True)
     for _, image_url in candidates:
@@ -8149,6 +8382,7 @@ def _auto_jp_flow(
         try:
             script = generate_script_jp(config, extra_hint=llm_hint)
             script = _inject_majisho_asmr_beat(script, enabled=getattr(config, "enable_majisho_tag", True))
+            script = _inject_like_subscribe_outro(script, enabled=True)
             _telemetry_log("대본 생성 완료", config)
         except Exception as exc:
             _telemetry_log(f"대본 생성 실패: {exc}", config)
@@ -8273,6 +8507,9 @@ def _auto_jp_flow(
     # 에셋 스티커는 사용하지 않음 (배경 이미지/영상 중심)
     placeholder = _ensure_placeholder_image(config)
     assets: List[str] = [placeholder] * len(texts)
+    ending_like_asset = _pick_asset_path_by_tags(config, ["like", "likes", "좋아요", "subscribe", "sub"])
+    if ending_like_asset:
+        _telemetry_log(f"엔딩 like 에셋 적용: {os.path.basename(ending_like_asset)}", config)
 
     # ── YouTube 설명 텍스트 ───────────────────────────────
     description = _build_upload_caption_text(
@@ -8343,6 +8580,8 @@ def _auto_jp_flow(
             overlay_mode="off",
             caption_texts=caption_texts,
             draw_subtitles=not ass_enabled,
+            title_text=video_title,
+            ending_asset_path=ending_like_asset,
         )
         if ass_enabled:
             ass_path = os.path.join(config.output_dir, f"subs_{now}.ass")
@@ -8375,6 +8614,8 @@ def _auto_jp_flow(
                     overlay_mode="off",
                     caption_texts=caption_texts,
                     draw_subtitles=True,
+                    title_text=video_title,
+                    ending_asset_path=ending_like_asset,
                 )
         _telemetry_log("영상 렌더링 완료", config)
         _notify("🎬", "영상팀 완료", f"{config.width}x{config.height} 세로 영상 저장 완료")
@@ -8820,6 +9061,7 @@ def run_streamlit_app() -> None:
                     hint = (hint + "\n\n" + growth_hint).strip()
                 script = generate_script_jp(config, extra_hint=hint)
                 script = _inject_majisho_asmr_beat(script, enabled=getattr(config, "enable_majisho_tag", True))
+                script = _inject_like_subscribe_outro(script, enabled=True)
                 _meta_tmp = script.get("meta", {})
                 _topic_tmp = _pick_topic_key(_meta_tmp)
                 _title_tmp = str(_meta_tmp.get("title_ja") or _meta_tmp.get("title") or script.get("video_title") or "").strip()
@@ -8929,6 +9171,7 @@ def run_streamlit_app() -> None:
 
                     placeholder = _ensure_placeholder_image(config)
                     assets = [placeholder] * len(texts)
+                    ending_like_asset = _pick_asset_path_by_tags(config, ["like", "likes", "좋아요", "subscribe", "sub"])
 
                     # 배경 선택: 전 구간 연관 이미지
                     _kws_m = _script_to_visual_keywords(script)
@@ -8981,6 +9224,8 @@ def run_streamlit_app() -> None:
                             overlay_mode="off",
                             caption_texts=caption_texts,
                             draw_subtitles=not ass_enabled,
+                            title_text=video_title_val,
+                            ending_asset_path=ending_like_asset,
                         )
                         if ass_enabled:
                             ass_path = os.path.join(config.output_dir, f"subs_{now}.ass")
@@ -9013,6 +9258,8 @@ def run_streamlit_app() -> None:
                                     overlay_mode="off",
                                     caption_texts=caption_texts,
                                     draw_subtitles=True,
+                                    title_text=video_title_val,
+                                    ending_asset_path=ending_like_asset,
                                 )
                         _telemetry_log("수동 렌더링 완료", config)
                     except Exception as render_err:
@@ -9827,6 +10074,7 @@ def run_batch(count: int, seed: str = "", beats: int = 7) -> None:
         for attempt in range(3):
             script = generate_script_jp(config, extra_hint=llm_hint)
             script = _inject_majisho_asmr_beat(script, enabled=getattr(config, "enable_majisho_tag", True))
+            script = _inject_like_subscribe_outro(script, enabled=True)
             _meta_tmp = script.get("meta", {})
             topic_key = _pick_topic_key(_meta_tmp)
             candidate_title = str(
@@ -9916,6 +10164,8 @@ def run_batch(count: int, seed: str = "", beats: int = 7) -> None:
             config,
         )
         ass_enabled = bool(getattr(config, "use_ass_subtitles", True) and PYSUBS2_AVAILABLE)
+        ending_like_asset = _pick_asset_path_by_tags(config, ["like", "likes", "좋아요", "subscribe", "sub"])
+        batch_title = _meta_b.get("title_ja", _meta_b.get("title", ""))
         render_video(
             config=config,
             asset_paths=assets,
@@ -9930,6 +10180,8 @@ def run_batch(count: int, seed: str = "", beats: int = 7) -> None:
             overlay_mode="off",
             caption_texts=caption_texts,
             draw_subtitles=not ass_enabled,
+            title_text=batch_title,
+            ending_asset_path=ending_like_asset,
         )
         if ass_enabled:
             ass_path = os.path.join(config.output_dir, f"subs_{now}_{index}.ass")
@@ -9960,6 +10212,8 @@ def run_batch(count: int, seed: str = "", beats: int = 7) -> None:
                     overlay_mode="off",
                     caption_texts=caption_texts,
                     draw_subtitles=True,
+                    title_text=batch_title,
+                    ending_asset_path=ending_like_asset,
                 )
         thumb_path = ""
         if config.thumbnail_enabled:
