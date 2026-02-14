@@ -3,6 +3,7 @@ from __future__ import annotations
 import json
 import ast
 import base64
+import hashlib
 import mimetypes
 import glob
 import os
@@ -3231,44 +3232,42 @@ def _pick_thumbnail_source(
 
 
 def _apply_korean_template(image: Image.Image, canvas_width: int, canvas_height: int) -> Image.Image:
-    """트렌디 쇼츠 느낌의 오버레이 (시네마 그라디언트 + 네온 엣지)."""
+    """트렌디 쇼츠 느낌의 오버레이.
+    화면 전체를 어둡게 덮지 않고, 자막 안전영역(하단 중심)만 보강합니다.
+    """
     overlay = Image.new("RGBA", (canvas_width, canvas_height), (0, 0, 0, 0))
     draw = ImageDraw.Draw(overlay)
 
-    # 배경 전체에 은은한 시네마 컬러 그라디언트
-    grad_step = 3
-    for y in range(0, canvas_height, grad_step):
-        p = y / max(1, canvas_height - 1)
-        r = int(10 + 22 * p)
-        g = int(14 + 28 * p)
-        b = int(18 + 44 * p)
-        a = int(55 + 25 * p)
-        draw.rectangle([0, y, canvas_width, min(canvas_height, y + grad_step)], fill=(r, g, b, a))
+    # 자막 영역 중심으로만 어두운 그라디언트 추가 (화면 전체 필터 제거)
+    sub_top = int(canvas_height * 0.46)
+    sub_bottom = canvas_height
+    grad_step = 2
+    for y in range(sub_top, sub_bottom, grad_step):
+        p = (y - sub_top) / max(1, (sub_bottom - sub_top))
+        alpha = int(16 + 118 * (p ** 1.15))
+        draw.rectangle(
+            [0, y, canvas_width, min(sub_bottom, y + grad_step)],
+            fill=(0, 0, 0, alpha),
+        )
 
-    # 자막 가독성 확보용 상/하단 비네팅
-    top_h = int(canvas_height * 0.17)
-    for y in range(top_h):
-        alpha = int(135 * (1 - y / max(1, top_h)))
-        draw.line([(0, y), (canvas_width, y)], fill=(0, 0, 0, alpha))
-    bottom_h = int(canvas_height * 0.24)
-    for y in range(bottom_h):
-        alpha = int(185 * (y / max(1, bottom_h)))
-        yy = canvas_height - bottom_h + y
-        draw.line([(0, yy), (canvas_width, yy)], fill=(0, 0, 0, alpha))
+    # 자막 라인 뒤쪽만 소프트 글로우 박스
+    box_w = int(canvas_width * 0.88)
+    box_h = int(canvas_height * 0.18)
+    box_x1 = (canvas_width - box_w) // 2
+    box_y1 = int(canvas_height * 0.52)
+    box_x2 = box_x1 + box_w
+    box_y2 = box_y1 + box_h
+    if hasattr(draw, "rounded_rectangle"):
+        draw.rounded_rectangle(
+            [box_x1, box_y1, box_x2, box_y2],
+            radius=max(20, int(canvas_width * 0.022)),
+            fill=(8, 10, 16, 74),
+            outline=(145, 220, 255, 68),
+            width=2,
+        )
+    else:
+        draw.rectangle([box_x1, box_y1, box_x2, box_y2], fill=(8, 10, 16, 74))
 
-    # 좌우 네온 엣지 (과하지 않게)
-    edge_w = max(5, int(canvas_width * 0.006))
-    draw.rectangle([0, 0, edge_w, canvas_height], fill=(79, 208, 255, 72))
-    draw.rectangle([canvas_width - edge_w, 0, canvas_width, canvas_height], fill=(255, 108, 92, 66))
-
-    # 상단 칩(짧은 강조 바)
-    chip_h = max(8, int(canvas_height * 0.008))
-    chip_w = int(canvas_width * 0.22)
-    draw.rounded_rectangle(
-        [int(canvas_width * 0.06), int(canvas_height * 0.05), int(canvas_width * 0.06) + chip_w, int(canvas_height * 0.05) + chip_h],
-        radius=max(4, chip_h // 2),
-        fill=(255, 255, 255, 86),
-    )
     return Image.alpha_composite(image.convert("RGBA"), overlay).convert("RGB")
 
 
@@ -4044,6 +4043,19 @@ def _download_image_file(image_url: str, output_dir: str, prefix: str = "img") -
         return None
 
 
+def _quick_image_hash(path: str) -> str:
+    if not path or (not os.path.exists(path)):
+        return ""
+    try:
+        h = hashlib.sha1()
+        with open(path, "rb") as file:
+            chunk = file.read(256 * 1024)
+            h.update(chunk)
+        return h.hexdigest()
+    except Exception:
+        return ""
+
+
 def _score_image_candidate_text(
     text: str,
     query_tokens: List[str],
@@ -4349,39 +4361,79 @@ def fetch_segment_images(
         "serpapi": sp_dir,
         "wikimedia": wm_dir,
     }
-    unique_kws = [kw for kw in dict.fromkeys(keywords) if kw]
-    kw_to_path: Dict[str, Optional[str]] = {}
-    for kw in unique_kws:
+    placeholder = _ensure_placeholder_image(config)
+    used_hashes: set[str] = set()
+    results: List[Optional[str]] = []
+
+    def _accept_path(path: Optional[str], allow_duplicate: bool = False) -> Optional[str]:
+        if not path or (not os.path.exists(path)):
+            return None
+        sig = _quick_image_hash(path)
+        if sig and (not allow_duplicate) and sig in used_hashes:
+            return None
+        if sig:
+            used_hashes.add(sig)
+        return path
+
+    for idx, kw in enumerate(keywords):
+        keyword = str(kw or "").strip()
+        if not keyword:
+            results.append(placeholder)
+            continue
         path: Optional[str] = None
-        query_candidates = _build_search_query_candidates(kw)
+        query_candidates = _build_search_query_candidates(keyword)
         _telemetry_log(
-            f"이미지 검색 키워드: {kw} -> 후보 {query_candidates[:3]} / 소스순서={source_order}",
+            f"이미지 검색[{idx+1}/{len(keywords)}]: {keyword} -> 후보 {query_candidates[:4]} / 소스순서={source_order}",
             config,
         )
+
+        # 1차: 중복 이미지 금지
         for candidate in query_candidates:
             for source in source_order:
-                path = _fetch_image_from_source(source, candidate, config, source_dirs)
+                raw_path = _fetch_image_from_source(source, candidate, config, source_dirs)
+                path = _accept_path(raw_path, allow_duplicate=False)
                 if path:
-                    _telemetry_log(f"이미지 소스 성공: {source} / {candidate}", config)
+                    _telemetry_log(f"이미지 소스 성공(고유): {source} / {candidate}", config)
                     break
             if path:
                 break
+
+        # 2차: 브랜드/전역 폴백도 고유 우선
         if not path:
-            brand_fallbacks = _brand_fallback_queries_from_keyword(kw)
+            brand_fallbacks = _brand_fallback_queries_from_keyword(keyword)
             fallback_pool = brand_fallbacks if brand_fallbacks else _GLOBAL_BG_FALLBACK_QUERIES
             for fbq in fallback_pool:
                 for source in source_order:
-                    path = _fetch_image_from_source(source, fbq, config, source_dirs)
+                    raw_path = _fetch_image_from_source(source, fbq, config, source_dirs)
+                    path = _accept_path(raw_path, allow_duplicate=False)
                     if path:
-                        _telemetry_log(f"이미지 폴백 성공: {source} / {fbq}", config)
+                        _telemetry_log(f"이미지 폴백 성공(고유): {source} / {fbq}", config)
                         break
                 if path:
                     break
-        kw_to_path[kw] = path
-        _telemetry_log(f"이미지 검색 결과: {'성공' if path else '실패'} ({kw})", config)
 
-    placeholder = _ensure_placeholder_image(config)
-    return [kw_to_path.get(kw) or placeholder for kw in keywords]
+        # 3차: 정말 없으면 중복 허용(placeholder 남발 방지)
+        if not path:
+            for candidate in query_candidates:
+                for source in source_order:
+                    raw_path = _fetch_image_from_source(source, candidate, config, source_dirs)
+                    path = _accept_path(raw_path, allow_duplicate=True)
+                    if path:
+                        _telemetry_log(f"이미지 소스 성공(중복허용): {source} / {candidate}", config)
+                        break
+                if path:
+                    break
+
+        if not path:
+            path = placeholder
+            _telemetry_log(f"이미지 검색 결과: 실패 → placeholder 사용 ({keyword})", config)
+        else:
+            _telemetry_log(f"이미지 검색 결과: 성공 ({keyword})", config)
+        results.append(path)
+
+    if len(results) < len(keywords):
+        results = (results + [placeholder] * len(keywords))[: len(keywords)]
+    return results
 
 
 def _prepare_related_image_backgrounds(
@@ -7146,9 +7198,10 @@ def _reset_runtime_caches(config: AppConfig, deep: bool = False) -> None:
     _HIGHLIGHT_CACHE.clear()
     _LAST_GENERATED_BG_TOPIC_KEY = ""
     cache_dirs = [
-        config.generated_bg_dir,
+        # 사용자 수동 업로드 보존: generated_bg_dir는 자동 캐시 삭제 대상에서 제외
         "/tmp/pixabay_images",
         "/tmp/pexels_bg_images",
+        "/tmp/pinterest_images",
         "/tmp/serpapi_images",
         "/tmp/wikimedia_images",
         "/tmp/pixabay_bg",
