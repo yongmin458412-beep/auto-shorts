@@ -464,6 +464,7 @@ class AppConfig:
     approve_keywords: List[str]
     swap_keywords: List[str]
     pixabay_api_key: str
+    pixabay_bgm_enabled: bool
     use_bg_videos: bool
     render_threads: int
     use_korean_template: bool
@@ -590,8 +591,9 @@ def load_config() -> AppConfig:
         approve_keywords=_get_list("APPROVE_KEYWORDS") or ["승인", "approve", "ok", "yes"],
         swap_keywords=_get_list("SWAP_KEYWORDS") or ["교환", "swap", "change", "next"],
         pixabay_api_key=pixabay_api_key,
+        pixabay_bgm_enabled=_get_bool("PIXABAY_BGM_ENABLED", False),
         use_bg_videos=_get_bool("USE_BG_VIDEOS", True),  # 기본값 True: 배경영상 항상 활성화
-        render_threads=int(_get_secret("RENDER_THREADS", "2") or 2),
+        render_threads=int(_get_secret("RENDER_THREADS", "1") or 1),
         use_korean_template=_get_bool("USE_KOREAN_TEMPLATE", True),
         caption_max_chars=int(_get_secret("CAPTION_MAX_CHARS", "18") or 18),
         caption_hold_ratio=float(_get_secret("CAPTION_HOLD_RATIO", "1.0") or 1.0),
@@ -947,7 +949,7 @@ def fetch_bgm_from_pixabay(
         # 저장 경로가 쓰기 불가면 /tmp 폴백
         output_dir = _ensure_writable_dir(output_dir, "/tmp/auto_shorts_bgm")
         _bgm_log(f"Pixabay BGM 저장 경로: {output_dir}")
-        # Pixabay music API endpoint
+        # Pixabay audio API endpoint
         music_params = {
             "key": api_key,
             "q": query,
@@ -955,12 +957,15 @@ def fetch_bgm_from_pixabay(
             "safesearch": "true",
         }
         music_response = requests.get(
-            "https://pixabay.com/api/music/",
+            "https://pixabay.com/api/audio/",
             params=music_params,
             timeout=30,
         )
         if music_response.status_code != 200:
-            _bgm_log(f"Pixabay BGM API 실패: status={music_response.status_code}")
+            body_head = (music_response.text or "")[:160].replace("\n", " ")
+            _bgm_log(
+                f"Pixabay BGM API 실패: status={music_response.status_code} body={body_head}"
+            )
             return None
         payload = music_response.json()
         hits = payload.get("hits", []) or []
@@ -1494,10 +1499,56 @@ def _load_ab_records(config: AppConfig, lookback: int) -> List[Dict[str, Any]]:
         return []
 
 
-def _select_background_mode(config: AppConfig) -> str:
+_HORROR_BG_TERMS = [
+    "horror", "creepy", "ghost", "haunted", "murder", "serial killer",
+    "missing", "kidnap", "crime", "slasher", "bloody", "terror",
+    "ホラー", "恐怖", "怪談", "心霊", "呪い", "幽霊", "殺人", "失踪", "誘拐", "事件",
+    "공포", "귀신", "괴담", "심령", "저주", "살인", "실종", "납치", "범죄",
+]
+_HUMOR_DAILY_BG_TERMS = [
+    "funny", "humor", "comedy", "meme", "daily", "everyday", "lifehack", "relatable",
+    "ギャグ", "コメディ", "おもしろ", "爆笑", "ネタ", "日常", "あるある", "ライフハック",
+    "유머", "개그", "웃긴", "밈", "일상", "꿀팁", "공감",
+]
+
+
+def _infer_background_mode_by_content(
+    meta: Optional[Dict[str, Any]],
+    texts: Optional[List[str]],
+    visual_keywords: Optional[List[str]] = None,
+) -> Optional[str]:
+    meta = meta or {}
+    merged: List[str] = []
+    for key in ("topic_en", "title_ja", "thumbnail_text_ja", "title"):
+        val = meta.get(key)
+        if isinstance(val, str) and val.strip():
+            merged.append(val.strip())
+    if texts:
+        merged.extend([t for t in texts if isinstance(t, str) and t.strip()])
+    if visual_keywords:
+        merged.extend([k for k in visual_keywords if isinstance(k, str) and k.strip()])
+    if not merged:
+        return None
+    joined = " ".join(merged).lower()
+    if any(term.lower() in joined for term in _HORROR_BG_TERMS):
+        return "image"
+    if any(term.lower() in joined for term in _HUMOR_DAILY_BG_TERMS):
+        return "minecraft"
+    return None
+
+
+def _select_background_mode(
+    config: AppConfig,
+    meta: Optional[Dict[str, Any]] = None,
+    texts: Optional[List[str]] = None,
+    visual_keywords: Optional[List[str]] = None,
+) -> str:
     modes = ["minecraft", "image"]
     if not getattr(config, "use_minecraft_parkour_bg", True) or not getattr(config, "use_bg_videos", True):
         return "image"
+    forced = _infer_background_mode_by_content(meta, texts, visual_keywords)
+    if forced:
+        return forced
     epsilon = float(getattr(config, "background_ab_epsilon", 0.2))
     lookback = int(getattr(config, "background_ab_lookback", 30))
     if not getattr(config, "ab_test_enabled", False):
@@ -1613,8 +1664,8 @@ def match_bgm_by_mood(config: AppConfig, mood: str) -> Optional[str]:
         if minecraft_files:
             return random.choice(minecraft_files)
 
-    # Pixabay 자동 다운로드 (API 키 있을 때만)
-    if config.pixabay_api_key:
+    # Pixabay 자동 다운로드 (명시적으로 켠 경우에만)
+    if config.pixabay_api_key and getattr(config, "pixabay_bgm_enabled", False):
         _append_bgm_debug(f"Pixabay BGM 시도 (mood={mood})")
         _telemetry_log(f"Pixabay BGM 다운로드 시도 (mood={mood})", config)
         query_pool = BGM_CATEGORY_KEYWORDS.get(mood, [])
@@ -1631,8 +1682,12 @@ def match_bgm_by_mood(config: AppConfig, mood: str) -> Optional[str]:
         _append_bgm_debug("Pixabay BGM 결과 없음")
         _telemetry_log("Pixabay BGM 다운로드 실패/결과 없음", config)
     else:
-        _append_bgm_debug("PIXABAY_API_KEY 미설정")
-        _telemetry_log("PIXABAY_API_KEY 미설정: BGM 자동 다운로드 생략", config)
+        if not config.pixabay_api_key:
+            _append_bgm_debug("PIXABAY_API_KEY 미설정")
+            _telemetry_log("PIXABAY_API_KEY 미설정: BGM 자동 다운로드 생략", config)
+        else:
+            _append_bgm_debug("PIXABAY_BGM_ENABLED=false: Pixabay BGM 생략")
+            _telemetry_log("PIXABAY_BGM_ENABLED=false: Pixabay BGM 생략", config)
 
     # Minecraft BGM 슬롯 (일본 쇼츠 + Minecraft Parkour 배경 시 우선)
     if getattr(config, "use_minecraft_parkour_bg", False):
@@ -1658,9 +1713,28 @@ def match_bgm_by_mood(config: AppConfig, mood: str) -> Optional[str]:
             filename = f"generated_{mood}_{datetime.utcnow().strftime('%Y%m%d_%H%M%S')}.wav"
             out_path = os.path.join(gen_dir, filename)
             _generate_bgm_fallback(out_path, float(getattr(config, "max_video_duration_sec", 59.0)), _fallback_mood_key(mood))
+            _append_bgm_debug(f"합성 BGM 생성 완료: {os.path.basename(out_path)}")
+            _telemetry_log(f"합성 BGM 생성 완료: {os.path.basename(out_path)}", config)
             return out_path
-        except Exception:
-            pass
+        except Exception as exc:
+            _append_bgm_debug(f"합성 BGM 생성 실패: {exc}")
+            _telemetry_log(f"합성 BGM 생성 실패: {exc}", config)
+            try:
+                fallback_dir = "/tmp/auto_shorts_bgm"
+                os.makedirs(fallback_dir, exist_ok=True)
+                filename = f"generated_{mood}_{datetime.utcnow().strftime('%Y%m%d_%H%M%S')}.wav"
+                out_path = os.path.join(fallback_dir, filename)
+                _generate_bgm_fallback(
+                    out_path,
+                    float(getattr(config, "max_video_duration_sec", 59.0)),
+                    _fallback_mood_key(mood),
+                )
+                _append_bgm_debug(f"합성 BGM 생성 완료(/tmp): {os.path.basename(out_path)}")
+                _telemetry_log(f"합성 BGM 생성 완료(/tmp): {os.path.basename(out_path)}", config)
+                return out_path
+            except Exception as exc2:
+                _append_bgm_debug(f"/tmp 합성 BGM 생성 실패: {exc2}")
+                _telemetry_log(f"/tmp 합성 BGM 생성 실패: {exc2}", config)
     return None
 
 
@@ -2833,6 +2907,7 @@ def fetch_youtube_minecraft_parkour_video(
     canvas_w: int = 1080,
     canvas_h: int = 1920,
     target_count: int = 3,  # 최대 확보할 파일 수 (세그먼트 다양화용)
+    config: Optional["AppConfig"] = None,
 ) -> Optional[str]:
     """
     YouTube에서 Minecraft Parkour No Copyright 영상을 yt-dlp로 다운로드합니다.
@@ -2842,6 +2917,12 @@ def fetch_youtube_minecraft_parkour_video(
     - 반환: 다운로드된 파일 경로 또는 None
     """
     os.makedirs(output_dir, exist_ok=True)
+    def _mc_log(message: str) -> None:
+        if config is not None:
+            try:
+                _telemetry_log(message, config)
+            except Exception:
+                pass
 
     # 기존 파일 목록 확인
     existing_files = [
@@ -2852,6 +2933,7 @@ def fetch_youtube_minecraft_parkour_video(
     ]
     if len(existing_files) >= target_count:
         # 이미 충분한 파일이 있으면 랜덤 반환
+        _mc_log(f"Minecraft 배경 재사용: 기존 {len(existing_files)}개 파일")
         return random.choice(existing_files)
     if existing_files:
         # 일부 있으면 첫 번째 반환하되 추가 다운로드는 계속 진행
@@ -2861,7 +2943,8 @@ def fetch_youtube_minecraft_parkour_video(
 
     try:
         import yt_dlp
-    except ImportError:
+    except ImportError as exc:
+        _mc_log(f"Minecraft 배경 수집 실패(yt-dlp import): {exc}")
         return result_path
 
     # 다양한 검색어 풀 (매번 다른 영상 확보)
@@ -2891,7 +2974,8 @@ def fetch_youtube_minecraft_parkour_video(
         try:
             with yt_dlp.YoutubeDL(ydl_opts_info) as ydl:
                 info = ydl.extract_info(search_url, download=False)
-        except Exception:
+        except Exception as exc:
+            _mc_log(f"Minecraft 검색 실패(query={query}): {exc}")
             continue
 
         entries = info.get("entries") or []
@@ -2908,6 +2992,7 @@ def fetch_youtube_minecraft_parkour_video(
                 candidates.append((views, dur, e))
 
         if not candidates:
+            _mc_log(f"Minecraft 후보 없음(query={query}, entries={len(entries)})")
             continue
 
         # 조회수 높은 순 정렬 후 상위 3개 중 랜덤 선택 (다양성 확보)
@@ -2939,7 +3024,8 @@ def fetch_youtube_minecraft_parkour_video(
         try:
             with yt_dlp.YoutubeDL(ydl_opts_dl) as ydl:
                 ydl.download([video_url])
-        except Exception:
+        except Exception as exc:
+            _mc_log(f"Minecraft 다운로드 실패(video={video_url}): {exc}")
             continue
 
         # 새로 다운로드된 파일 찾기
@@ -2956,6 +3042,11 @@ def fetch_youtube_minecraft_parkour_video(
                 if result_path is None:
                     result_path = full
                 break
+
+    if result_path:
+        _mc_log(f"Minecraft 배경 확보 완료: {os.path.basename(result_path)}")
+    else:
+        _mc_log("Minecraft 배경 확보 실패: 모든 쿼리에서 다운로드 결과 없음")
 
     return result_path
 
@@ -3345,14 +3436,6 @@ def render_video(
         clips.append(clip)
         vid_offset += dur
 
-    # 캐시된 모든 배경 영상 클립 닫기
-    for _v in _vid_cache.values():
-        try:
-            if _v:
-                _v.close()
-        except Exception:
-            pass
-
     video = concatenate_videoclips(clips, method="compose").set_fps(config.fps)
 
     # ── 영상 시작/끝 fade-in / fade-out 효과 ──────────────────────────
@@ -3365,6 +3448,9 @@ def render_video(
 
     # ── BGM 처리 + Audio Ducking ───────────────────────────────────────
     # Audio Ducking: TTS 발화 구간에서 BGM 볼륨을 자동으로 낮춰 TTS 가독성 확보
+    bgm_raw = None
+    bgm_full = None
+    bgm_ducked = None
     if bgm_path and os.path.exists(bgm_path):
         from moviepy.editor import concatenate_audioclips
 
@@ -3426,6 +3512,21 @@ def render_video(
         raise
     finally:
         try:
+            if bgm_ducked is not None:
+                bgm_ducked.close()
+        except Exception:
+            pass
+        try:
+            if bgm_full is not None:
+                bgm_full.close()
+        except Exception:
+            pass
+        try:
+            if bgm_raw is not None:
+                bgm_raw.close()
+        except Exception:
+            pass
+        try:
             audio_clip.close()
         except Exception:
             pass
@@ -3433,6 +3534,17 @@ def render_video(
             video.close()
         except Exception:
             pass
+        for clip in clips:
+            try:
+                clip.close()
+            except Exception:
+                pass
+        for _v in _vid_cache.values():
+            try:
+                if _v:
+                    _v.close()
+            except Exception:
+                pass
     return output_path
 
 
@@ -4743,17 +4855,21 @@ def _auto_jp_flow(
         _ui_warning(
             "BGM 파일을 찾지 못했습니다. "
             "assets/bgm/mystery_suspense 또는 assets/bgm/fast_exciting 폴더에 "
-            "BGM 파일을 넣어주세요. (PIXABAY_API_KEY가 있으면 자동 다운로드 시도)"
+            "BGM 파일을 넣어주세요. (Pixabay 자동 BGM은 PIXABAY_BGM_ENABLED=true일 때만 시도)"
             ,
             use_streamlit,
         )
 
     # ── 배경 선택: Minecraft 영상 vs 상황 이미지 (A/B) ─────────────
     generated_bg_paths = _get_generated_bg_paths(config, len(texts))
-    unique_kws = list(dict.fromkeys(visual_keywords))
     bg_video_paths: List[Optional[str]] = []
     bg_image_paths: List[Optional[str]] = []
-    background_mode = _select_background_mode(config)
+    forced_bg_mode = _infer_background_mode_by_content(meta, texts, visual_keywords)
+    background_mode = _select_background_mode(config, meta=meta, texts=texts, visual_keywords=visual_keywords)
+    if forced_bg_mode:
+        _telemetry_log(f"배경 모드 강제 선택(콘텐츠 규칙): {background_mode}", config)
+    else:
+        _telemetry_log(f"배경 모드 선택(AB): {background_mode}", config)
     if generated_bg_paths:
         background_mode = "image"
         bg_video_paths = [None] * len(texts)
@@ -4761,7 +4877,12 @@ def _auto_jp_flow(
         _telemetry_log("생성 배경 이미지 사용", config)
     elif background_mode == "minecraft":
         backgrounds_dir = os.path.join(config.assets_dir, "backgrounds")
-        mc_path = fetch_youtube_minecraft_parkour_video(backgrounds_dir, config.width, config.height)
+        mc_path = fetch_youtube_minecraft_parkour_video(
+            backgrounds_dir,
+            config.width,
+            config.height,
+            config=config,
+        )
         if mc_path:
             bg_video_paths = [mc_path] * len(texts)
             placeholder = _ensure_placeholder_image(config)
@@ -5180,7 +5301,8 @@ def run_streamlit_app() -> None:
     st.sidebar.subheader("선택")
     st.sidebar.markdown(
         "- `YOUTUBE_*` (자동 업로드)\n"
-        "- `PIXABAY_API_KEY` (BGM 자동 다운로드)\n"
+        "- `PIXABAY_API_KEY` (배경 이미지/영상)\n"
+        "- `PIXABAY_BGM_ENABLED` (Pixabay BGM 자동 다운로드 on/off)\n"
         "- `PEXELS_API_KEY` (이미지 자동 수집)\n"
         "- `SERPAPI_API_KEY` (트렌드 수집)\n"
         "- `OPENAI_VISION_MODEL` (이미지 태그 분석)\n"
@@ -5344,7 +5466,7 @@ def run_streamlit_app() -> None:
                         st.warning(
                             "BGM 파일을 찾지 못했습니다. "
                             "assets/bgm/mystery_suspense 또는 assets/bgm/fast_exciting 폴더에 "
-                            "BGM 파일을 넣어주세요. (PIXABAY_API_KEY가 있으면 자동 다운로드 시도)"
+                            "BGM 파일을 넣어주세요. (Pixabay 자동 BGM은 PIXABAY_BGM_ENABLED=true일 때만 시도)"
                         )
                     roles = _script_to_roles(script)
                     caption_styles = _build_caption_styles(roles, len(texts))
@@ -5378,16 +5500,30 @@ def run_streamlit_app() -> None:
                     # 배경 선택: Minecraft vs 이미지
                     bg_vids_manual: List[Optional[str]] = [None] * len(texts)
                     bg_imgs_manual: List[Optional[str]] = [None] * len(texts)
-                    background_mode = _select_background_mode(config)
+                    _kws_m = _script_to_visual_keywords(script)
+                    _forced_bg_manual = _infer_background_mode_by_content(_meta, texts, _kws_m)
+                    background_mode = _select_background_mode(
+                        config,
+                        meta=_meta,
+                        texts=texts,
+                        visual_keywords=_kws_m,
+                    )
                     gen_bg_manual = _get_generated_bg_paths(config, len(texts))
                     if gen_bg_manual:
                         background_mode = "image"
                         bg_imgs_manual = gen_bg_manual
                         _telemetry_log("수동 렌더링: 생성 배경 이미지 사용", config)
                     elif background_mode == "minecraft":
+                        if _forced_bg_manual:
+                            _telemetry_log("수동 렌더링: 콘텐츠 규칙으로 Minecraft 선택", config)
                         _status_update(progress, status_box, 0.25, "배경 영상 다운로드 중 (Minecraft Parkour)")
                         _bg_dir_m = os.path.join(config.assets_dir, "backgrounds")
-                        _mc_m = fetch_youtube_minecraft_parkour_video(_bg_dir_m, config.width, config.height)
+                        _mc_m = fetch_youtube_minecraft_parkour_video(
+                            _bg_dir_m,
+                            config.width,
+                            config.height,
+                            config=config,
+                        )
                         if _mc_m:
                             bg_vids_manual = [_mc_m] * len(texts)
                             placeholder = _ensure_placeholder_image(config)
@@ -5398,7 +5534,6 @@ def run_streamlit_app() -> None:
                             _ui_warning("Minecraft 다운로드 실패 — 이미지로 대체", True)
                     if background_mode == "image":
                         if config.pixabay_api_key or config.pexels_api_key:
-                            _kws_m = _script_to_visual_keywords(script)
                             bg_imgs_manual = fetch_segment_images(config, _kws_m)
                         else:
                             placeholder = _ensure_placeholder_image(config)
@@ -6088,6 +6223,8 @@ def run_streamlit_app() -> None:
         if st.button("🎵 Pixabay BGM 테스트"):
             if not config.pixabay_api_key:
                 st.error("PIXABAY_API_KEY가 없습니다.")
+            elif not getattr(config, "pixabay_bgm_enabled", False):
+                st.warning("PIXABAY_BGM_ENABLED=false 입니다. true로 바꾼 뒤 테스트하세요.")
             else:
                 test_path = fetch_bgm_from_pixabay(
                     api_key=config.pixabay_api_key,
@@ -6192,14 +6329,24 @@ def run_batch(count: int, seed: str = "", beats: int = 7) -> None:
         # 배경 선택: Minecraft vs 이미지
         bg_vids_b: List[Optional[str]] = [None] * len(texts)
         bg_imgs_b: List[Optional[str]] = [None] * len(texts)
-        background_mode = _select_background_mode(config)
+        background_mode = _select_background_mode(
+            config,
+            meta=_meta_b,
+            texts=texts,
+            visual_keywords=visual_kws,
+        )
         gen_bg_b = _get_generated_bg_paths(config, len(texts))
         if gen_bg_b:
             background_mode = "image"
             bg_imgs_b = gen_bg_b
         elif background_mode == "minecraft":
             _bg_dir = os.path.join(config.assets_dir, "backgrounds")
-            _mc_b = fetch_youtube_minecraft_parkour_video(_bg_dir, config.width, config.height)
+            _mc_b = fetch_youtube_minecraft_parkour_video(
+                _bg_dir,
+                config.width,
+                config.height,
+                config=config,
+            )
             if _mc_b:
                 bg_vids_b = [_mc_b] * len(texts)
                 placeholder = _ensure_placeholder_image(config)
