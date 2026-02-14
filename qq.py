@@ -2455,6 +2455,67 @@ def _pick_thumbnail_text(meta: Optional[Dict[str, Any]], texts: List[str]) -> st
     return ""
 
 
+def _extract_video_frame_image(
+    video_path: str,
+    output_path: str,
+    at_ratio: float = 0.2,
+) -> Optional[str]:
+    """
+    렌더링된 영상에서 프레임을 추출해 썸네일 원본으로 사용.
+    """
+    if not MOVIEPY_AVAILABLE or not VideoFileClip or not Image:
+        return None
+    if not video_path or not os.path.exists(video_path):
+        return None
+    clip = None
+    try:
+        clip = VideoFileClip(video_path)
+        duration = float(clip.duration or 0.0)
+        if duration <= 0:
+            return None
+        t = min(max(0.4, duration * at_ratio), max(0.4, duration - 0.4))
+        frame = clip.get_frame(t)
+        image = Image.fromarray(frame).convert("RGB")
+        os.makedirs(os.path.dirname(output_path) or ".", exist_ok=True)
+        image.save(output_path, "JPEG", quality=92, optimize=True)
+        return output_path
+    except Exception:
+        return None
+    finally:
+        try:
+            if clip:
+                clip.close()
+        except Exception:
+            pass
+
+
+def _pick_thumbnail_source(
+    config: AppConfig,
+    bg_image_paths: List[Optional[str]],
+    rendered_video_path: str,
+    frame_name: str,
+) -> str:
+    """
+    썸네일 소스 우선순위:
+    1) 실제 배경 이미지(placeholder 제외)
+    2) 렌더링 영상 프레임 추출 이미지
+    3) placeholder
+    """
+    placeholder = _ensure_placeholder_image(config)
+    placeholder_abs = os.path.abspath(placeholder)
+    for path in (bg_image_paths or []):
+        if not path or not os.path.exists(path):
+            continue
+        if os.path.abspath(path) == placeholder_abs:
+            continue
+        return path
+    frame_path = os.path.join(config.output_dir, frame_name)
+    extracted = _extract_video_frame_image(rendered_video_path, frame_path)
+    if extracted and os.path.exists(extracted):
+        return extracted
+    return placeholder
+
+
 def _apply_korean_template(image: Image.Image, canvas_width: int, canvas_height: int) -> Image.Image:
     """한국형 쇼츠 템플릿 느낌의 오버레이 (상·하단 그라디언트 + 얇은 프레임)."""
     overlay = Image.new("RGBA", (canvas_width, canvas_height), (0, 0, 0, 0))
@@ -5457,9 +5518,12 @@ def _auto_jp_flow(
     thumb_path = ""
     if config.thumbnail_enabled:
         try:
-            thumb_src = next((p for p in bg_image_paths if p), None)
-            if not thumb_src:
-                thumb_src = _ensure_placeholder_image(config)
+            thumb_src = _pick_thumbnail_source(
+                config=config,
+                bg_image_paths=bg_image_paths,
+                rendered_video_path=output_path,
+                frame_name=f"thumb_frame_{now}.jpg",
+            )
             thumb_path = os.path.join(config.output_dir, f"thumb_{now}.jpg")
             thumb_text = _pick_thumbnail_text(meta, texts)
             generate_thumbnail_image(
@@ -6033,9 +6097,12 @@ def run_streamlit_app() -> None:
                     thumb_path = ""
                     if config.thumbnail_enabled:
                         try:
-                            thumb_src = next((p for p in bg_imgs_manual if p), None)
-                            if not thumb_src:
-                                thumb_src = _ensure_placeholder_image(config)
+                            thumb_src = _pick_thumbnail_source(
+                                config=config,
+                                bg_image_paths=bg_imgs_manual,
+                                rendered_video_path=output_path,
+                                frame_name=f"thumb_frame_{now}.jpg",
+                            )
                             thumb_path = os.path.join(config.output_dir, f"thumb_{now}.jpg")
                             thumb_text = _pick_thumbnail_text(_meta, texts)
                             generate_thumbnail_image(
@@ -6887,9 +6954,12 @@ def run_batch(count: int, seed: str = "", beats: int = 7) -> None:
         thumb_path = ""
         if config.thumbnail_enabled:
             try:
-                thumb_src = next((p for p in bg_imgs_b if p), None)
-                if not thumb_src:
-                    thumb_src = _ensure_placeholder_image(config)
+                thumb_src = _pick_thumbnail_source(
+                    config=config,
+                    bg_image_paths=bg_imgs_b,
+                    rendered_video_path=output_path,
+                    frame_name=f"thumb_frame_{now}_{index}.jpg",
+                )
                 thumb_path = os.path.join(config.output_dir, f"thumb_{now}_{index}.jpg")
                 thumb_text = _pick_thumbnail_text(_meta_b, texts)
                 generate_thumbnail_image(
