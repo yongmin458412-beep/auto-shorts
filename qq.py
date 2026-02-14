@@ -2708,11 +2708,12 @@ def _apply_asmr_voice_filter(audio_path: str) -> str:
         f"asmr_{os.path.basename(audio_path)}",
     )
     filt = (
-        "highpass=f=170,"
-        "lowpass=f=3600,"
-        "acompressor=threshold=-26dB:ratio=2.8:attack=18:release=240,"
-        "aecho=0.6:0.25:18:0.12,"
-        "volume=0.75"
+        "highpass=f=150,"
+        "lowpass=f=4800,"
+        "acompressor=threshold=-28dB:ratio=3.2:attack=12:release=160:makeup=8,"
+        "equalizer=f=3000:t=q:w=1.2:g=3.0,"
+        "volume=1.18,"
+        "alimiter=limit=0.92"
     )
     if _apply_ffmpeg_audio_filter(audio_path, filtered, filt):
         try:
@@ -3459,7 +3460,7 @@ def _draw_fixed_template_title(
         return image
     max_w = max(80, int((right - left) * 0.95))
     # 요청사항: 제목은 한 줄, 더 작고 굵게
-    font_size = max(20, int(canvas_width * 0.052))
+    font_size = max(18, int(canvas_width * 0.040))
     line = text.replace("\n", " ").strip()
     for _ in range(18):
         font = _load_font(font_path, font_size)
@@ -3502,7 +3503,7 @@ def _draw_fixed_template_title(
             line,
             font=font,
             fill=(20, 20, 20, 245),
-            stroke_width=4,
+            stroke_width=5,
             stroke_fill=(255, 255, 255, 210),
         )
         y += line_h
@@ -5776,25 +5777,29 @@ def render_video(
         _ending_asset = ending_asset_path if _is_last_segment else ""
         _subtitle_top_override: Optional[int] = None
         if use_fixed_template_layout:
-            if template_subtitle_rect:
-                _subtitle_top_override = int(template_subtitle_rect[1])
+            media_bottom = 0
+            if template_content_rect:
+                c_left, c_top, c_right, c_bottom = template_content_rect
+                rect_w = max(40, c_right - c_left)
+                rect_h = max(40, c_bottom - c_top)
+                side = min(rect_w, rect_h)
+                media_top = c_top + max(0, (rect_h - side) // 2)
+                media_bottom = media_top + side
             else:
-                if template_content_rect:
-                    c_left, c_top, c_right, c_bottom = template_content_rect
-                    rect_w = max(40, c_right - c_left)
-                    rect_h = max(40, c_bottom - c_top)
-                    side = min(rect_w, rect_h)
-                    media_top = c_top + max(0, (rect_h - side) // 2)
-                else:
-                    scale = float(getattr(config, "fixed_template_content_scale", 0.70) or 0.70)
-                    scale = max(0.45, min(0.9, scale))
-                    side = int(min(W, H) * scale)
-                    side = max(220, min(side, min(W, H) - 24))
-                    center_y_ratio = float(getattr(config, "fixed_template_center_y_ratio", 0.68) or 0.68)
-                    center_y = int(H * max(0.45, min(0.85, center_y_ratio)))
-                    media_top = max(int(H * 0.42), min(H - side - 12, center_y - side // 2))
-                margin = max(8, int(H * 0.012))
-                _subtitle_top_override = int(media_top + side + margin)
+                scale = float(getattr(config, "fixed_template_content_scale", 0.70) or 0.70)
+                scale = max(0.45, min(0.9, scale))
+                side = int(min(W, H) * scale)
+                side = max(220, min(side, min(W, H) - 24))
+                center_y_ratio = float(getattr(config, "fixed_template_center_y_ratio", 0.68) or 0.68)
+                center_y = int(H * max(0.45, min(0.85, center_y_ratio)))
+                media_top = max(int(H * 0.42), min(H - side - 12, center_y - side // 2))
+                media_bottom = media_top + side
+            margin = max(10, int(H * 0.014))
+            min_subtitle_top = int(media_bottom + margin)
+            if template_subtitle_rect:
+                _subtitle_top_override = max(int(template_subtitle_rect[1]), min_subtitle_top)
+            else:
+                _subtitle_top_override = min_subtitle_top
 
         def _render_frame(
             get_frame,
